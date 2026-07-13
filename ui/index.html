@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8" />
+  <title>Engine Wallpaper</title>
+  <link rel="stylesheet" href="styles.css?v=2" />
+</head>
+<body>
+
+<!-- Custom titlebar -->
+<div id="titlebar">
+  <span class="app-name">⚡ Engine Wallpaper</span>
+  <button class="win-btn" onclick="ipc('window-minimize')">─</button>
+  <button class="win-btn" onclick="ipc('window-maximize')">□</button>
+  <button class="win-btn close" onclick="ipc('window-close')">✕</button>
+</div>
+
+<div id="app">
+  <!-- Sidebar -->
+  <nav id="sidebar">
+    <div class="nav-item active" data-panel="library"><span class="nav-icon">🖼️</span> Biblioteca</div>
+    <div class="nav-item" data-panel="playlist"><span class="nav-icon">▶️</span> Playlist</div>
+    <div class="nav-item" data-panel="downloader"><span class="nav-icon">⬇️</span> Baixar</div>
+    <div class="nav-item" data-panel="settings"><span class="nav-icon">⚙️</span> Configurações</div>
+  </nav>
+
+  <div id="content">
+
+    <!-- ===== LIBRARY ===== -->
+    <div class="panel active" id="panel-library">
+      <div class="panel-header">
+        <h2>Biblioteca</h2>
+        <div class="search-wrap">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="search-input" placeholder="Buscar..." />
+        </div>
+        <button class="btn btn-primary"   id="btn-add-video">🎬</button>
+        <button class="btn btn-secondary" id="btn-add-image">🖼️</button>
+        <button class="btn btn-secondary" id="btn-add-url">🌐</button>
+        <button class="btn btn-secondary" id="btn-add-scene">✨</button>
+        <button class="btn btn-steam"     id="btn-add-steam">🎮 Steam</button>
+      </div>
+      <div id="monitor-target-bar" class="monitor-target-bar" style="display:none">
+        <span id="monitor-target-label">Aplicando no Monitor 1</span>
+        <button class="btn btn-secondary btn-xs" id="btn-clear-monitor-target">Todos</button>
+      </div>
+      <div id="wallpaper-grid">
+        <div class="empty-state" id="empty-state">
+          <div class="empty-icon">🎨</div>
+          <p>Nenhum wallpaper na biblioteca</p>
+          <small>Adicione um vídeo, imagem, URL ou cena animada</small>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== PLAYLIST ===== -->
+    <div class="panel" id="panel-playlist">
+      <div class="panel-header"><h2>Playlist</h2></div>
+      <div class="playlist-body">
+        <div class="setting-row">
+          <div><div class="setting-label">Ativar playlist</div><div class="setting-desc">Alternar wallpapers automaticamente</div></div>
+          <label class="toggle"><input type="checkbox" id="pl-enabled" /><div class="toggle-slider"></div></label>
+        </div>
+        <div class="setting-row">
+          <div><div class="setting-label">Intervalo</div><div class="setting-desc">Tempo entre cada wallpaper</div></div>
+          <div class="range-row" style="width:200px">
+            <input type="range" id="pl-interval" min="5" max="3600" step="5" value="30" />
+            <span class="range-val" id="pl-interval-val">30s</span>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div><div class="setting-label">Aleatório</div><div class="setting-desc">Ordem aleatória na playlist</div></div>
+          <label class="toggle"><input type="checkbox" id="pl-shuffle" /><div class="toggle-slider"></div></label>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== WORKSHOP STORE ===== -->
+    <div class="panel" id="panel-downloader">
+      <div class="panel-header" style="flex-shrink:0;">
+        <h2>🎮 Workshop</h2>
+        <div class="search-wrap">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="ws-search" placeholder="Buscar wallpapers..." />
+        </div>
+        <select id="ws-sort" class="btn btn-secondary" style="padding:5px 8px; font-size:12px; background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px;">
+          <option value="trend">🔥 Em alta</option>
+          <option value="mostrecent">🆕 Recentes</option>
+          <option value="totaluniquesubscribers">⭐ Populares</option>
+        </select>
+        <button class="btn btn-primary" id="ws-refresh">🔄 Atualizar</button>
+      </div>
+      <div id="ws-grid" style="flex:1; overflow-y:auto; padding:14px 16px; display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px; align-content:start;">
+        <div class="empty-state" id="ws-empty">
+          <div class="empty-icon">🌐</div>
+          <p>Carregando wallpapers da Steam...</p>
+          <small>Aguarde enquanto buscamos os melhores wallpapers para você</small>
+        </div>
+      </div>
+      <div id="ws-status-bar" style="display:none; padding:10px; font-weight:bold; font-size:13px; text-align:center;">
+        Iniciando download...
+      </div>
+    </div>
+
+    <!-- ===== SETTINGS ===== -->
+    <div class="panel" id="panel-settings">
+      <div class="panel-header"><h2>Configurações</h2></div>
+      <div class="settings-body">
+
+        <div class="settings-section-title">Áudio</div>
+        <div class="setting-row">
+          <div><div class="setting-label">Volume do vídeo</div><div class="setting-desc">Volume padrão de wallpapers em vídeo</div></div>
+          <div class="range-row" style="width:200px">
+            <input type="range" id="set-volume" min="0" max="100" value="50" />
+            <span class="range-val" id="set-volume-val">50%</span>
+          </div>
+        </div>
+
+        <div class="settings-section-title">Comportamento</div>
+        <div class="setting-row">
+          <div><div class="setting-label">Pausar ao fullscreen</div><div class="setting-desc">Pausa o wallpaper quando um app cobre a tela</div></div>
+          <label class="toggle"><input type="checkbox" id="set-pause-fs" checked /><div class="toggle-slider"></div></label>
+        </div>
+        <div class="setting-row">
+          <div><div class="setting-label">Mutar ao fullscreen</div><div class="setting-desc">Muta o áudio do wallpaper em apps fullscreen</div></div>
+          <label class="toggle"><input type="checkbox" id="set-mute-fs" /><div class="toggle-slider"></div></label>
+        </div>
+        <div class="setting-row">
+          <div><div class="setting-label">Iniciar com o Windows</div><div class="setting-desc">Abre o app automaticamente ao ligar o PC</div></div>
+          <label class="toggle"><input type="checkbox" id="set-startup" /><div class="toggle-slider"></div></label>
+        </div>
+
+        <div class="settings-section-title">Monitores</div>
+        <div class="setting-desc" style="padding:0 0 10px">Clique num monitor para direcionar o próximo wallpaper selecionado</div>
+        <div id="monitors-grid" class="monitors-grid"></div>
+
+        <div class="settings-section-title" style="margin-top:24px">Regras de Horário</div>
+        <div class="setting-desc" style="padding:0 0 10px">Troca wallpaper automaticamente no horário definido</div>
+        <div id="time-rules-list"></div>
+        <button class="btn btn-secondary" id="btn-add-time-rule" style="margin-top:10px">+ Adicionar regra</button>
+
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Now playing bar -->
+<div id="now-playing">
+  <div class="now-thumb" id="now-thumb">—</div>
+  <div class="now-info">
+    <div class="now-name" id="now-name">Nenhum wallpaper ativo</div>
+    <div class="now-type" id="now-type">–</div>
+  </div>
+  <div class="now-controls">
+    <button class="ctrl-btn" title="Anterior" onclick="app.prevWallpaper()">⏮</button>
+    <button class="ctrl-btn" title="Próximo"  onclick="app.nextWallpaper()">⏭</button>
+  </div>
+</div>
+
+<!-- ===== MODALS ===== -->
+
+<!-- Add Scene -->
+<div class="modal-backdrop" id="modal-scene">
+  <div class="modal">
+    <h3>Adicionar Cena Animada</h3>
+    <div class="scene-grid">
+      <div class="scene-option selected" data-scene="particles"><span class="scene-icon">✨</span><span class="scene-name">Partículas</span></div>
+      <div class="scene-option" data-scene="waves"><span class="scene-icon">🌊</span><span class="scene-name">Ondas</span></div>
+      <div class="scene-option" data-scene="matrix"><span class="scene-icon">💻</span><span class="scene-name">Matrix</span></div>
+      <div class="scene-option" data-scene="aurora"><span class="scene-icon">🌌</span><span class="scene-name">Aurora</span></div>
+      <div class="scene-option" data-scene="visualizer"><span class="scene-icon">🎵</span><span class="scene-name">Visualizador</span></div>
+    </div>
+    <div class="field"><label>Nome</label><input type="text" id="scene-name-input" placeholder="Minha cena" /></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-scene')">Cancelar</button>
+      <button class="btn btn-primary" id="btn-scene-add">Adicionar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add URL -->
+<div class="modal-backdrop" id="modal-url">
+  <div class="modal">
+    <h3>Adicionar Wallpaper de URL</h3>
+    <div class="field"><label>URL</label><input type="text" id="url-input" placeholder="https://..." /></div>
+    <div class="field"><label>Nome</label><input type="text" id="url-name-input" placeholder="Meu wallpaper web" /></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-url')">Cancelar</button>
+      <button class="btn btn-primary" id="btn-url-add">Adicionar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Properties -->
+<div class="modal-backdrop" id="modal-props">
+  <div class="modal">
+    <h3 id="props-title">Propriedades</h3>
+    <div id="props-fields"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-props')">Cancelar</button>
+      <button class="btn btn-primary" id="btn-props-save">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Steam Import -->
+<div class="modal-backdrop" id="modal-steam">
+  <div class="modal modal-steam">
+    <div class="steam-modal-header">
+      <h3>🎮 Importar do Wallpaper Engine</h3>
+      <button class="btn btn-secondary btn-xs" id="btn-steam-custom-dir" style="margin-left:auto; margin-right:10px;">Procurar pasta manual...</button>
+      <button class="win-btn" id="btn-steam-close">✕</button>
+    </div>
+    <div id="steam-status" class="steam-status">Procurando...</div>
+    <div id="steam-list"   class="steam-list"></div>
+    <div class="steam-footer" id="steam-footer">
+      <span id="steam-count" class="steam-count-info"></span>
+      <button class="btn btn-secondary" id="btn-steam-selectall">Selecionar Tudo</button>
+      <button class="btn btn-primary"   id="btn-steam-import" disabled>Importar</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- Add Time Rule -->
+<div class="modal-backdrop" id="modal-time-rule">
+  <div class="modal">
+    <h3>Adicionar Regra de Horário</h3>
+    <div class="field"><label>Horário</label><input type="time" id="tr-time" value="08:00" /></div>
+    <div class="field">
+      <label>Wallpaper</label>
+      <select id="tr-wallpaper"></select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-time-rule')">Cancelar</button>
+      <button class="btn btn-primary" id="btn-tr-add">Adicionar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Steam Login -->
+<div class="modal-backdrop" id="modal-steam-login">
+  <div class="modal" style="width:400px">
+    <h3>🔑 Login Steam necessário</h3>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:14px">O Wallpaper Engine exige que você possua o jogo.<br>Faça login com sua conta Steam para continuar.</p>
+    <div class="field"><label>Usuário Steam</label><input type="text" id="sl-user" placeholder="seu_usuario" autocomplete="username" /></div>
+    <div class="field"><label>Senha</label><input type="password" id="sl-pass" placeholder="••••••••" autocomplete="current-password" /></div>
+    <div class="field" id="sl-2fa-wrap" style="display:none"><label>Código Steam Guard (2FA)</label><input type="text" id="sl-2fa" placeholder="XXXXX" maxlength="8" /></div>
+    <p id="sl-note" style="font-size:11px;color:var(--text2);margin-bottom:4px">Suas credenciais são enviadas apenas ao SteamCMD local e não são armazenadas.</p>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-steam-login')">Cancelar</button>
+      <button class="btn btn-primary" id="btn-sl-login">Baixar com esta conta</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

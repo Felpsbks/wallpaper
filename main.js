@@ -1,0 +1,735 @@
+const { app, BrowserWindow, ipcMain, Tray, Menu, dialog, screen, nativeImage } = require('electron');
+try { require('electron-reload')(__dirname); } catch (_) {}
+const path       = require('path');
+const fs         = require('fs');
+const { execSync } = require('child_process');
+const Store      = require('./src/store');
+const Playlist   = require('./src/playlist');
+
+let controlWin = null;
+let tray       = null;
+const store    = new Store();
+const playlist = new Playlist(store);
+let _pendingWorkshopId = null;
+
+// Map of displayId -> BrowserWindow (wallpaper windows)
+const wallpaperWindows = new Map();
+
+app.commandLine.appendSwitch('disable-web-security');
+app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
+
+// ---- Wallpaper windows (one per display) ----
+function createWallpaperWindows() {
+  for (const display of screen.getAllDisplays()) {
+    spawnWallpaperWindow(display);
+  }
+
+  screen.on('display-added', (_, display) => spawnWallpaperWindow(display));
+  screen.on('display-removed', (_, display) => {
+    const win = wallpaperWindows.get(display.id);
+    if (win && !win.isDestroyed()) win.destroy();
+    wallpaperWindows.delete(display.id);
+  });
+}
+
+function spawnWallpaperWindow(display) {
+  const { bounds } = display;
+  const win = new BrowserWindow({
+    width: bounds.width, height: bounds.height,
+    x: bounds.x, y: bounds.y,
+    frame: false, transparent: true,
+    resizable: false, movable: false,
+    focusable: false, skipTaskbar: true, alwaysOnTop: false,
+    webPreferences: {
+      nodeIntegration: true, contextIsolation: false,
+      webviewTag: true, webSecurity: false,
+    },
+  });
+
+  win.loadFile(path.join(__dirname, 'wallpaper', 'index.html'));
+  win.setIgnoreMouseEvents(true);
+
+  win.webContents.on('did-finish-load', () => {
+    embedWallpaperBehindDesktop(win);
+
+    // Per-display wallpaper, fallback to global current
+    const displayWallpapers = store.get('displayWallpapers') || {};
+    const current = displayWallpapers[display.id] || store.get('current');
+    if (current) win.webContents.send('set-wallpaper', current);
+  });
+
+  wallpaperWindows.set(display.id, win);
+}
+
+function sendToAllWallpapers(channel, ...args) {
+  for (const win of wallpaperWindows.values()) {
+    if (!win.isDestroyed()) win.webContents.send(channel, ...args);
+  }
+}
+
+// ---- Control panel ----
+function createControlWindow() {
+  const iconPath = path.join(__dirname, 'assets', 'icon.png');
+  controlWin = new BrowserWindow({
+    width: 980, height: 680,
+    minWidth: 800, minHeight: 500,
+    frame: false, titleBarStyle: 'hidden',
+    backgroundColor: '#0d0d0d',
+    icon: fs.existsSync(iconPath) ? iconPath : undefined,
+    show: false,
+    webPreferences: { nodeIntegration: true, contextIsolation: false, webviewTag: true },
+  });
+
+  controlWin.loadFile(path.join(__dirname, 'ui', 'index.html'));
+  controlWin.once('ready-to-show', () => controlWin.show());
+  controlWin.on('close', (e) => { e.preventDefault(); controlWin.hide(); });
+
+  controlWin.webContents.session.on('will-download', (_, item) => {
+    const fname = item.getFilename();
+    if (!fname.endsWith('.zip') && !item.getMimeType().includes('zip')) return;
+
+    const wsId = _pendingWorkshopId || Date.now().toString();
+    _pendingWorkshopId = null;
+
+    const dlPath    = path.join(app.getPath('userData'), 'downloads', wsId + '.zip');
+    const extractDir = path.join(app.getPath('userData'), 'wallpapers', wsId);
+    fs.mkdirSync(path.dirname(dlPath), { recursive: true });
+    fs.mkdirSync(extractDir, { recursive: true });
+    item.setSavePath(dlPath);
+
+    item.on('updated', (_, state) => {
+      if (state === 'progressing' && !item.isPaused()) {
+        const total = item.getTotalBytes();
+        controlWin.webContents.send('download-progress', { state: 'progress', pct: total > 0 ? item.getReceivedBytes() / total : 0 });
+      }
+    });
+
+    item.once('done', (_, state) => {
+      if (state !== 'completed') {
+        controlWin.webContents.send('download-progress', { state: 'error', msg: 'Download cancelado ou falhou.' });
+        return;
+      }
+      try {
+        const AdmZip = require('adm-zip');
+        const zip = new AdmZip(dlPath);
+        zip.extractAllTo(extractDir, true);
+        try { fs.unlinkSync(dlPath); } catch {}
+
+        let wpItem = parseSingleWorkshopItem(extractDir, wsId);
+        if (!wpItem) {
+          const sub = fs.readdirSync(extractDir).filter(f => fs.statSync(path.join(extractDir, f)).isDirectory());
+          if (sub.length > 0) wpItem = parseSingleWorkshopItem(path.join(extractDir, sub[0]), wsId);
+        }
+        if (wpItem) {
+          const library = store.get('library') || [];
+          wpItem.id = Date.now().toString();
+          library.push(wpItem);
+          store.set('library', library);
+          controlWin.webContents.send('download-progress', { state: 'completed', wallpaper: wpItem });
+        } else {
+          controlWin.webContents.send('download-progress', { state: 'error', msg: 'Formato inválido no ZIP baixado.' });
+        }
+      } catch (err) {
+        controlWin.webContents.send('download-progress', { state: 'error', msg: err.message });
+      }
+    });
+  });
+}
+
+// ---- Win32 WorkerW embedding ----
+function embedWallpaperBehindDesktop(win) {
+  if (process.platform !== 'win32') return;
+  try {
+    const { embedBehindDesktop } = require('./src/workerw');
+    const hwnd = win.getNativeWindowHandle();
+    if (!embedBehindDesktop(hwnd)) console.warn('[main] WorkerW embedding failed');
+  } catch (err) {
+    console.error('[main] WorkerW error:', err.message);
+  }
+}
+
+// ---- System tray ----
+function createTray() {
+  const iconPath = path.join(__dirname, 'assets', 'tray.png');
+  const icon = fs.existsSync(iconPath)
+    ? nativeImage.createFromPath(iconPath)
+    : nativeImage.createEmpty();
+
+  tray = new Tray(icon);
+  tray.setToolTip('Engine Wallpaper');
+
+  const menu = Menu.buildFromTemplate([
+    { label: 'Abrir painel',       click: () => { controlWin.show(); controlWin.focus(); } },
+    { type: 'separator' },
+    { label: 'Próximo wallpaper',  click: () => playlist.next() },
+    { label: 'Pausar',             click: () => sendToAllWallpapers('pause') },
+    { type: 'separator' },
+    { label: 'Sair',               click: () => app.exit(0) },
+  ]);
+  tray.setContextMenu(menu);
+  tray.on('double-click', () => { controlWin.show(); controlWin.focus(); });
+}
+
+// ---- Fullscreen monitor ----
+let _fullscreenState = false;
+let _fsTimer = null;
+
+function startFullscreenMonitor() {
+  _fsTimer = setInterval(() => {
+    const settings = store.get('settings') || {};
+    if (!settings.pauseOnFullscreen && !settings.muteOnFullscreen) return;
+    try {
+      const { isFullscreenAppRunning } = require('./src/fullscreen');
+      const isFs = isFullscreenAppRunning(screen.getAllDisplays());
+      if (isFs === _fullscreenState) return;
+      _fullscreenState = isFs;
+      const vol = (store.get('settings') || {}).volume ?? 50;
+      if (isFs) {
+        if (settings.pauseOnFullscreen) sendToAllWallpapers('pause');
+        if (settings.muteOnFullscreen)  sendToAllWallpapers('mute');
+      } else {
+        if (settings.pauseOnFullscreen) sendToAllWallpapers('resume');
+        if (settings.muteOnFullscreen)  sendToAllWallpapers('unmute', vol);
+      }
+    } catch {}
+  }, 2000);
+}
+
+// ---- Time-based switching ----
+let _timeTimer = null;
+let _lastAppliedTimeRule = null;
+
+function startTimeRulesMonitor() {
+  _timeTimer = setInterval(() => {
+    const rules = store.get('timeRules') || [];
+    if (!rules.length) return;
+
+    const now = new Date();
+    const hhmm = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+    const library = store.get('library') || [];
+
+    // Find the most recent rule that has passed
+    const sorted = [...rules].sort((a, b) => a.time.localeCompare(b.time));
+    let match = null;
+    for (const r of sorted) {
+      if (r.time <= hhmm) match = r;
+    }
+    if (!match) match = sorted[sorted.length - 1]; // wrap to last rule of previous day
+
+    if (!match || match.id === _lastAppliedTimeRule) return;
+    _lastAppliedTimeRule = match.id;
+
+    const wallpaper = library.find(w => w.id === match.wallpaperId);
+    if (!wallpaper) return;
+
+    store.set('current', wallpaper);
+    sendToAllWallpapers('set-wallpaper', wallpaper);
+    if (controlWin && !controlWin.isDestroyed()) {
+      controlWin.webContents.send('wallpaper-changed', wallpaper);
+    }
+  }, 60000);
+}
+
+// ---- IPC Handlers ----
+ipcMain.handle('get-library',          () => store.get('library') || []);
+ipcMain.handle('get-current',          () => store.get('current') || null);
+ipcMain.handle('get-playlist-config',  () => store.get('playlistConfig') || { enabled: false, interval: 30, shuffle: false });
+ipcMain.handle('get-settings',         () => store.get('settings') || { volume: 50, pauseOnFullscreen: true, muteOnFullscreen: false, startWithWindows: false });
+ipcMain.handle('get-displays',         () => screen.getAllDisplays().map(d => ({ id: d.id, bounds: d.bounds, label: d.label || null })));
+ipcMain.handle('get-display-wallpapers', () => store.get('displayWallpapers') || {});
+ipcMain.handle('get-time-rules',       () => store.get('timeRules') || []);
+
+ipcMain.handle('set-wallpaper', (_, wallpaper, displayId) => {
+  if (displayId) {
+    const win = wallpaperWindows.get(displayId);
+    if (win && !win.isDestroyed()) win.webContents.send('set-wallpaper', wallpaper);
+    const dw = store.get('displayWallpapers') || {};
+    dw[displayId] = wallpaper;
+    store.set('displayWallpapers', dw);
+  } else {
+    store.set('current', wallpaper);
+    sendToAllWallpapers('set-wallpaper', wallpaper);
+  }
+  return true;
+});
+
+ipcMain.handle('add-wallpaper', (_, wallpaper) => {
+  const library = store.get('library') || [];
+  wallpaper.id = Date.now().toString();
+  library.push(wallpaper);
+  store.set('library', library);
+  return wallpaper;
+});
+
+ipcMain.handle('update-wallpaper', (_, wallpaper) => {
+  const library = store.get('library') || [];
+  const idx = library.findIndex(w => w.id === wallpaper.id);
+  if (idx !== -1) { library[idx] = wallpaper; store.set('library', library); }
+  // Re-apply if it's currently playing
+  const current = store.get('current');
+  if (current && current.id === wallpaper.id) {
+    store.set('current', wallpaper);
+    sendToAllWallpapers('set-wallpaper', wallpaper);
+  }
+  return wallpaper;
+});
+
+ipcMain.handle('remove-wallpaper', (_, id) => {
+  const library = (store.get('library') || []).filter(w => w.id !== id);
+  store.set('library', library);
+  return true;
+});
+
+ipcMain.handle('set-playlist-config', (_, config) => {
+  store.set('playlistConfig', config);
+  playlist.configure(config);
+  return true;
+});
+
+ipcMain.handle('set-settings', (_, settings) => {
+  store.set('settings', settings);
+  sendToAllWallpapers('update-settings', settings);
+  // Start with Windows
+  try {
+    app.setLoginItemSettings({ openAtLogin: !!settings.startWithWindows, path: process.execPath });
+  } catch {}
+  return true;
+});
+
+ipcMain.handle('set-time-rules', (_, rules) => {
+  store.set('timeRules', rules);
+  _lastAppliedTimeRule = null;
+  return true;
+});
+
+ipcMain.handle('open-file-dialog', async (_, options) => dialog.showOpenDialog(controlWin, options));
+
+ipcMain.handle('window-minimize', () => controlWin?.minimize());
+ipcMain.handle('window-maximize', () => controlWin?.isMaximized() ? controlWin.unmaximize() : controlWin?.maximize());
+ipcMain.handle('window-close',    () => controlWin?.hide());
+
+// ---- Steam Workshop scanner ----
+function getSteamPath() {
+  for (const key of ['HKLM\\SOFTWARE\\WOW6432Node\\Valve\\Steam', 'HKLM\\SOFTWARE\\Valve\\Steam']) {
+    try {
+      const out = execSync(`reg query "${key}" /v InstallPath`, { encoding: 'utf8' });
+      const m = out.match(/InstallPath\s+REG_SZ\s+(.+)/);
+      if (m) return m[1].trim();
+    } catch {}
+  }
+  for (const p of ['C:\\Program Files (x86)\\Steam', 'C:\\Program Files\\Steam']) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+function getWorkshopDirs(steamPath) {
+  const dirs = [];
+  const tryAdd = (base) => {
+    const p = path.join(base, 'steamapps', 'workshop', 'content', '431960');
+    if (fs.existsSync(p)) dirs.push(p);
+  };
+  tryAdd(steamPath);
+  const vdf = path.join(steamPath, 'steamapps', 'libraryfolders.vdf');
+  if (fs.existsSync(vdf)) {
+    const src = fs.readFileSync(vdf, 'utf-8');
+    for (const [, p] of src.matchAll(/"path"\s+"([^"]+)"/g)) tryAdd(p.replace(/\\\\/g, '\\'));
+  }
+  return dirs;
+}
+
+function parseSingleWorkshopItem(wpDir, id) {
+  const pf = path.join(wpDir, 'project.json');
+  if (!fs.existsSync(pf)) return null;
+  let project; try { project = JSON.parse(fs.readFileSync(pf, 'utf-8')); } catch { return null; }
+  const type = (project.type || '').toLowerCase();
+  if (type !== 'video' && type !== 'web' && type !== 'scene') return null;
+
+  let preview = null;
+  for (const n of [project.preview, 'preview.gif', 'preview.jpg', 'preview.png'].filter(Boolean)) {
+    const pp = path.join(wpDir, n);
+    if (fs.existsSync(pp)) { preview = pp; break; }
+  }
+
+  if (type === 'scene') {
+    if (!preview) return null;
+    return {
+      workshopId: id,
+      name: project.title || `Workshop ${id}`,
+      type: 'scene',
+      src: preview,
+      preview,
+      tags: Array.isArray(project.tags) ? project.tags : [],
+    };
+  }
+
+  if (!project.file) return null;
+  const filePath = path.join(wpDir, project.file);
+  if (!fs.existsSync(filePath)) return null;
+  return {
+    workshopId: id,
+    name: project.title || `Workshop ${id}`,
+    type: type === 'video' ? 'video' : 'url',
+    src: type === 'video' ? filePath : 'file:///' + filePath.replace(/\\/g, '/'),
+    preview,
+    tags: Array.isArray(project.tags) ? project.tags : [],
+  };
+}
+
+function parseWorkshopDirectory(dir) {
+  const wallpapers = [];
+  let ids; try { ids = fs.readdirSync(dir); } catch { return wallpapers; }
+  for (const id of ids) {
+    const wpDir = path.join(dir, id);
+    try { if (!fs.statSync(wpDir).isDirectory()) continue; } catch { continue; }
+    const item = parseSingleWorkshopItem(wpDir, id);
+    if (item) wallpapers.push(item);
+  }
+  return wallpapers;
+}
+
+ipcMain.handle('scan-steam-workshop', () => {
+  const steamPath = getSteamPath();
+  if (!steamPath) return { error: 'Steam não encontrado no sistema.', wallpapers: [] };
+  const dirs = getWorkshopDirs(steamPath);
+  if (!dirs.length) return { error: 'Pasta do Workshop não encontrada. Wallpaper Engine está instalado?', wallpapers: [] };
+
+  let wallpapers = [];
+  for (const dir of dirs) {
+    wallpapers = wallpapers.concat(parseWorkshopDirectory(dir));
+  }
+  return { wallpapers };
+});
+
+ipcMain.handle('scan-custom-workshop', (_, customDir) => {
+  if (!fs.existsSync(customDir)) return { error: 'Pasta inválida ou inexistente.', wallpapers: [] };
+  const wallpapers = parseWorkshopDirectory(customDir);
+  if (!wallpapers.length) return { error: 'Nenhum projeto encontrado nesta pasta.', wallpapers: [] };
+  return { wallpapers };
+});
+
+// ---- Workshop Store (browse + download) ----
+const https = require('https');
+
+function httpGet(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
+    }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return httpGet(res.headers.location).then(resolve).catch(reject);
+      }
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => resolve(data));
+    }).on('error', reject);
+  });
+}
+
+function httpPost(url, formData) {
+  return new Promise((resolve, reject) => {
+    const data = new URLSearchParams(formData).toString();
+    const parsed = new URL(url);
+    const req = https.request({
+      hostname: parsed.hostname, path: parsed.pathname, method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(data), 'User-Agent': 'Mozilla/5.0' },
+    }, (res) => {
+      let buf = '';
+      res.on('data', c => buf += c);
+      res.on('end', () => resolve(buf));
+    });
+    req.on('error', reject);
+    req.write(data);
+    req.end();
+  });
+}
+
+function httpPostJSON(url, body) {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const parsed = new URL(url);
+    const req = https.request({
+      hostname: parsed.hostname,
+      path: parsed.pathname + (parsed.search || ''),
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data),
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Origin': 'https://steamworkshopdownloader.io',
+        'Referer': 'https://steamworkshopdownloader.io/',
+        'Accept': 'application/json, text/plain, */*',
+      },
+    }, (res) => {
+      let buf = '';
+      res.on('data', c => buf += c);
+      res.on('end', () => resolve({ status: res.statusCode, body: buf }));
+    });
+    req.on('error', reject);
+    req.write(data);
+    req.end();
+  });
+}
+
+ipcMain.handle('browse-workshop', async (_, { sort, search, page }) => {
+  try {
+    // Step 1: Scrape the browse page to get workshop item IDs
+    let browseUrl = `https://steamcommunity.com/workshop/browse/?appid=431960&browsesort=${sort || 'trend'}&section=readytouseitems&actualsort=${sort || 'trend'}&p=${page || 1}`;
+    if (search) browseUrl += '&searchtext=' + encodeURIComponent(search);
+
+    const html = await httpGet(browseUrl);
+    const idPattern = /sharedfiles\/filedetails\/\?id=(\d+)/g;
+    const ids = new Set();
+    let m;
+    while ((m = idPattern.exec(html)) !== null) ids.add(m[1]);
+    const idList = [...ids];
+
+    if (idList.length === 0) return { items: [], total: 0 };
+
+    // Step 2: Get full details via Steam public API (no key needed)
+    const formData = { itemcount: idList.length };
+    idList.forEach((id, i) => { formData[`publishedfileids[${i}]`] = id; });
+    const detailJson = await httpPost('https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/', formData);
+    const details = JSON.parse(detailJson);
+
+    const items = (details.response?.publishedfiledetails || []).map(d => ({
+      workshopId: d.publishedfileid,
+      title: d.title || 'Sem título',
+      preview: d.preview_url || '',
+      description: (d.description || '').substring(0, 200),
+      tags: (d.tags || []).map(t => t.tag),
+      subscribers: d.subscriptions || 0,
+      views: d.views || 0,
+      favorited: d.favorited || 0,
+    }));
+
+    return { items, total: items.length };
+  } catch (e) {
+    console.error('[browse-workshop]', e.message);
+    return { items: [], total: 0, error: e.message };
+  }
+});
+
+// ---- SteamCMD helpers ----
+const { spawn } = require('child_process');
+
+function findSteamCMD() {
+  const candidates = [
+    path.join(app.getPath('userData'), 'steamcmd', 'steamcmd.exe'),
+    'C:\\SteamCMD\\steamcmd.exe',
+    'C:\\steamcmd\\steamcmd.exe',
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Steamcmd', 'steamcmd.exe'),
+    path.join(process.env.ProgramFiles || '', 'SteamCMD', 'steamcmd.exe'),
+  ];
+  return candidates.find(p => fs.existsSync(p)) || null;
+}
+
+async function ensureSteamCMD() {
+  const existing = findSteamCMD();
+  if (existing) return existing;
+
+  const steamcmdDir = path.join(app.getPath('userData'), 'steamcmd');
+  const steamcmdZip = path.join(steamcmdDir, 'steamcmd.zip');
+  const steamcmdExe = path.join(steamcmdDir, 'steamcmd.exe');
+  fs.mkdirSync(steamcmdDir, { recursive: true });
+
+  controlWin.webContents.send('download-progress', { state: 'preparing', name: 'Baixando SteamCMD (Valve)...' });
+
+  await new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(steamcmdZip);
+    https.get('https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip', res => {
+      res.pipe(file);
+      file.on('finish', () => file.close(resolve));
+    }).on('error', reject);
+  });
+
+  const AdmZip = require('adm-zip');
+  new AdmZip(steamcmdZip).extractAllTo(steamcmdDir, true);
+  try { fs.unlinkSync(steamcmdZip); } catch {}
+
+  // First run — let steamcmd update itself
+  controlWin.webContents.send('download-progress', { state: 'preparing', name: 'Inicializando SteamCMD...' });
+  await new Promise(resolve => spawn(steamcmdExe, ['+quit'], { cwd: steamcmdDir }).on('close', resolve));
+
+  return steamcmdExe;
+}
+
+ipcMain.handle('download-workshop-item', async (_, { workshopId, name }) => {
+  try {
+    controlWin.webContents.send('download-progress', { state: 'preparing', name });
+
+    // Step 1: check if Steam CDN provides a direct public URL for this item
+    let directUrl = null;
+    try {
+      const detRes = await httpPostJSON('https://steamworkshopdownloader.io/api/details/file',
+        [parseInt(workshopId, 10)]);
+      if (detRes.status === 200) {
+        const items = JSON.parse(detRes.body);
+        const det = items.find(d => String(d.publishedfileid) === String(workshopId));
+        if (det?.file_url) directUrl = det.file_url;
+      }
+    } catch {}
+
+    if (directUrl) {
+      _pendingWorkshopId = workshopId;
+      controlWin.webContents.downloadURL(directUrl);
+      return { ok: true };
+    }
+
+    // Step 2: use SteamCMD (anonymous — works for many paid game workshop items)
+    const steamcmdExe = await ensureSteamCMD();
+    const steamcmdDir = path.dirname(steamcmdExe);
+    const contentDir  = path.join(steamcmdDir, 'steamapps', 'workshop', 'content', '431960', workshopId);
+
+    controlWin.webContents.send('download-progress', { state: 'start', name });
+
+    return await new Promise(resolve => {
+      const proc = spawn(steamcmdExe, [
+        '+login', 'anonymous',
+        '+workshop_download_item', '431960', workshopId,
+        '+quit',
+      ], { cwd: steamcmdDir });
+
+      let output = '';
+      const onData = d => {
+        const t = d.toString();
+        output += t;
+        if (/Downloading item/i.test(t)) {
+          controlWin.webContents.send('download-progress', { state: 'progress', pct: 0.4 });
+        }
+      };
+      proc.stdout.on('data', onData);
+      proc.stderr.on('data', onData);
+
+      proc.on('close', () => {
+        const success = output.includes('Success') || (fs.existsSync(contentDir) && fs.readdirSync(contentDir).length > 0);
+        if (success) {
+          let wpItem = parseSingleWorkshopItem(contentDir, workshopId);
+          if (!wpItem) {
+            const subs = fs.existsSync(contentDir)
+              ? fs.readdirSync(contentDir).filter(f => fs.statSync(path.join(contentDir, f)).isDirectory())
+              : [];
+            if (subs.length) wpItem = parseSingleWorkshopItem(path.join(contentDir, subs[0]), workshopId);
+          }
+          if (wpItem) {
+            const library = store.get('library') || [];
+            wpItem.id = Date.now().toString();
+            library.push(wpItem);
+            store.set('library', library);
+            controlWin.webContents.send('download-progress', { state: 'completed', wallpaper: wpItem });
+            resolve({ ok: true });
+          } else {
+            controlWin.webContents.send('download-progress', { state: 'error', msg: 'Wallpaper baixado mas não reconhecido (pode ser .pkg — formato proprietário do WE).' });
+            resolve({ ok: false });
+          }
+        } else if (/failed \(Failure\)|no subscription|not subscribed|ERROR!/i.test(output)) {
+          // Download requires WE ownership — offer Steam login
+          controlWin.webContents.send('download-progress', {
+            state: 'needs-login',
+            workshopId,
+            name,
+          });
+          resolve({ ok: false, needsLogin: true });
+        } else {
+          controlWin.webContents.send('download-progress', { state: 'error', msg: 'Falha desconhecida no SteamCMD.' });
+          resolve({ ok: false });
+        }
+      });
+    });
+  } catch (err) {
+    controlWin.webContents.send('download-progress', { state: 'error', msg: err.message });
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('download-workshop-with-login', async (_, { workshopId, name, username, password, steamGuard }) => {
+  try {
+    controlWin.webContents.send('download-progress', { state: 'start', name });
+
+    const steamcmdExe = await ensureSteamCMD();
+    const steamcmdDir = path.dirname(steamcmdExe);
+    const contentDir  = path.join(steamcmdDir, 'steamapps', 'workshop', 'content', '431960', workshopId);
+
+    return await new Promise(resolve => {
+      const args = ['+login', username, password];
+      if (steamGuard) args.push('+set_steam_guard_code', steamGuard);
+      args.push('+workshop_download_item', '431960', workshopId, '+quit');
+
+      const proc = spawn(steamcmdExe, args, { cwd: steamcmdDir });
+
+      let output = '';
+      const onData = d => {
+        const t = d.toString();
+        output += t;
+        if (/Downloading item/i.test(t))
+          controlWin.webContents.send('download-progress', { state: 'progress', pct: 0.5 });
+      };
+      proc.stdout.on('data', onData);
+      proc.stderr.on('data', onData);
+
+      proc.on('close', () => {
+        const success = output.includes('Success') || (fs.existsSync(contentDir) && fs.readdirSync(contentDir).length > 0);
+        if (success) {
+          let wpItem = parseSingleWorkshopItem(contentDir, workshopId);
+          if (!wpItem) {
+            const subs = fs.existsSync(contentDir)
+              ? fs.readdirSync(contentDir).filter(f => fs.statSync(path.join(contentDir, f)).isDirectory())
+              : [];
+            if (subs.length) wpItem = parseSingleWorkshopItem(path.join(contentDir, subs[0]), workshopId);
+          }
+          if (wpItem) {
+            const library = store.get('library') || [];
+            wpItem.id = Date.now().toString();
+            library.push(wpItem);
+            store.set('library', library);
+            controlWin.webContents.send('download-progress', { state: 'completed', wallpaper: wpItem });
+            resolve({ ok: true });
+          } else {
+            controlWin.webContents.send('download-progress', { state: 'error', msg: 'Formato de wallpaper não reconhecido após download.' });
+            resolve({ ok: false });
+          }
+        } else if (/Two-factor|Steam Guard/i.test(output) && !output.includes('Success')) {
+          controlWin.webContents.send('download-progress', { state: 'needs-2fa', workshopId, name, username, password });
+          resolve({ ok: false });
+        } else if (/Invalid Password|Bad Password|failed to log/i.test(output)) {
+          controlWin.webContents.send('download-progress', { state: 'error', msg: 'Usuário ou senha incorretos.' });
+          resolve({ ok: false });
+        } else if (/failed \(Failure\)/i.test(output)) {
+          controlWin.webContents.send('download-progress', { state: 'error', msg: 'Download falhou. Verifique se você possui o Wallpaper Engine na sua conta Steam.' });
+          resolve({ ok: false });
+        } else {
+          controlWin.webContents.send('download-progress', { state: 'error', msg: 'Falha no login ou download.' });
+          resolve({ ok: false });
+        }
+      });
+    });
+  } catch (err) {
+    controlWin.webContents.send('download-progress', { state: 'error', msg: err.message });
+    return { ok: false };
+  }
+});
+
+// ---- Playlist ----
+playlist.on('change', (wallpaper) => {
+  store.set('current', wallpaper);
+  sendToAllWallpapers('set-wallpaper', wallpaper);
+  if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('wallpaper-changed', wallpaper);
+});
+
+// ---- Boot ----
+app.whenReady().then(() => {
+  createWallpaperWindows();
+  createControlWindow();
+  createTray();
+  playlist.start();
+  startFullscreenMonitor();
+  startTimeRulesMonitor();
+});
+
+app.on('window-all-closed', (e) => e.preventDefault());
+app.on('before-quit', () => {
+  tray?.destroy();
+  playlist.stop();
+  if (_fsTimer)   clearInterval(_fsTimer);
+  if (_timeTimer) clearInterval(_timeTimer);
+});

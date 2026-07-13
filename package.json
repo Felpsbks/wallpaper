@@ -1,0 +1,21 @@
+{
+  "name": "engine-wallpaper",
+  "version": "1.0.0",
+  "description": "Live wallpaper engine for Windows",
+  "main": "main.js",
+  "scripts": {
+    "start": "bin\\electron.exe",
+    "pack": "node scripts/pack.js",
+    "dev": "bin\\electron.exe .",
+    "icons": "node scripts/gen-icon.js",
+    "dist": "node scripts/gen-icon.js && node scripts/pack.js && node scripts/build-dist.js"
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.0",
+    "koffi": "^2.8.0",
+    "three": "0.148.0"
+  },
+  "devDependencies": {
+    "electron-reload": "^2.0.0-alpha.1"
+  }
+}
