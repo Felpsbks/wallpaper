@@ -168,8 +168,19 @@
         </div>
       </div>
 
-      <div id="ws-status-bar" style="display:none; padding:10px; font-weight:bold; font-size:13px; text-align:center;">
-        Iniciando download...
+      <div id="ws-status-bar" style="display:none; position:relative; overflow:hidden; padding:10px 14px; font-size:13px; font-weight:600;">
+        <div id="ws-progress-fill" style="position:absolute;top:0;left:0;height:100%;width:0%;background:rgba(255,255,255,0.12);transition:width 0.6s ease;pointer-events:none;"></div>
+        <span id="ws-status-text" style="position:relative;z-index:1;">Iniciando download...</span>
+        <span id="ws-status-detail" style="position:relative;z-index:1;float:right;opacity:0.8;font-weight:400;"></span>
+      </div>
+
+      <!-- Log panel -->
+      <div id="ws-log-bar" style="display:none; background:#111; border-top:1px solid #222; padding:6px 10px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <span style="font-size:11px;color:#666;font-family:monospace;">LOG</span>
+          <button onclick="document.getElementById('ws-log-bar').style.display='none'" style="background:none;border:none;color:#555;cursor:pointer;font-size:11px;">✕</button>
+        </div>
+        <div id="ws-log-lines" style="font-family:monospace;font-size:11px;color:#aaa;max-height:120px;overflow-y:auto;white-space:pre-wrap;"></div>
       </div>
     </div>
 
@@ -351,7 +362,7 @@
     <div class="field"><label>Usuário Steam</label><input type="text" id="sl-user" placeholder="seu_usuario" autocomplete="username" /></div>
     <div class="field"><label>Senha</label><input type="password" id="sl-pass" placeholder="••••••••" autocomplete="current-password" /></div>
     <div class="field" id="sl-2fa-wrap" style="display:none"><label>Código Steam Guard (2FA)</label><input type="text" id="sl-2fa" placeholder="XXXXX" maxlength="8" /></div>
-    <p id="sl-note" style="font-size:11px;color:var(--text2);margin-bottom:4px">Credenciais enviadas apenas ao SteamCMD local, não armazenadas.</p>
+    <p id="sl-note" style="font-size:11px;color:var(--text2);margin-bottom:4px">Credenciais salvas localmente no seu AppData para downloads automáticos.</p>
     <div class="modal-actions">
       <button class="btn btn-secondary" id="btn-sl-use-preview">🖼️ Usar preview</button>
       <button class="btn btn-secondary" id="btn-open-qr">📱 QR Code</button>

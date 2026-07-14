@@ -12,6 +12,14 @@ const store    = new Store();
 const playlist = new Playlist(store);
 let _pendingWorkshopId = null;
 
+function appLog(msg) {
+  const ts = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  console.log(`[${ts}] ${msg}`);
+  if (controlWin && !controlWin.isDestroyed()) {
+    controlWin.webContents.send('app-log', `[${ts}] ${msg}`);
+  }
+}
+
 // Map of displayId -> BrowserWindow (wallpaper windows)
 const wallpaperWindows = new Map();
 
@@ -585,7 +593,7 @@ ipcMain.handle('validate-steam-login', async (_, { username, password, steamGuar
       return { ok: false, msg: 'Usuário ou senha incorretos.' };
     }
     if (/Logged in OK|Waiting for user info.*OK/i.test(output)) {
-      store.set('steamAuth', { accountName: username });
+      store.set('steamAuth', { accountName: username, password });
       return { ok: true };
     }
     const tail = output.split('\n').filter(l => l.trim()).slice(-3).join(' | ');
@@ -645,10 +653,24 @@ function runSteamCMD(steamcmdExe, steamcmdDir, loginArgs, workshopId) {
     const args = [...loginArgs, '+workshop_download_item', '431960', workshopId, '+quit'];
     const proc = spawn(steamcmdExe, args, { cwd: steamcmdDir });
     let output = '';
+    let lastBytes = 0;
+    let lastTime = Date.now();
     const onData = d => {
       const t = d.toString(); output += t;
-      if (/Downloading item/i.test(t))
-        controlWin.webContents.send('download-progress', { state: 'progress', pct: 0.5 });
+      // SteamCMD outputs: "progress: 12.34 (123456 / 1000000)"
+      const m = t.match(/progress:\s*([\d.]+)\s*\(\s*(\d+)\s*\/\s*(\d+)\s*\)/);
+      if (m) {
+        const pct = parseFloat(m[1]) / 100;
+        const downloaded = parseInt(m[2]);
+        const total = parseInt(m[3]);
+        const now = Date.now();
+        const dt = (now - lastTime) / 1000;
+        const speed = dt > 0.1 ? Math.max(0, (downloaded - lastBytes) / dt) : 0;
+        lastBytes = downloaded; lastTime = now;
+        controlWin.webContents.send('download-progress', { state: 'progress', pct, downloaded, total, speed });
+      } else if (/Downloading item/i.test(t)) {
+        controlWin.webContents.send('download-progress', { state: 'progress', pct: 0.05, downloaded: 0, total: 0, speed: 0 });
+      }
     };
     proc.stdout.on('data', onData);
     proc.stderr.on('data', onData);
@@ -679,6 +701,7 @@ function importFromContentDir(contentDir, workshopId) {
 
 ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUrl, fileUrl }) => {
   try {
+    appLog(`Iniciando download: ${name} (ID: ${workshopId})`);
     controlWin.webContents.send('download-progress', { state: 'preparing', name });
 
     // Step 1: check for direct public URL
@@ -691,53 +714,67 @@ ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUr
         );
         const det = JSON.parse(detailJson).response?.publishedfiledetails?.[0];
         if (det?.file_url) directUrl = det.file_url;
-      } catch {}
+        appLog(`Steam API: file_url=${det?.file_url || '(vazio)'}`);
+      } catch (e) { appLog(`Steam API erro: ${e.message}`); }
     }
     if (directUrl) {
+      appLog(`URL direta encontrada, iniciando download via HTTP`);
       _pendingWorkshopId = workshopId;
       controlWin.webContents.downloadURL(directUrl);
       return { ok: true };
     }
 
+    appLog(`Sem URL direta — usando SteamCMD`);
     const steamcmdExe = await ensureSteamCMD();
     const steamcmdDir = path.dirname(steamcmdExe);
+    appLog(`SteamCMD: ${steamcmdExe}`);
 
     // Step 2: try anonymous
+    appLog(`Tentando login anônimo...`);
     controlWin.webContents.send('download-progress', { state: 'start', name });
     let result = await runSteamCMD(steamcmdExe, steamcmdDir, ['+login', 'anonymous'], workshopId);
+    appLog(`Anônimo: ok=${result.ok} | saída:\n${result.output.slice(-400)}`);
 
     // Step 3: try saved account (SteamCMD caches the session after first login with password)
     const needsAccountRegex = /failed \(Failure\)|no subscription|not subscribed|ERROR!|Invalid Password|Login Failure|Access Denied|not logged in/i;
     if (!result.ok) {
       const savedAuth = store.get('steamAuth');
+      appLog(`Anônimo falhou. Auth salvo: ${savedAuth ? savedAuth.accountName : 'nenhum'}`);
       if (savedAuth?.accountName) {
         controlWin.webContents.send('download-progress', { state: 'start', name: `${name} (${savedAuth.accountName})` });
-        // No password needed — SteamCMD uses its locally cached session from the first login
-        result = await runSteamCMD(steamcmdExe, steamcmdDir, ['+login', savedAuth.accountName], workshopId);
+        appLog(`Tentando login com conta: ${savedAuth.accountName}`);
+        const loginArgs = savedAuth.password
+          ? ['+login', savedAuth.accountName, savedAuth.password]
+          : ['+login', savedAuth.accountName];
+        result = await runSteamCMD(steamcmdExe, steamcmdDir, loginArgs, workshopId);
+        appLog(`Login conta: ok=${result.ok} | saída:\n${result.output.slice(-400)}`);
       }
     }
 
     if (result.ok) {
+      appLog(`Download OK. Importando de: ${result.contentDir}`);
       const wpItem = importFromContentDir(result.contentDir, workshopId);
       if (wpItem) {
         controlWin.webContents.send('download-progress', { state: 'completed', wallpaper: wpItem });
         return { ok: true };
       }
+      appLog(`Importação falhou — pasta: ${fs.existsSync(result.contentDir) ? fs.readdirSync(result.contentDir).join(', ') : 'não existe'}`);
       controlWin.webContents.send('download-progress', { state: 'error', msg: 'Formato não reconhecido após download.' });
       return { ok: false };
     }
 
-    // If error looks like subscription/auth issue, prompt login
     if (needsAccountRegex.test(result.output) || result.output.trim().length < 20) {
+      appLog(`Necessita login com conta Steam`);
       controlWin.webContents.send('download-progress', { state: 'needs-login', workshopId, name, previewUrl: previewUrl || null });
       return { ok: false };
     }
 
-    // Show last lines of output to help diagnose unexpected failures
     const tail = result.output.split('\n').filter(l => l.trim()).slice(-4).join(' | ');
+    appLog(`Erro inesperado: ${tail}`);
     controlWin.webContents.send('download-progress', { state: 'error', msg: `Falha no SteamCMD: ${tail}` });
     return { ok: false };
   } catch (err) {
+    appLog(`Exceção: ${err.message}`);
     controlWin.webContents.send('download-progress', { state: 'error', msg: err.message });
     return { ok: false };
   }
@@ -755,8 +792,7 @@ ipcMain.handle('download-workshop-with-login', async (_, { workshopId, name, use
     const { ok, output, contentDir } = await runSteamCMD(steamcmdExe, steamcmdDir, loginArgs, workshopId);
 
     if (ok) {
-      // Save account name so future downloads use SteamCMD's cached session (no password needed)
-      store.set('steamAuth', { accountName: username });
+      store.set('steamAuth', { accountName: username, password });
       const wpItem = importFromContentDir(contentDir, workshopId);
       if (wpItem) {
         controlWin.webContents.send('download-progress', { state: 'completed', wallpaper: wpItem });

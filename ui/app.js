@@ -2,6 +2,13 @@ const { ipcRenderer } = require('electron');
 
 async function ipc(channel, ...args) { return ipcRenderer.invoke(channel, ...args); }
 
+function formatBytes(b) {
+  if (!b || b <= 0) return '';
+  if (b < 1024 * 1024) return (b / 1024).toFixed(0) + ' KB';
+  if (b < 1024 * 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MB';
+  return (b / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+}
+
 // ---- State ----
 let library          = [];
 let current          = null;
@@ -613,7 +620,27 @@ const wsGrid   = document.getElementById('ws-grid');
 const wsSearch = document.getElementById('ws-search');
 const wsSort   = document.getElementById('ws-sort');
 const wsRefresh = document.getElementById('ws-refresh');
-const wsStatus = document.getElementById('ws-status-bar');
+const wsStatus      = document.getElementById('ws-status-bar');
+const wsStatusText   = document.getElementById('ws-status-text');
+const wsStatusDetail = document.getElementById('ws-status-detail');
+const wsProgressFill = document.getElementById('ws-progress-fill');
+const wsLogBar       = document.getElementById('ws-log-bar');
+const wsLogLines     = document.getElementById('ws-log-lines');
+
+ipcRenderer.on('app-log', (_, msg) => {
+  wsLogBar.style.display = 'block';
+  wsLogLines.textContent += msg + '\n';
+  wsLogLines.scrollTop = wsLogLines.scrollHeight;
+});
+
+function setWsStatus(text, detail = '', pct = null, color = 'var(--accent)') {
+  wsStatus.style.display = 'block';
+  wsStatus.style.background = color;
+  wsStatus.style.color = color === 'var(--accent)' ? '#000' : '#fff';
+  wsStatusText.textContent = text;
+  wsStatusDetail.textContent = detail;
+  wsProgressFill.style.width = pct !== null ? Math.min(100, Math.round(pct * 100)) + '%' : '0%';
+}
 
 let wsCurrentPage = 1;
 let wsItems = [];
@@ -745,10 +772,7 @@ function formatSubscribers(n) {
 }
 
 async function startWorkshopDownload(workshopId, title, previewUrl, fileUrl) {
-  wsStatus.style.display = 'block';
-  wsStatus.style.background = 'var(--accent)';
-  wsStatus.style.color = '#000';
-  wsStatus.textContent = `⏳ Preparando download: ${title}...`;
+  setWsStatus(`⏳ Preparando: ${title}...`);
   await ipc('download-workshop-item', { workshopId, name: title, previewUrl: previewUrl || null, fileUrl: fileUrl || null });
 }
 
@@ -864,32 +888,23 @@ document.getElementById('btn-sl-login').addEventListener('click', async () => {
   if (_setupMode) {
     closeModal('modal-steam-login');
     _resetLoginModal();
-    wsStatus.style.display = 'block';
-    wsStatus.style.background = 'var(--accent)';
-    wsStatus.style.color = '#000';
-    wsStatus.textContent = '⏳ Verificando conta Steam...';
+    setWsStatus('⏳ Verificando conta Steam...');
     const result = await ipc('validate-steam-login', { username, password, steamGuard });
     if (result.ok) {
-      wsStatus.style.background = '#4caf50';
-      wsStatus.textContent = `✅ Conta ${username} configurada! Downloads do Workshop habilitados.`;
+      setWsStatus(`✅ Conta ${username} configurada!`, 'Downloads do Workshop habilitados.', 1, '#4caf50');
       setTimeout(() => { wsStatus.style.display = 'none'; }, 5000);
     } else if (result.needs2fa) {
       document.getElementById('sl-2fa-wrap').style.display = 'block';
       openSetupModal();
     } else {
-      wsStatus.style.background = 'var(--error, #c0392b)';
-      wsStatus.style.color = '#fff';
-      wsStatus.textContent = `❌ ${result.msg || 'Falha ao verificar conta.'}`;
+      setWsStatus(`❌ ${result.msg || 'Falha ao verificar conta.'}`, '', null, '#c0392b');
       setTimeout(() => { wsStatus.style.display = 'none'; }, 6000);
     }
     return;
   }
 
   closeModal('modal-steam-login');
-  wsStatus.style.display = 'block';
-  wsStatus.style.background = 'var(--accent)';
-  wsStatus.style.color = '#000';
-  wsStatus.textContent = '⏳ Fazendo login e baixando...';
+  setWsStatus('⏳ Fazendo login e baixando...');
   await ipc('download-workshop-with-login', {
     workshopId: _slPending?.workshopId,
     name:       _slPending?.name,
@@ -899,25 +914,18 @@ document.getElementById('btn-sl-login').addEventListener('click', async () => {
 
 ipcRenderer.on('download-progress', (_, data) => {
   if (data.state === 'preparing') {
-    wsStatus.style.display = 'block';
-    wsStatus.style.background = 'var(--accent)';
-    wsStatus.style.color = '#000';
-    wsStatus.textContent = `⏳ ${data.name}`;
+    setWsStatus(`⏳ ${data.name}`);
   } else if (data.state === 'start') {
-    wsStatus.style.display = 'block';
-    wsStatus.style.background = 'var(--accent)';
-    wsStatus.style.color = '#000';
-    wsStatus.textContent = `📥 Baixando: ${data.name}`;
+    setWsStatus(`📥 Baixando: ${data.name}`, '', 0.02);
   } else if (data.state === 'progress') {
-    wsStatus.style.display = 'block';
-    wsStatus.style.background = 'var(--accent)';
-    wsStatus.style.color = '#000';
-    wsStatus.textContent = `📥 Baixando... ${Math.round(data.pct * 100)}%`;
+    const pct = data.pct || 0;
+    const size = data.total > 0
+      ? `${formatBytes(data.downloaded)} / ${formatBytes(data.total)}`
+      : '';
+    const spd = data.speed > 1024 ? `${formatBytes(data.speed)}/s` : '';
+    setWsStatus(`📥 ${Math.round(pct * 100)}%  ${size}`, spd, pct);
   } else if (data.state === 'completed') {
-    wsStatus.style.display = 'block';
-    wsStatus.style.background = '#4caf50';
-    wsStatus.style.color = '#000';
-    wsStatus.textContent = '✅ Download concluído! Wallpaper adicionado à biblioteca.';
+    setWsStatus('✅ Download concluído!', 'Wallpaper adicionado à biblioteca.', 1, '#4caf50');
     setTimeout(() => { wsStatus.style.display = 'none'; }, 5000);
     _slPending = null;
     const wp = data.wallpaper;
@@ -949,10 +957,7 @@ ipcRenderer.on('download-progress', (_, data) => {
     document.getElementById('sl-2fa').value = '';
     document.getElementById('modal-steam-login').classList.add('open');
   } else if (data.state === 'error') {
-    wsStatus.style.display = 'block';
-    wsStatus.style.background = '#f44336';
-    wsStatus.style.color = '#fff';
-    wsStatus.textContent = '❌ ' + data.msg;
+    setWsStatus('❌ ' + data.msg, '', null, '#f44336');
     setTimeout(() => { wsStatus.style.display = 'none'; }, 8000);
   }
 });
