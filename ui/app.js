@@ -816,7 +816,8 @@ document.getElementById('btn-qr-cancel').addEventListener('click', () => {
 });
 
 // ---- Steam login modal ----
-let _slPending = null; // { workshopId, name, previewUrl }
+let _slPending  = null; // { workshopId, name, previewUrl }
+let _setupMode  = false; // true when modal is opened at startup to configure credentials
 
 document.getElementById('btn-sl-use-preview').addEventListener('click', async () => {
   if (!_slPending?.previewUrl) { closeModal('modal-steam-login'); return; }
@@ -832,16 +833,63 @@ document.getElementById('btn-sl-use-preview').addEventListener('click', async ()
   _slPending = null;
 });
 
+function _resetLoginModal() {
+  document.querySelector('#modal-steam-login h3').textContent = '🔑 Login Steam necessário';
+  document.querySelector('#modal-steam-login > .modal > p').textContent =
+    'Este wallpaper requer o Wallpaper Engine. Se não lembra a senha, use o QR Code abaixo.';
+  document.getElementById('btn-sl-use-preview').style.display = '';
+  document.getElementById('btn-sl-login').textContent = '📥 Baixar';
+  document.getElementById('sl-2fa-wrap').style.display = 'none';
+  _setupMode = false;
+}
+
+function openSetupModal() {
+  _setupMode = true;
+  document.querySelector('#modal-steam-login h3').textContent = '🔑 Configurar conta Steam';
+  document.querySelector('#modal-steam-login > .modal > p').textContent =
+    'Entre com sua conta Steam para baixar wallpapers do Workshop sem precisar digitar a senha toda vez.';
+  document.getElementById('btn-sl-use-preview').style.display = 'none';
+  document.getElementById('btn-sl-login').textContent = '💾 Salvar';
+  document.getElementById('sl-user').value = '';
+  document.getElementById('sl-pass').value = '';
+  document.getElementById('modal-steam-login').classList.add('open');
+}
+
 document.getElementById('btn-sl-login').addEventListener('click', async () => {
-  const username  = document.getElementById('sl-user').value.trim();
-  const password  = document.getElementById('sl-pass').value;
+  const username   = document.getElementById('sl-user').value.trim();
+  const password   = document.getElementById('sl-pass').value;
   const steamGuard = document.getElementById('sl-2fa').value.trim();
   if (!username || !password) return;
+
+  if (_setupMode) {
+    closeModal('modal-steam-login');
+    _resetLoginModal();
+    wsStatus.style.display = 'block';
+    wsStatus.style.background = 'var(--accent)';
+    wsStatus.style.color = '#000';
+    wsStatus.textContent = '⏳ Verificando conta Steam...';
+    const result = await ipc('validate-steam-login', { username, password, steamGuard });
+    if (result.ok) {
+      wsStatus.style.background = '#4caf50';
+      wsStatus.textContent = `✅ Conta ${username} configurada! Downloads do Workshop habilitados.`;
+      setTimeout(() => { wsStatus.style.display = 'none'; }, 5000);
+    } else if (result.needs2fa) {
+      document.getElementById('sl-2fa-wrap').style.display = 'block';
+      openSetupModal();
+    } else {
+      wsStatus.style.background = 'var(--error, #c0392b)';
+      wsStatus.style.color = '#fff';
+      wsStatus.textContent = `❌ ${result.msg || 'Falha ao verificar conta.'}`;
+      setTimeout(() => { wsStatus.style.display = 'none'; }, 6000);
+    }
+    return;
+  }
+
   closeModal('modal-steam-login');
   wsStatus.style.display = 'block';
   wsStatus.style.background = 'var(--accent)';
   wsStatus.style.color = '#000';
-  wsStatus.textContent = `⏳ Fazendo login e baixando...`;
+  wsStatus.textContent = '⏳ Fazendo login e baixando...';
   await ipc('download-workshop-with-login', {
     workshopId: _slPending?.workshopId,
     name:       _slPending?.name,
@@ -939,6 +987,12 @@ async function init() {
   renderMonitors();
   renderTimeRules();
   loadWorkshopItems(1);
+
+  // Ask for Steam credentials on first launch if not configured
+  const savedAuth = await ipc('get-steam-auth');
+  if (!savedAuth) {
+    setTimeout(() => openSetupModal(), 800);
+  }
 }
 
 init();

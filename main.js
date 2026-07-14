@@ -565,6 +565,36 @@ ipcMain.handle('poll-qr-auth', async () => {
 ipcMain.handle('get-steam-auth',   () => store.get('steamAuth') || null);
 ipcMain.handle('clear-steam-auth', () => { store.delete('steamAuth'); return true; });
 
+ipcMain.handle('validate-steam-login', async (_, { username, password, steamGuard }) => {
+  try {
+    const steamcmdExe = await ensureSteamCMD();
+    const steamcmdDir = path.dirname(steamcmdExe);
+    const loginArgs = ['+login', username, password];
+    if (steamGuard) loginArgs.push('+set_steam_guard_code', steamGuard);
+    const output = await new Promise(resolve => {
+      let out = '';
+      const proc = spawn(steamcmdExe, [...loginArgs, '+quit'], { cwd: steamcmdDir });
+      proc.stdout.on('data', d => { out += d.toString(); });
+      proc.stderr.on('data', d => { out += d.toString(); });
+      proc.on('close', () => resolve(out));
+    });
+    if (/Two-factor|Steam Guard/i.test(output) && !/Logged in OK/i.test(output)) {
+      return { ok: false, needs2fa: true };
+    }
+    if (/Invalid Password|Bad Password|Login Failure/i.test(output)) {
+      return { ok: false, msg: 'Usuário ou senha incorretos.' };
+    }
+    if (/Logged in OK|Waiting for user info.*OK/i.test(output)) {
+      store.set('steamAuth', { accountName: username });
+      return { ok: true };
+    }
+    const tail = output.split('\n').filter(l => l.trim()).slice(-3).join(' | ');
+    return { ok: false, msg: `Não foi possível verificar: ${tail}` };
+  } catch (err) {
+    return { ok: false, msg: err.message };
+  }
+});
+
 // ---- SteamCMD helpers ----
 const { spawn } = require('child_process');
 
@@ -676,13 +706,14 @@ ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUr
     controlWin.webContents.send('download-progress', { state: 'start', name });
     let result = await runSteamCMD(steamcmdExe, steamcmdDir, ['+login', 'anonymous'], workshopId);
 
-    // Step 3: try saved QR/login credentials if anonymous failed due to subscription
+    // Step 3: try saved account (SteamCMD caches the session after first login with password)
     const needsAccountRegex = /failed \(Failure\)|no subscription|not subscribed|ERROR!|Invalid Password|Login Failure|Access Denied|not logged in/i;
     if (!result.ok) {
       const savedAuth = store.get('steamAuth');
-      if (savedAuth?.accountName && savedAuth?.refreshToken) {
+      if (savedAuth?.accountName) {
         controlWin.webContents.send('download-progress', { state: 'start', name: `${name} (${savedAuth.accountName})` });
-        result = await runSteamCMD(steamcmdExe, steamcmdDir, ['+login', savedAuth.accountName, savedAuth.refreshToken], workshopId);
+        // No password needed — SteamCMD uses its locally cached session from the first login
+        result = await runSteamCMD(steamcmdExe, steamcmdDir, ['+login', savedAuth.accountName], workshopId);
       }
     }
 
@@ -724,6 +755,8 @@ ipcMain.handle('download-workshop-with-login', async (_, { workshopId, name, use
     const { ok, output, contentDir } = await runSteamCMD(steamcmdExe, steamcmdDir, loginArgs, workshopId);
 
     if (ok) {
+      // Save account name so future downloads use SteamCMD's cached session (no password needed)
+      store.set('steamAuth', { accountName: username });
       const wpItem = importFromContentDir(contentDir, workshopId);
       if (wpItem) {
         controlWin.webContents.send('download-progress', { state: 'completed', wallpaper: wpItem });
