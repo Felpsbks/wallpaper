@@ -656,22 +656,26 @@ function runSteamCMD(steamcmdExe, steamcmdDir, loginArgs, workshopId) {
     let lastBytes = 0;
     let lastTime = Date.now();
     const onData = d => {
-      const t = d.toString(); output += t;
-      // SteamCMD outputs: "progress: 12.34 (123456 / 1000000)"
-      const m = t.match(/progress:\s*([\d.]+)\s*\(\s*(\d+)\s*\/\s*(\d+)\s*\)/);
-      if (m) {
-        const pct = parseFloat(m[1]) / 100;
-        const downloaded = parseInt(m[2]);
-        const total = parseInt(m[3]);
-        const now = Date.now();
-        const dt = (now - lastTime) / 1000;
-        const speed = dt > 0.1 ? Math.max(0, (downloaded - lastBytes) / dt) : 0;
-        lastBytes = downloaded; lastTime = now;
-        controlWin.webContents.send('download-progress', { state: 'progress', pct, downloaded, total, speed });
-      } else if (/Downloading item/i.test(t)) {
-        controlWin.webContents.send('download-progress', { state: 'progress', pct: 0.05, downloaded: 0, total: 0, speed: 0 });
-      }
-    };
+        const t = d.toString(); 
+        output += t;
+        const cleanT = t.trim();
+        if (cleanT) appLog(`[SteamCMD] ${cleanT}`);
+
+        // SteamCMD outputs: "progress: 12.34 (123456 / 1000000)"
+        const m = t.match(/progress:\s*([\d.]+)\s*\(\s*(\d+)\s*\/\s*(\d+)\s*\)/);
+        if (m) {
+          const pct = parseFloat(m[1]) / 100;
+          const downloaded = parseInt(m[2]);
+          const total = parseInt(m[3]);
+          const now = Date.now();
+          const dt = (now - lastTime) / 1000;
+          const speed = dt > 0.1 ? Math.max(0, (downloaded - lastBytes) / dt) : 0;
+          lastBytes = downloaded; lastTime = now;
+          controlWin.webContents.send('download-progress', { state: 'progress', pct, downloaded, total, speed });
+        } else if (/Downloading item/i.test(t)) {
+          controlWin.webContents.send('download-progress', { state: 'progress', pct: 0.05, downloaded: 0, total: 0, speed: 0 });
+        }
+      };
     proc.stdout.on('data', onData);
     proc.stderr.on('data', onData);
     proc.on('close', () => {
@@ -799,7 +803,7 @@ ipcMain.handle('download-workshop-with-login', async (_, { workshopId, name, use
     const steamcmdDir = path.dirname(steamcmdExe);
 
     const loginArgs = ['+login', username, password];
-    if (steamGuard) loginArgs.push('+set_steam_guard_code', steamGuard);
+    if (steamGuard) loginArgs.push(steamGuard);
 
     const { ok, output, contentDir } = await runSteamCMD(steamcmdExe, steamcmdDir, loginArgs, workshopId);
 
