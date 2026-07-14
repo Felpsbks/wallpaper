@@ -166,6 +166,23 @@
       <div class="panel-header"><h2>Configurações</h2></div>
       <div class="settings-body">
 
+        <div class="settings-section-title">Playlist (Modo Automático)</div>
+        <div class="setting-row">
+          <div><div class="setting-label">Ativar playlist</div><div class="setting-desc">Alternar wallpapers automaticamente</div></div>
+          <label class="toggle"><input type="checkbox" id="pl-enabled" /><div class="toggle-slider"></div></label>
+        </div>
+        <div class="setting-row">
+          <div><div class="setting-label">Intervalo</div><div class="setting-desc">Tempo entre cada wallpaper</div></div>
+          <div class="range-row" style="width:200px">
+            <input type="range" id="pl-interval" min="5" max="3600" step="5" value="30" />
+            <span class="range-val" id="pl-interval-val">30s</span>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div><div class="setting-label">Aleatório</div><div class="setting-desc">Ordem aleatória na playlist</div></div>
+          <label class="toggle"><input type="checkbox" id="pl-shuffle" /><div class="toggle-slider"></div></label>
+        </div>
+
         <div class="settings-section-title">Áudio</div>
         <div class="setting-row">
           <div><div class="setting-label">Volume do vídeo</div><div class="setting-desc">Volume padrão de wallpapers em vídeo</div></div>

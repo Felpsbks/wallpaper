@@ -345,6 +345,8 @@ function formatInterval(s) {
 }
 plInterval.addEventListener('input', () => { plIntervalVal.textContent = formatInterval(+plInterval.value); });
 
+
+
 async function savePlaylist() {
   playlistConfig = { enabled: plEnabled.checked, interval: +plInterval.value, shuffle: plShuffle.checked };
   await ipc('set-playlist-config', playlistConfig);
