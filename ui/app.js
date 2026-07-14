@@ -835,7 +835,7 @@ document.getElementById('btn-sl-use-preview').addEventListener('click', async ()
 
 function _resetLoginModal() {
   document.querySelector('#modal-steam-login h3').textContent = '🔑 Login Steam necessário';
-  document.querySelector('#modal-steam-login > .modal > p').textContent =
+  document.getElementById('sl-desc').textContent =
     'Este wallpaper requer o Wallpaper Engine. Se não lembra a senha, use o QR Code abaixo.';
   document.getElementById('btn-sl-use-preview').style.display = '';
   document.getElementById('btn-sl-login').textContent = '📥 Baixar';
@@ -846,7 +846,7 @@ function _resetLoginModal() {
 function openSetupModal() {
   _setupMode = true;
   document.querySelector('#modal-steam-login h3').textContent = '🔑 Configurar conta Steam';
-  document.querySelector('#modal-steam-login > .modal > p').textContent =
+  document.getElementById('sl-desc').textContent =
     'Entre com sua conta Steam para baixar wallpapers do Workshop sem precisar digitar a senha toda vez.';
   document.getElementById('btn-sl-use-preview').style.display = 'none';
   document.getElementById('btn-sl-login').textContent = '💾 Salvar';
