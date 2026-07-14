@@ -729,28 +729,29 @@ ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUr
     const steamcmdDir = path.dirname(steamcmdExe);
     appLog(`SteamCMD: ${steamcmdExe}`);
 
-    // Step 2: try anonymous
-    appLog(`Tentando login anônimo...`);
-    controlWin.webContents.send('download-progress', { state: 'start', name });
-    let result = await runSteamCMD(steamcmdExe, steamcmdDir, ['+login', 'anonymous'], workshopId);
-    appLog(`Anônimo: ok=${result.ok} | saída:\n${result.output.slice(-400)}`);
-
-    // Step 3: try saved account (SteamCMD caches the session after first login with password)
-    const needsAccountRegex = /failed \(Failure\)|no subscription|not subscribed|ERROR!|Invalid Password|Login Failure|Access Denied|not logged in/i;
-    if (!result.ok) {
-      const savedAuth = store.get('steamAuth');
-      appLog(`Anônimo falhou. Auth salvo: ${savedAuth ? savedAuth.accountName : 'nenhum'}`);
-      if (savedAuth?.accountName) {
-        controlWin.webContents.send('download-progress', { state: 'start', name: `${name} (${savedAuth.accountName})` });
-        appLog(`Tentando login com conta: ${savedAuth.accountName}`);
-        const loginArgs = savedAuth.password
-          ? ['+login', savedAuth.accountName, savedAuth.password]
-          : ['+login', savedAuth.accountName];
-        result = await runSteamCMD(steamcmdExe, steamcmdDir, loginArgs, workshopId);
-        appLog(`Login conta: ok=${result.ok} | saída:\n${result.output.slice(-400)}`);
-      }
+    // Step 2: check saved account first to avoid wiping SteamCMD session with anonymous login
+    const savedAuth = store.get('steamAuth');
+    let result;
+    
+    if (savedAuth?.accountName) {
+      appLog(`Conta salva: ${savedAuth.accountName}. Tentando login direto...`);
+      controlWin.webContents.send('download-progress', { state: 'start', name: `${name} (${savedAuth.accountName})` });
+      const loginArgs = savedAuth.password
+        ? ['+login', savedAuth.accountName, savedAuth.password]
+        : ['+login', savedAuth.accountName];
+      result = await runSteamCMD(steamcmdExe, steamcmdDir, loginArgs, workshopId);
+      appLog(`Login salvo: ok=${result.ok} | saída:\n${result.output.slice(-400)}`);
+      
+      // If saved auth fails, don't try anonymous (since WE is paid anyway), let it fall through to error/needs-login
+    } else {
+      appLog(`Tentando login anônimo...`);
+      controlWin.webContents.send('download-progress', { state: 'start', name });
+      result = await runSteamCMD(steamcmdExe, steamcmdDir, ['+login', 'anonymous'], workshopId);
+      appLog(`Anônimo: ok=${result.ok} | saída:\n${result.output.slice(-400)}`);
     }
 
+    const needsAccountRegex = /failed \(Failure\)|no subscription|not subscribed|ERROR!|Invalid Password|Login Failure|Access Denied|not logged in/i;
+    
     if (result.ok) {
       appLog(`Download OK. Importando de: ${result.contentDir}`);
       const wpItem = importFromContentDir(result.contentDir, workshopId);
@@ -760,6 +761,17 @@ ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUr
       }
       appLog(`Importação falhou — pasta: ${fs.existsSync(result.contentDir) ? fs.readdirSync(result.contentDir).join(', ') : 'não existe'}`);
       controlWin.webContents.send('download-progress', { state: 'error', msg: 'Formato não reconhecido após download.' });
+      return { ok: false };
+    }
+
+    if (/Two-factor|Steam Guard|code mismatch/i.test(result.output) && !result.output.includes('Success')) {
+      appLog(`Steam Guard necessário para a conta salva.`);
+      controlWin.webContents.send('download-progress', { 
+        state: 'needs-2fa', 
+        workshopId, name, 
+        username: savedAuth?.accountName || '', 
+        password: savedAuth?.password || '' 
+      });
       return { ok: false };
     }
 
