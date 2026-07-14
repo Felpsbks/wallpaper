@@ -304,6 +304,11 @@ ipcMain.handle('set-time-rules', (_, rules) => {
 
 ipcMain.handle('open-file-dialog', async (_, options) => dialog.showOpenDialog(controlWin, options));
 
+ipcMain.handle('open-in-steam', (_, workshopId) => {
+  const { shell } = require('electron');
+  shell.openExternal(`steam://url/CommunityFilePage/${workshopId}`);
+});
+
 ipcMain.handle('window-minimize', () => controlWin?.minimize());
 ipcMain.handle('window-maximize', () => controlWin?.isMaximized() ? controlWin.unmaximize() : controlWin?.maximize());
 ipcMain.handle('window-close',    () => controlWin?.hide());
@@ -496,6 +501,7 @@ ipcMain.handle('browse-workshop', async (_, { sort, search, page }) => {
       workshopId: d.publishedfileid,
       title: d.title || 'Sem título',
       preview: d.preview_url || '',
+      file_url: d.file_url || '',
       description: (d.description || '').substring(0, 200),
       tags: (d.tags || []).map(t => t.tag),
       subscribers: d.subscriptions || 0,
@@ -509,6 +515,55 @@ ipcMain.handle('browse-workshop', async (_, { sort, search, page }) => {
     return { items: [], total: 0, error: e.message };
   }
 });
+
+// ---- Steam QR Auth ----
+let _qrSession = null;
+
+ipcMain.handle('begin-qr-auth', async () => {
+  try {
+    const res = await httpPost(
+      'https://api.steampowered.com/IAuthenticationService/BeginAuthSessionViaQR/v1/',
+      { input_json: JSON.stringify({ device_friendly_name: 'Engine Wallpaper', platform_type: 2, website_id: 'Client' }) }
+    );
+    const data = JSON.parse(res);
+    const resp = data.response;
+    if (!resp?.client_id) return { error: 'Steam não retornou sessão QR.' };
+    _qrSession = { clientId: resp.client_id, requestId: resp.request_id };
+    const QRCode = require('qrcode');
+    const qrDataUrl = await QRCode.toDataURL(resp.challenge_url, { width: 220, margin: 1, color: { dark: '#000', light: '#fff' } });
+    return { ok: true, qrDataUrl };
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
+ipcMain.handle('poll-qr-auth', async () => {
+  if (!_qrSession) return { status: 'no-session' };
+  try {
+    const res = await httpPost(
+      'https://api.steampowered.com/IAuthenticationService/PollAuthSessionStatus/v1/',
+      { input_json: JSON.stringify({ client_id: _qrSession.clientId, request_id: _qrSession.requestId }) }
+    );
+    const data = JSON.parse(res);
+    const resp = data.response || {};
+    if (resp.refresh_token) {
+      store.set('steamAuth', { accountName: resp.account_name || '', refreshToken: resp.refresh_token });
+      _qrSession = null;
+      return { status: 'approved', accountName: resp.account_name };
+    }
+    if (resp.new_challenge_url) {
+      const QRCode = require('qrcode');
+      const qrDataUrl = await QRCode.toDataURL(resp.new_challenge_url, { width: 220, margin: 1, color: { dark: '#000', light: '#fff' } });
+      return { status: 'refresh', qrDataUrl };
+    }
+    return { status: 'pending' };
+  } catch (e) {
+    return { status: 'error', error: e.message };
+  }
+});
+
+ipcMain.handle('get-steam-auth',   () => store.get('steamAuth') || null);
+ipcMain.handle('clear-steam-auth', () => { store.delete('steamAuth'); return true; });
 
 // ---- SteamCMD helpers ----
 const { spawn } = require('child_process');
@@ -554,155 +609,136 @@ async function ensureSteamCMD() {
   return steamcmdExe;
 }
 
-ipcMain.handle('download-workshop-item', async (_, { workshopId, name }) => {
+function runSteamCMD(steamcmdExe, steamcmdDir, loginArgs, workshopId) {
+  const contentDir = path.join(steamcmdDir, 'steamapps', 'workshop', 'content', '431960', workshopId);
+  return new Promise(resolve => {
+    const args = [...loginArgs, '+workshop_download_item', '431960', workshopId, '+quit'];
+    const proc = spawn(steamcmdExe, args, { cwd: steamcmdDir });
+    let output = '';
+    const onData = d => {
+      const t = d.toString(); output += t;
+      if (/Downloading item/i.test(t))
+        controlWin.webContents.send('download-progress', { state: 'progress', pct: 0.5 });
+    };
+    proc.stdout.on('data', onData);
+    proc.stderr.on('data', onData);
+    proc.on('close', () => {
+      const ok = output.includes('Success') || (fs.existsSync(contentDir) && fs.readdirSync(contentDir).length > 0);
+      resolve({ ok, output, contentDir });
+    });
+  });
+}
+
+function importFromContentDir(contentDir, workshopId) {
+  let wpItem = parseSingleWorkshopItem(contentDir, workshopId);
+  if (!wpItem) {
+    const subs = fs.existsSync(contentDir)
+      ? fs.readdirSync(contentDir).filter(f => fs.statSync(path.join(contentDir, f)).isDirectory())
+      : [];
+    if (subs.length) wpItem = parseSingleWorkshopItem(path.join(contentDir, subs[0]), workshopId);
+  }
+  if (wpItem) {
+    const library = store.get('library') || [];
+    wpItem.id = Date.now().toString();
+    library.push(wpItem);
+    store.set('library', library);
+    return wpItem;
+  }
+  return null;
+}
+
+ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUrl, fileUrl }) => {
   try {
     controlWin.webContents.send('download-progress', { state: 'preparing', name });
 
-    // Step 1: check if Steam CDN provides a direct public URL for this item
-    let directUrl = null;
-    try {
-      const detRes = await httpPostJSON('https://steamworkshopdownloader.io/api/details/file',
-        [parseInt(workshopId, 10)]);
-      if (detRes.status === 200) {
-        const items = JSON.parse(detRes.body);
-        const det = items.find(d => String(d.publishedfileid) === String(workshopId));
+    // Step 1: check for direct public URL
+    let directUrl = fileUrl || null;
+    if (!directUrl) {
+      try {
+        const detailJson = await httpPost(
+          'https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/',
+          { itemcount: 1, 'publishedfileids[0]': workshopId }
+        );
+        const det = JSON.parse(detailJson).response?.publishedfiledetails?.[0];
         if (det?.file_url) directUrl = det.file_url;
-      }
-    } catch {}
-
+      } catch {}
+    }
     if (directUrl) {
       _pendingWorkshopId = workshopId;
       controlWin.webContents.downloadURL(directUrl);
       return { ok: true };
     }
 
-    // Step 2: use SteamCMD (anonymous — works for many paid game workshop items)
     const steamcmdExe = await ensureSteamCMD();
     const steamcmdDir = path.dirname(steamcmdExe);
-    const contentDir  = path.join(steamcmdDir, 'steamapps', 'workshop', 'content', '431960', workshopId);
 
+    // Step 2: try anonymous
     controlWin.webContents.send('download-progress', { state: 'start', name });
+    let result = await runSteamCMD(steamcmdExe, steamcmdDir, ['+login', 'anonymous'], workshopId);
 
-    return await new Promise(resolve => {
-      const proc = spawn(steamcmdExe, [
-        '+login', 'anonymous',
-        '+workshop_download_item', '431960', workshopId,
-        '+quit',
-      ], { cwd: steamcmdDir });
+    // Step 3: try saved QR/login credentials
+    if (!result.ok && /failed \(Failure\)|no subscription|not subscribed|ERROR!/i.test(result.output)) {
+      const savedAuth = store.get('steamAuth');
+      if (savedAuth?.accountName && savedAuth?.refreshToken) {
+        controlWin.webContents.send('download-progress', { state: 'start', name: `${name} (${savedAuth.accountName})` });
+        result = await runSteamCMD(steamcmdExe, steamcmdDir, ['+login', savedAuth.accountName, savedAuth.refreshToken], workshopId);
+      }
+    }
 
-      let output = '';
-      const onData = d => {
-        const t = d.toString();
-        output += t;
-        if (/Downloading item/i.test(t)) {
-          controlWin.webContents.send('download-progress', { state: 'progress', pct: 0.4 });
-        }
-      };
-      proc.stdout.on('data', onData);
-      proc.stderr.on('data', onData);
+    if (result.ok) {
+      const wpItem = importFromContentDir(result.contentDir, workshopId);
+      if (wpItem) {
+        controlWin.webContents.send('download-progress', { state: 'completed', wallpaper: wpItem });
+        return { ok: true };
+      }
+      controlWin.webContents.send('download-progress', { state: 'error', msg: 'Formato não reconhecido após download.' });
+      return { ok: false };
+    }
 
-      proc.on('close', () => {
-        const success = output.includes('Success') || (fs.existsSync(contentDir) && fs.readdirSync(contentDir).length > 0);
-        if (success) {
-          let wpItem = parseSingleWorkshopItem(contentDir, workshopId);
-          if (!wpItem) {
-            const subs = fs.existsSync(contentDir)
-              ? fs.readdirSync(contentDir).filter(f => fs.statSync(path.join(contentDir, f)).isDirectory())
-              : [];
-            if (subs.length) wpItem = parseSingleWorkshopItem(path.join(contentDir, subs[0]), workshopId);
-          }
-          if (wpItem) {
-            const library = store.get('library') || [];
-            wpItem.id = Date.now().toString();
-            library.push(wpItem);
-            store.set('library', library);
-            controlWin.webContents.send('download-progress', { state: 'completed', wallpaper: wpItem });
-            resolve({ ok: true });
-          } else {
-            controlWin.webContents.send('download-progress', { state: 'error', msg: 'Wallpaper baixado mas não reconhecido (pode ser .pkg — formato proprietário do WE).' });
-            resolve({ ok: false });
-          }
-        } else if (/failed \(Failure\)|no subscription|not subscribed|ERROR!/i.test(output)) {
-          // Download requires WE ownership — offer Steam login
-          controlWin.webContents.send('download-progress', {
-            state: 'needs-login',
-            workshopId,
-            name,
-          });
-          resolve({ ok: false, needsLogin: true });
-        } else {
-          controlWin.webContents.send('download-progress', { state: 'error', msg: 'Falha desconhecida no SteamCMD.' });
-          resolve({ ok: false });
-        }
-      });
-    });
+    if (/failed \(Failure\)|no subscription|not subscribed|ERROR!/i.test(result.output)) {
+      controlWin.webContents.send('download-progress', { state: 'needs-login', workshopId, name, previewUrl: previewUrl || null });
+      return { ok: false };
+    }
+
+    controlWin.webContents.send('download-progress', { state: 'error', msg: 'Falha no SteamCMD.' });
+    return { ok: false };
   } catch (err) {
     controlWin.webContents.send('download-progress', { state: 'error', msg: err.message });
-    return { ok: false, error: err.message };
+    return { ok: false };
   }
 });
 
 ipcMain.handle('download-workshop-with-login', async (_, { workshopId, name, username, password, steamGuard }) => {
   try {
     controlWin.webContents.send('download-progress', { state: 'start', name });
-
     const steamcmdExe = await ensureSteamCMD();
     const steamcmdDir = path.dirname(steamcmdExe);
-    const contentDir  = path.join(steamcmdDir, 'steamapps', 'workshop', 'content', '431960', workshopId);
 
-    return await new Promise(resolve => {
-      const args = ['+login', username, password];
-      if (steamGuard) args.push('+set_steam_guard_code', steamGuard);
-      args.push('+workshop_download_item', '431960', workshopId, '+quit');
+    const loginArgs = ['+login', username, password];
+    if (steamGuard) loginArgs.push('+set_steam_guard_code', steamGuard);
 
-      const proc = spawn(steamcmdExe, args, { cwd: steamcmdDir });
+    const { ok, output, contentDir } = await runSteamCMD(steamcmdExe, steamcmdDir, loginArgs, workshopId);
 
-      let output = '';
-      const onData = d => {
-        const t = d.toString();
-        output += t;
-        if (/Downloading item/i.test(t))
-          controlWin.webContents.send('download-progress', { state: 'progress', pct: 0.5 });
-      };
-      proc.stdout.on('data', onData);
-      proc.stderr.on('data', onData);
+    if (ok) {
+      const wpItem = importFromContentDir(contentDir, workshopId);
+      if (wpItem) {
+        controlWin.webContents.send('download-progress', { state: 'completed', wallpaper: wpItem });
+        return { ok: true };
+      }
+      controlWin.webContents.send('download-progress', { state: 'error', msg: 'Formato não reconhecido após download.' });
+      return { ok: false };
+    }
 
-      proc.on('close', () => {
-        const success = output.includes('Success') || (fs.existsSync(contentDir) && fs.readdirSync(contentDir).length > 0);
-        if (success) {
-          let wpItem = parseSingleWorkshopItem(contentDir, workshopId);
-          if (!wpItem) {
-            const subs = fs.existsSync(contentDir)
-              ? fs.readdirSync(contentDir).filter(f => fs.statSync(path.join(contentDir, f)).isDirectory())
-              : [];
-            if (subs.length) wpItem = parseSingleWorkshopItem(path.join(contentDir, subs[0]), workshopId);
-          }
-          if (wpItem) {
-            const library = store.get('library') || [];
-            wpItem.id = Date.now().toString();
-            library.push(wpItem);
-            store.set('library', library);
-            controlWin.webContents.send('download-progress', { state: 'completed', wallpaper: wpItem });
-            resolve({ ok: true });
-          } else {
-            controlWin.webContents.send('download-progress', { state: 'error', msg: 'Formato de wallpaper não reconhecido após download.' });
-            resolve({ ok: false });
-          }
-        } else if (/Two-factor|Steam Guard/i.test(output) && !output.includes('Success')) {
-          controlWin.webContents.send('download-progress', { state: 'needs-2fa', workshopId, name, username, password });
-          resolve({ ok: false });
-        } else if (/Invalid Password|Bad Password|failed to log/i.test(output)) {
-          controlWin.webContents.send('download-progress', { state: 'error', msg: 'Usuário ou senha incorretos.' });
-          resolve({ ok: false });
-        } else if (/failed \(Failure\)/i.test(output)) {
-          controlWin.webContents.send('download-progress', { state: 'error', msg: 'Download falhou. Verifique se você possui o Wallpaper Engine na sua conta Steam.' });
-          resolve({ ok: false });
-        } else {
-          controlWin.webContents.send('download-progress', { state: 'error', msg: 'Falha no login ou download.' });
-          resolve({ ok: false });
-        }
-      });
-    });
+    if (/Two-factor|Steam Guard/i.test(output) && !output.includes('Success')) {
+      controlWin.webContents.send('download-progress', { state: 'needs-2fa', workshopId, name, username, password });
+    } else if (/Invalid Password|Bad Password|failed to log/i.test(output)) {
+      controlWin.webContents.send('download-progress', { state: 'error', msg: 'Usuário ou senha incorretos.' });
+    } else if (/failed \(Failure\)/i.test(output)) {
+      controlWin.webContents.send('download-progress', { state: 'error', msg: 'Download falhou. Verifique se você possui o Wallpaper Engine.' });
+    } else {
+      controlWin.webContents.send('download-progress', { state: 'error', msg: 'Falha no login ou download.' });
+    }
+    return { ok: false };
   } catch (err) {
     controlWin.webContents.send('download-progress', { state: 'error', msg: err.message });
     return { ok: false };

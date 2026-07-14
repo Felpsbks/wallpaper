@@ -570,17 +570,18 @@ function updateNowPlaying() {
   const typeEl  = document.getElementById('now-type');
   const thumbEl = document.getElementById('now-thumb');
   if (!current) {
-    nameEl.textContent = 'Nenhum wallpaper ativo'; typeEl.textContent = '–'; thumbEl.innerHTML = '—';
+    nameEl.textContent = 'Nenhum wallpaper ativo'; typeEl.textContent = '–'; 
+    thumbEl.innerHTML = '<div style="background:#2a2a35;width:100%;height:100%;"></div>';
     return;
   }
   nameEl.textContent = current.name;
   typeEl.textContent = typeName(current.type, current.scene);
   if (current.thumbnail) {
-    thumbEl.innerHTML = `<img src="${current.thumbnail}" style="width:100%;height:100%;object-fit:cover;border-radius:6px" />`;
+    thumbEl.innerHTML = `<img src="${current.thumbnail}" style="width:100%;height:100%;object-fit:cover;" />`;
   } else if (current.type === 'image') {
-    thumbEl.innerHTML = `<img src="${toFileUrl(current.src)}" style="width:100%;height:100%;object-fit:cover;border-radius:6px" />`;
+    thumbEl.innerHTML = `<img src="${toFileUrl(current.src)}" style="width:100%;height:100%;object-fit:cover;" />`;
   } else {
-    thumbEl.textContent = typeIcon(current.type, current.scene);
+    thumbEl.innerHTML = `<div style="background:var(--bg3);width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:18px">${typeIcon(current.type, current.scene)}</div>`;
   }
 }
 
@@ -617,10 +618,15 @@ const wsStatus = document.getElementById('ws-status-bar');
 let wsCurrentPage = 1;
 let wsItems = [];
 
-async function loadWorkshopItems(page = 1) {
-  wsGrid.innerHTML = '<div class="empty-state"><div class="empty-icon">⏳</div><p>Carregando wallpapers...</p></div>';
+async function loadWorkshopItems(page = 1, append = false) {
+  if (!append) {
+    wsGrid.innerHTML = '<div class="empty-state"><div class="empty-icon">⏳</div><p>Carregando wallpapers...</p></div>';
+    wsItems = [];
+  } else {
+    document.getElementById('ws-load-more')?.remove();
+  }
   wsCurrentPage = page;
-  
+
   const result = await ipc('browse-workshop', {
     sort: wsSort.value,
     search: wsSearch.value.trim(),
@@ -632,51 +638,104 @@ async function loadWorkshopItems(page = 1) {
     return;
   }
 
-  wsItems = result.items;
-  renderWorkshopGrid();
+  const newItems = result.items;
+  wsItems = append ? [...wsItems, ...newItems] : newItems;
+  renderWorkshopGrid(append ? newItems : null);
 }
 
-function renderWorkshopGrid() {
+function renderWorkshopGrid(appendItems = null) {
   if (wsItems.length === 0) {
     wsGrid.innerHTML = '<div class="empty-state"><div class="empty-icon">🔍</div><p>Nenhum wallpaper encontrado</p><small>Tente outra busca ou filtro</small></div>';
     return;
   }
 
-  wsGrid.innerHTML = wsItems.map(item => `
-    <div class="wallpaper-card ws-card" data-wsid="${item.workshopId}" title="${item.title}\n${item.tags.join(', ')}\n${item.subscribers} inscritos">
-      <div class="card-thumb-wrap">
-        ${item.preview ? `<img class="card-thumb-img" src="${item.preview}" alt="${item.title}" loading="lazy" />` : '<span class="card-thumb">🌐</span>'}
-        <div class="ws-overlay">
-          <div class="ws-dl-btn">📥 Baixar</div>
+  const itemsToRender = appendItems || wsItems;
+  if (!appendItems) wsGrid.innerHTML = '';
+
+  itemsToRender.forEach(item => {
+    const card = document.createElement('div');
+    card.className = 'ws-card-new';
+    card.dataset.wsid = item.workshopId;
+    card.title = `${item.title}\n${item.tags.join(', ')}\n${item.subscribers} inscritos`;
+    card.innerHTML = `
+      ${item.preview ? `<img class="ws-card-img" src="${item.preview}" loading="lazy" />` : '<div style="width:100%;height:100%;background:var(--bg3);display:flex;align-items:center;justify-content:center;font-size:24px">🌐</div>'}
+      <div class="ws-card-overlay"></div>
+      <div class="ws-card-stats">
+        <div class="ws-dl-count">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+          ${formatSubscribers(item.subscribers)}
+        </div>
+        <div class="ws-heart">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>
         </div>
       </div>
-      <div class="card-info">
-        <div class="card-name">${item.title}</div>
-        <div class="card-type">${item.tags.slice(0, 3).join(' · ')} · ⭐ ${formatSubscribers(item.subscribers)}</div>
-      </div>
-    </div>
-  `).join('');
+    `;
+    card.addEventListener('click', () => {
+      document.querySelectorAll('.ws-card-new').forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+      populateDetailsPanel(item);
+    });
+    wsGrid.appendChild(card);
+  });
 
   // Load more button
-  wsGrid.innerHTML += `
-    <div style="grid-column:1/-1; text-align:center; padding:16px;">
-      <button class="btn btn-secondary" id="ws-load-more" style="padding:10px 30px;">Carregar mais</button>
+  const moreWrap = document.createElement('div');
+  moreWrap.id = 'ws-load-more';
+  moreWrap.style.cssText = 'grid-column:1/-1; text-align:center; padding:16px;';
+  moreWrap.innerHTML = '<button class="btn btn-secondary" style="padding:10px 30px;">Carregar mais</button>';
+  moreWrap.querySelector('button').addEventListener('click', () => loadWorkshopItems(wsCurrentPage + 1, true));
+  wsGrid.appendChild(moreWrap);
+}
+
+function populateDetailsPanel(item) {
+  const details = document.getElementById('ws-details');
+  const safeTitle = item.title.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+  
+  details.innerHTML = `
+    <div class="det-img-wrap">
+      ${item.preview ? `<img class="det-img" src="${item.preview}" />` : ''}
+    </div>
+    <div class="det-title">${item.title}</div>
+    <div class="det-author">Por: <span>Desconhecido</span> <svg class="verified-icon" viewBox="0 0 24 24"><path d="M12 2l3.09 2.26 3.83-.86 1.15 3.73 3.4 1.94-1.94 3.4 1.94 3.4-3.4 1.94-1.15 3.73-3.83-.86L12 22l-3.09-2.26-3.83.86-1.15-3.73-3.4-1.94 1.94-3.4-1.94-3.4 3.4-1.94 1.15-3.73 3.83.86z"></path><polyline points="9 12 11 14 15 10" fill="none" stroke="#fff" stroke-width="2"></polyline></svg></div>
+    
+    <div class="det-stats-row">
+      <div class="det-stat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        ${formatSubscribers(item.subscribers)}
+      </div>
+      <div class="det-stat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+        4.8
+      </div>
+      <div class="det-stat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="10" rx="2" ry="2"></rect><line x1="12" y1="7" x2="12" y2="17"></line></svg>
+        16:9
+      </div>
+    </div>
+
+    <div class="det-btn-row">
+      <button class="btn-apply" onclick="startWorkshopDownload('${item.workshopId}', '${safeTitle}', '${item.preview || ''}', '${item.file_url || ''}')">
+        📥 Baixar wallpaper
+      </button>
+      <button class="btn-secondary-full">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+        Adicionar à playlist
+      </button>
+    </div>
+
+    <div class="det-section-title">Informações</div>
+    <div class="det-info-grid">
+      <div class="det-info-lbl">Tipo:</div><div class="det-info-val">Vídeo</div>
+      <div class="det-info-lbl">Resolução:</div><div class="det-info-val">1920x1080</div>
+      <div class="det-info-lbl">Duração:</div><div class="det-info-val">00:24</div>
+      <div class="det-info-lbl">Tags:</div><div class="det-info-val">${(item.tags || []).slice(0, 4).join(', ')}</div>
+    </div>
+
+    <div class="det-section-title">Criado em</div>
+    <div class="det-info-grid">
+      <div class="det-info-val" style="grid-column:1/-1">20 de abr. de 2024</div>
     </div>
   `;
-
-  document.getElementById('ws-load-more')?.addEventListener('click', () => {
-    loadWorkshopItems(wsCurrentPage + 1);
-  });
-
-  // Click to download
-  wsGrid.querySelectorAll('.ws-card').forEach(card => {
-    card.addEventListener('click', () => {
-      const wsid = card.dataset.wsid;
-      const item = wsItems.find(i => i.workshopId === wsid);
-      if (!item) return;
-      startWorkshopDownload(wsid, item.title);
-    });
-  });
 }
 
 function formatSubscribers(n) {
@@ -685,27 +744,93 @@ function formatSubscribers(n) {
   return n.toString();
 }
 
-async function startWorkshopDownload(workshopId, title) {
+async function startWorkshopDownload(workshopId, title, previewUrl, fileUrl) {
   wsStatus.style.display = 'block';
   wsStatus.style.background = 'var(--accent)';
   wsStatus.style.color = '#000';
-  wsStatus.textContent = `⏳ Enviando para o servidor: ${title}...`;
-  await ipc('download-workshop-item', { workshopId, name: title });
+  wsStatus.textContent = `⏳ Preparando download: ${title}...`;
+  await ipc('download-workshop-item', { workshopId, name: title, previewUrl: previewUrl || null, fileUrl: fileUrl || null });
 }
 
 // Sort / search events
-wsSort.addEventListener('change', () => loadWorkshopItems(1));
-wsRefresh.addEventListener('click', () => loadWorkshopItems(wsCurrentPage));
+wsSort.addEventListener('change', () => loadWorkshopItems(1, false));
+wsRefresh.addEventListener('click', () => loadWorkshopItems(1, false));
 
 let wsSearchTimeout;
 wsSearch.addEventListener('input', () => {
   clearTimeout(wsSearchTimeout);
-  wsSearchTimeout = setTimeout(() => loadWorkshopItems(1), 600);
+  wsSearchTimeout = setTimeout(() => loadWorkshopItems(1, false), 600);
 });
 
 // Download progress from main process
+// ---- QR Code Login ----
+let _qrPollTimer = null;
+
+async function startQRLogin() {
+  document.getElementById('qr-loading').style.display = 'block';
+  document.getElementById('qr-code-img').style.display = 'none';
+  document.getElementById('qr-status').textContent = 'Gerando QR code...';
+  document.getElementById('qr-status').style.color = 'var(--text2)';
+  document.getElementById('modal-qr-login').classList.add('open');
+
+  const res = await ipc('begin-qr-auth');
+  if (res.error) {
+    document.getElementById('qr-status').textContent = '❌ ' + res.error;
+    return;
+  }
+
+  document.getElementById('qr-loading').style.display = 'none';
+  const img = document.getElementById('qr-code-img');
+  img.src = res.qrDataUrl;
+  img.style.display = 'block';
+  document.getElementById('qr-status').textContent = 'Aguardando scan no app Steam...';
+
+  _qrPollTimer = setInterval(async () => {
+    const poll = await ipc('poll-qr-auth');
+    if (poll.status === 'approved') {
+      clearInterval(_qrPollTimer); _qrPollTimer = null;
+      document.getElementById('qr-status').style.color = 'var(--success)';
+      document.getElementById('qr-status').textContent = `✅ Conectado como ${poll.accountName}! Credenciais salvas.`;
+      setTimeout(() => {
+        closeModal('modal-qr-login');
+        closeModal('modal-steam-login');
+        document.getElementById('qr-status').style.color = 'var(--text2)';
+      }, 2000);
+    } else if (poll.status === 'refresh') {
+      img.src = poll.qrDataUrl;
+    } else if (poll.status === 'error') {
+      clearInterval(_qrPollTimer); _qrPollTimer = null;
+      document.getElementById('qr-status').textContent = '❌ ' + poll.error;
+    }
+  }, 3000);
+}
+
+document.getElementById('btn-open-qr').addEventListener('click', () => {
+  closeModal('modal-steam-login');
+  startQRLogin();
+});
+
+document.getElementById('btn-qr-cancel').addEventListener('click', () => {
+  if (_qrPollTimer) { clearInterval(_qrPollTimer); _qrPollTimer = null; }
+  closeModal('modal-qr-login');
+});
+
 // ---- Steam login modal ----
-let _slPending = null; // { workshopId, name }
+let _slPending = null; // { workshopId, name, previewUrl }
+
+document.getElementById('btn-sl-use-preview').addEventListener('click', async () => {
+  if (!_slPending?.previewUrl) { closeModal('modal-steam-login'); return; }
+  const w = await ipc('add-wallpaper', {
+    type: 'image',
+    name: _slPending.name + ' (preview)',
+    src: _slPending.previewUrl,
+  });
+  library.push(w);
+  renderLibrary();
+  closeModal('modal-steam-login');
+  setWallpaper(w);
+  _slPending = null;
+});
 
 document.getElementById('btn-sl-login').addEventListener('click', async () => {
   const username  = document.getElementById('sl-user').value.trim();
@@ -725,18 +850,25 @@ document.getElementById('btn-sl-login').addEventListener('click', async () => {
 });
 
 ipcRenderer.on('download-progress', (_, data) => {
-  wsStatus.style.display = 'block';
-  wsStatus.style.color = '#000';
   if (data.state === 'preparing') {
+    wsStatus.style.display = 'block';
     wsStatus.style.background = 'var(--accent)';
+    wsStatus.style.color = '#000';
     wsStatus.textContent = `⏳ ${data.name}`;
   } else if (data.state === 'start') {
+    wsStatus.style.display = 'block';
     wsStatus.style.background = 'var(--accent)';
+    wsStatus.style.color = '#000';
     wsStatus.textContent = `📥 Baixando: ${data.name}`;
   } else if (data.state === 'progress') {
+    wsStatus.style.display = 'block';
+    wsStatus.style.background = 'var(--accent)';
+    wsStatus.style.color = '#000';
     wsStatus.textContent = `📥 Baixando... ${Math.round(data.pct * 100)}%`;
   } else if (data.state === 'completed') {
+    wsStatus.style.display = 'block';
     wsStatus.style.background = '#4caf50';
+    wsStatus.style.color = '#000';
     wsStatus.textContent = '✅ Download concluído! Wallpaper adicionado à biblioteca.';
     setTimeout(() => { wsStatus.style.display = 'none'; }, 5000);
     _slPending = null;
@@ -747,21 +879,29 @@ ipcRenderer.on('download-progress', (_, data) => {
     }
   } else if (data.state === 'needs-login') {
     wsStatus.style.display = 'none';
-    _slPending = { workshopId: data.workshopId, name: data.name };
+    _slPending = { workshopId: data.workshopId, name: data.name, previewUrl: data.previewUrl };
+    const previewImg  = document.getElementById('sl-preview-img');
+    const previewWrap = document.getElementById('sl-preview-wrap');
+    if (data.previewUrl) {
+      previewImg.src = data.previewUrl;
+      previewWrap.style.display = 'block';
+    } else {
+      previewWrap.style.display = 'none';
+    }
     document.getElementById('sl-user').value = '';
     document.getElementById('sl-pass').value = '';
     document.getElementById('sl-2fa').value = '';
     document.getElementById('sl-2fa-wrap').style.display = 'none';
     document.getElementById('modal-steam-login').classList.add('open');
   } else if (data.state === 'needs-2fa') {
-    // Re-open modal with 2FA field visible
-    _slPending = { workshopId: data.workshopId, name: data.name };
+    _slPending = { workshopId: data.workshopId, name: data.name, previewUrl: data.previewUrl };
     document.getElementById('sl-user').value = data.username || '';
     document.getElementById('sl-pass').value = data.password || '';
     document.getElementById('sl-2fa-wrap').style.display = 'block';
     document.getElementById('sl-2fa').value = '';
     document.getElementById('modal-steam-login').classList.add('open');
   } else if (data.state === 'error') {
+    wsStatus.style.display = 'block';
     wsStatus.style.background = '#f44336';
     wsStatus.style.color = '#fff';
     wsStatus.textContent = '❌ ' + data.msg;
