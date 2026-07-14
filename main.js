@@ -676,8 +676,9 @@ ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUr
     controlWin.webContents.send('download-progress', { state: 'start', name });
     let result = await runSteamCMD(steamcmdExe, steamcmdDir, ['+login', 'anonymous'], workshopId);
 
-    // Step 3: try saved QR/login credentials
-    if (!result.ok && /failed \(Failure\)|no subscription|not subscribed|ERROR!/i.test(result.output)) {
+    // Step 3: try saved QR/login credentials if anonymous failed due to subscription
+    const needsAccountRegex = /failed \(Failure\)|no subscription|not subscribed|ERROR!|Invalid Password|Login Failure|Access Denied|not logged in/i;
+    if (!result.ok) {
       const savedAuth = store.get('steamAuth');
       if (savedAuth?.accountName && savedAuth?.refreshToken) {
         controlWin.webContents.send('download-progress', { state: 'start', name: `${name} (${savedAuth.accountName})` });
@@ -695,12 +696,15 @@ ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUr
       return { ok: false };
     }
 
-    if (/failed \(Failure\)|no subscription|not subscribed|ERROR!/i.test(result.output)) {
+    // If error looks like subscription/auth issue, prompt login
+    if (needsAccountRegex.test(result.output) || result.output.trim().length < 20) {
       controlWin.webContents.send('download-progress', { state: 'needs-login', workshopId, name, previewUrl: previewUrl || null });
       return { ok: false };
     }
 
-    controlWin.webContents.send('download-progress', { state: 'error', msg: 'Falha no SteamCMD.' });
+    // Show last lines of output to help diagnose unexpected failures
+    const tail = result.output.split('\n').filter(l => l.trim()).slice(-4).join(' | ');
+    controlWin.webContents.send('download-progress', { state: 'error', msg: `Falha no SteamCMD: ${tail}` });
     return { ok: false };
   } catch (err) {
     controlWin.webContents.send('download-progress', { state: 'error', msg: err.message });
