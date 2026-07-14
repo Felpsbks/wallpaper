@@ -674,6 +674,8 @@ function runSteamCMD(steamcmdExe, steamcmdDir, loginArgs, workshopId) {
           controlWin.webContents.send('download-progress', { state: 'progress', pct, downloaded, total, speed });
         } else if (/Downloading item/i.test(t)) {
           controlWin.webContents.send('download-progress', { state: 'progress', pct: 0.05, downloaded: 0, total: 0, speed: 0 });
+        } else if (/Please confirm the login in the Steam Mobile app/i.test(t)) {
+          controlWin.webContents.send('download-progress', { state: 'needs-mobile-auth' });
         }
       };
     proc.stdout.on('data', onData);

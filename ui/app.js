@@ -108,7 +108,9 @@ function renderLibrary() {
     card.dataset.id = w.id;
 
     let thumbHtml;
-    if (w.thumbnail) {
+    if (w.preview) {
+      thumbHtml = `<img class="card-thumb-img" src="${toFileUrl(w.preview)}" />`;
+    } else if (w.thumbnail) {
       thumbHtml = `<img class="card-thumb-img" src="${w.thumbnail}" />`;
     } else if (w.type === 'image') {
       thumbHtml = `<img class="card-thumb-img" src="${toFileUrl(w.src)}" />`;
@@ -958,6 +960,8 @@ ipcRenderer.on('download-progress', (_, data) => {
     document.getElementById('sl-2fa-wrap').style.display = 'block';
     document.getElementById('sl-2fa').value = '';
     document.getElementById('modal-steam-login').classList.add('open');
+  } else if (data.state === 'needs-mobile-auth') {
+    setWsStatus('📱 Aprove o login no aplicativo da Steam no celular...', '', null, '#ff9800');
   } else if (data.state === 'error') {
     setWsStatus('❌ ' + data.msg, '', null, '#f44336');
     setTimeout(() => { wsStatus.style.display = 'none'; }, 8000);
