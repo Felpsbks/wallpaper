@@ -6,7 +6,7 @@
   "scripts": {
     "start": "bin\\electron.exe",
     "pack": "node scripts/pack.js",
-    "dev": "bin\\electron.exe .",
+    "dev": "node scripts/dev.js",
     "icons": "node scripts/gen-icon.js",
     "dist": "node scripts/gen-icon.js && node scripts/pack.js && node scripts/build-dist.js"
   },
