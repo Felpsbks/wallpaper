@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, dialog, screen, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, dialog, screen, nativeImage, desktopCapturer } = require('electron');
 try { require('electron-reload')(__dirname); } catch (_) {}
 const path       = require('path');
 const fs         = require('fs');
@@ -179,28 +179,73 @@ function createTray() {
 }
 
 // ---- Fullscreen monitor ----
-let _fullscreenState = false;
+let _appState = { pause: false, mute: false, stop: false };
 let _fsTimer = null;
 
+function getRunningProcesses() {
+  return new Promise((resolve) => {
+    const { exec } = require('child_process');
+    exec('tasklist /FO CSV /NH', (err, stdout) => {
+      if (err) return resolve([]);
+      const processes = stdout.split('\\n')
+        .map(line => line.split(',')[0])
+        .map(name => name.replace(/"/g, '').trim().toLowerCase())
+        .filter(name => name.length > 0);
+      resolve(processes);
+    });
+  });
+}
+
 function startFullscreenMonitor() {
-  _fsTimer = setInterval(() => {
+  _fsTimer = setInterval(async () => {
     const settings = store.get('settings') || {};
-    if (!settings.pauseOnFullscreen && !settings.muteOnFullscreen) return;
-    try {
-      const { isFullscreenAppRunning } = require('./src/fullscreen');
-      const isFs = isFullscreenAppRunning(screen.getAllDisplays());
-      if (isFs === _fullscreenState) return;
-      _fullscreenState = isFs;
-      const vol = (store.get('settings') || {}).volume ?? 50;
-      if (isFs) {
-        if (settings.pauseOnFullscreen) sendToAllWallpapers('pause');
-        if (settings.muteOnFullscreen)  sendToAllWallpapers('mute');
-      } else {
-        if (settings.pauseOnFullscreen) sendToAllWallpapers('resume');
-        if (settings.muteOnFullscreen)  sendToAllWallpapers('unmute', vol);
+    let rulesActive = { pause: false, mute: false, stop: false };
+    
+    // 1. App Rules
+    if (settings.appRules && settings.appRules.length > 0) {
+      const running = await getRunningProcesses();
+      for (const rule of settings.appRules) {
+        if (running.includes(rule.exe.toLowerCase())) {
+          if (rule.action === 'pause') rulesActive.pause = true;
+          if (rule.action === 'mute') rulesActive.mute = true;
+          if (rule.action === 'stop') rulesActive.stop = true;
+        }
       }
-    } catch {}
-  }, 2000);
+    }
+
+    // 2. Fullscreen Rules
+    if (settings.pauseOnFullscreen || settings.muteOnFullscreen) {
+      try {
+        const { isFullscreenAppRunning } = require('./src/fullscreen');
+        const isFs = isFullscreenAppRunning(screen.getAllDisplays());
+        if (isFs) {
+          if (settings.pauseOnFullscreen) rulesActive.pause = true;
+          if (settings.muteOnFullscreen) rulesActive.mute = true;
+        }
+      } catch {}
+    }
+
+    const vol = settings.volume ?? 50;
+
+    // Apply Stop/Unstop
+    if (rulesActive.stop !== _appState.stop) {
+      sendToAllWallpapers(rulesActive.stop ? 'stop' : 'unstop');
+    }
+    
+    // Apply Pause/Resume (only if not stopped)
+    if (!rulesActive.stop) {
+      if (rulesActive.pause !== _appState.pause) {
+        sendToAllWallpapers(rulesActive.pause ? 'pause' : 'resume');
+      }
+    }
+
+    // Apply Mute/Unmute
+    if (rulesActive.mute !== _appState.mute) {
+      sendToAllWallpapers(rulesActive.mute ? 'mute' : 'unmute', vol);
+    }
+
+    _appState = rulesActive;
+  }, 3000);
 }
 
 // ---- Time-based switching ----
@@ -292,6 +337,15 @@ ipcMain.handle('set-playlist-config', (_, config) => {
   store.set('playlistConfig', config);
   playlist.configure(config);
   return true;
+});
+
+ipcMain.on('update-native-prop', (_, data) => {
+  sendToAllWallpapers('update-native-prop', data);
+});
+
+ipcMain.handle('get-desktop-audio-source', async () => {
+  const sources = await desktopCapturer.getSources({ types: ['screen'], fetchWindowIcons: false });
+  return sources[0]?.id;
 });
 
 ipcMain.handle('set-settings', (_, settings) => {

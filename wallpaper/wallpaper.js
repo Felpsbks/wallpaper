@@ -9,6 +9,59 @@ const canvasEl = document.getElementById('scene-layer');
 let currentScene = null;
 let savedVolume = 0.5;
 
+let audioContext = null;
+let analyser = null;
+let dataArray = null;
+
+async function initAudioVisualizer() {
+  try {
+    const sourceId = await ipcRenderer.invoke('get-desktop-audio-source');
+    if (!sourceId) return;
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { mandatory: { chromeMediaSource: 'desktop' } },
+      video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId } }
+    });
+
+    audioContext = new AudioContext();
+    const source = audioContext.createMediaStreamSource(stream);
+    analyser = audioContext.createAnalyser();
+    
+    analyser.fftSize = 256; 
+    analyser.smoothingTimeConstant = 0.5;
+    
+    source.connect(analyser);
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    requestAnimationFrame(updateAudioData);
+  } catch (err) {
+    console.warn('[wallpaper] Audio capture failed:', err);
+  }
+}
+
+function updateAudioData() {
+  if (analyser && dataArray && webEl.style.display === 'block') {
+    analyser.getByteFrequencyData(dataArray);
+    
+    const weArray = new Array(128).fill(0);
+    for (let i = 0; i < 64; i++) {
+      const val = (dataArray[i] || 0) / 255.0;
+      weArray[i] = val;       
+      weArray[i + 64] = val;  
+    }
+
+    const code = `
+      if (window._weAudioCallback) {
+        window._weAudioCallback(${JSON.stringify(weArray)});
+      }
+    `;
+    webEl.executeJavaScript(code).catch(() => {});
+  }
+  requestAnimationFrame(updateAudioData);
+}
+
+initAudioVisualizer();
+
 function hideAll() {
   videoEl.style.display = 'none';
   imageEl.style.display = 'none';
@@ -42,6 +95,14 @@ function showWeb(wallpaper) {
   
   // Apply saved properties when webview finishes loading
   const onDomReady = () => {
+    // Inject audio listener bridge
+    const audioCode = `
+      window.wallpaperRegisterAudioListener = function(cb) {
+        window._weAudioCallback = cb;
+      };
+    `;
+    webEl.executeJavaScript(audioCode).catch(() => {});
+
     if (wallpaper.options && Object.keys(wallpaper.options).length > 0) {
       const propsObj = {};
       for (const [key, val] of Object.entries(wallpaper.options)) {
@@ -80,8 +141,10 @@ function showScene(wallpaper) {
   currentScene.start();
 }
 
+let _activeWallpaper = null;
 function setWallpaper(wallpaper) {
   if (!wallpaper) return;
+  _activeWallpaper = wallpaper;
   switch (wallpaper.type) {
     case 'video': showVideo(wallpaper); break;
     case 'image': showImage(wallpaper); break;
@@ -92,6 +155,8 @@ function setWallpaper(wallpaper) {
 }
 
 ipcRenderer.on('set-wallpaper',    (_, w) => setWallpaper(w));
+ipcRenderer.on('stop',             ()     => { hideAll(); });
+ipcRenderer.on('unstop',           ()     => { if (_activeWallpaper) setWallpaper(_activeWallpaper); });
 ipcRenderer.on('pause',            ()     => { videoEl.pause(); });
 ipcRenderer.on('resume',           ()     => { videoEl.play().catch(() => {}); });
 ipcRenderer.on('mute',             ()     => { videoEl.volume = 0; });

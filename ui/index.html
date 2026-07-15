@@ -210,10 +210,15 @@
         <div class="setting-desc" style="padding:0 0 10px">Clique num monitor para direcionar o próximo wallpaper selecionado</div>
         <div id="monitors-grid" class="monitors-grid"></div>
 
+        <div class="settings-section-title" style="margin-top:24px">Regras de Aplicativos</div>
+        <div class="setting-desc" style="padding:0 0 10px">Pausar, mutar ou parar o wallpaper ao abrir aplicativos específicos</div>
+        <div id="app-rules-list"></div>
+        <button class="btn btn-secondary" id="btn-add-app-rule" style="margin-top:10px; margin-bottom:10px">+ Adicionar regra de app</button>
+
         <div class="settings-section-title" style="margin-top:24px">Regras de Horário</div>
         <div class="setting-desc" style="padding:0 0 10px">Troca wallpaper automaticamente no horário definido</div>
         <div id="time-rules-list"></div>
-        <button class="btn btn-secondary" id="btn-add-time-rule" style="margin-top:10px">+ Adicionar regra</button>
+        <button class="btn btn-secondary" id="btn-add-time-rule" style="margin-top:10px">+ Adicionar regra de horário</button>
 
       </div>
     </div>
@@ -312,6 +317,29 @@
   </div>
 </div>
 
+
+<!-- Add App Rule -->
+<div class="modal-backdrop" id="modal-app-rule">
+  <div class="modal">
+    <h3>Regra de Aplicativo</h3>
+    <div class="field">
+      <label>Nome do executável</label>
+      <input type="text" id="ar-exe" placeholder="ex: cs2.exe" />
+    </div>
+    <div class="field">
+      <label>Ação</label>
+      <select id="ar-action">
+        <option value="pause">Pausar</option>
+        <option value="mute">Mutar</option>
+        <option value="stop">Parar (Economiza RAM/GPU)</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-app-rule')">Cancelar</button>
+      <button class="btn btn-primary" id="btn-ar-add">Adicionar</button>
+    </div>
+  </div>
+</div>
 
 <!-- Add Time Rule -->
 <div class="modal-backdrop" id="modal-time-rule">

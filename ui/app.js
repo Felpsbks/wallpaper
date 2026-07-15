@@ -497,6 +497,55 @@ document.getElementById('btn-clear-monitor-target').addEventListener('click', ()
   updateMonitorBar();
 });
 
+// ---- App Rules ----
+let appRules = [];
+
+function renderAppRules() {
+  const list = document.getElementById('app-rules-list');
+  list.innerHTML = '';
+  if (!appRules.length) {
+    list.innerHTML = '<p style="color:var(--text2);font-size:12px;padding:8px 0">Nenhuma regra configurada</p>';
+    return;
+  }
+  for (const rule of appRules) {
+    const row = document.createElement('div');
+    row.className = 'time-rule-row'; // reusing styling
+    let actionLabel = 'Pausar';
+    if (rule.action === 'mute') actionLabel = 'Mutar';
+    if (rule.action === 'stop') actionLabel = 'Parar';
+    
+    row.innerHTML = `
+      <span class="tr-time" style="width:auto;margin-right:10px">${rule.exe}</span>
+      <span class="tr-arrow">→</span>
+      <span class="tr-name">${actionLabel}</span>
+      <button class="card-btn delete tr-del" data-id="${rule.id}">✕</button>
+    `;
+    row.querySelector('.tr-del').addEventListener('click', async () => {
+      appRules = appRules.filter(r => r.id !== rule.id);
+      await ipc('set-settings', { ...settings, appRules });
+      renderAppRules();
+    });
+    list.appendChild(row);
+  }
+}
+
+document.getElementById('btn-add-app-rule').addEventListener('click', () => {
+  document.getElementById('ar-exe').value = '';
+  document.getElementById('ar-action').value = 'pause';
+  document.getElementById('modal-app-rule').classList.add('open');
+});
+
+document.getElementById('btn-ar-add').addEventListener('click', async () => {
+  const exe = document.getElementById('ar-exe').value.trim();
+  const action = document.getElementById('ar-action').value;
+  if (!exe) return alert('Digite o nome do executável (ex: cs2.exe)');
+  
+  appRules.push({ id: Date.now().toString(), exe, action });
+  await ipc('set-settings', { ...settings, appRules });
+  renderAppRules();
+  closeModal('modal-app-rule');
+});
+
 // ---- Time Rules ----
 function renderTimeRules() {
   const list = document.getElementById('time-rules-list');
@@ -1077,10 +1126,12 @@ async function init() {
   setPauseFs.checked = settings.pauseOnFullscreen ?? true;
   setMuteFs.checked  = settings.muteOnFullscreen  ?? false;
   setStartup.checked = settings.startWithWindows  ?? false;
+  appRules = settings.appRules || [];
 
   renderLibrary();
   updateNowPlaying();
   renderMonitors();
+  renderAppRules();
   renderTimeRules();
   loadWorkshopItems(1);
 
