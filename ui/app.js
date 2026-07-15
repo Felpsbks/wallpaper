@@ -783,13 +783,9 @@ function setWsStatus(text, detail = '', pct = null, color = 'var(--accent)') {
 let wsCurrentPage = 1;
 let wsItems = [];
 
-async function loadWorkshopItems(page = 1, append = false) {
-  if (!append) {
-    wsGrid.innerHTML = '<div class="empty-state"><div class="empty-icon">⏳</div><p>Carregando wallpapers...</p></div>';
-    wsItems = [];
-  } else {
-    document.getElementById('ws-load-more')?.remove();
-  }
+async function loadWorkshopItems(page = 1) {
+  wsGrid.innerHTML = '<div class="empty-state"><div class="empty-icon">⏳</div><p>Carregando wallpapers...</p></div>';
+  wsItems = [];
   wsCurrentPage = page;
 
   const result = await ipc('browse-workshop', {
@@ -803,25 +799,24 @@ async function loadWorkshopItems(page = 1, append = false) {
     return;
   }
 
-  const newItems = result.items;
-  wsItems = append ? [...wsItems, ...newItems] : newItems;
-  renderWorkshopGrid(append ? newItems : null);
+  wsItems = result.items;
+  const hasMore = wsItems.length >= 30; // Steam API often limits around 30 per page for search
+  renderWorkshopGrid(hasMore);
 }
 
-function renderWorkshopGrid(appendItems = null) {
+function renderWorkshopGrid(hasMore = false) {
   if (wsItems.length === 0) {
     wsGrid.innerHTML = '<div class="empty-state"><div class="empty-icon">🔍</div><p>Nenhum wallpaper encontrado</p><small>Tente outra busca ou filtro</small></div>';
     return;
   }
 
-  const itemsToRender = appendItems || wsItems;
-  if (!appendItems) wsGrid.innerHTML = '';
+  wsGrid.innerHTML = '';
 
-  itemsToRender.forEach(item => {
+  wsItems.forEach(item => {
     const card = document.createElement('div');
     card.className = 'ws-card-new';
     card.dataset.wsid = item.workshopId;
-    card.title = `${item.title}\n${item.tags.join(', ')}\n${item.subscribers} inscritos`;
+    card.title = `${item.title}\\n${item.tags.join(', ')}\\n${item.subscribers} inscritos`;
     card.innerHTML = `
       ${item.preview ? `<img class="ws-card-img" src="${item.preview}" loading="lazy" />` : '<div style="width:100%;height:100%;background:var(--bg3);display:flex;align-items:center;justify-content:center;font-size:24px">🌐</div>'}
       <div class="ws-card-overlay"></div>
@@ -843,13 +838,45 @@ function renderWorkshopGrid(appendItems = null) {
     wsGrid.appendChild(card);
   });
 
-  // Load more button
-  const moreWrap = document.createElement('div');
-  moreWrap.id = 'ws-load-more';
-  moreWrap.style.cssText = 'grid-column:1/-1; text-align:center; padding:16px;';
-  moreWrap.innerHTML = '<button class="btn btn-secondary" style="padding:10px 30px;">Carregar mais</button>';
-  moreWrap.querySelector('button').addEventListener('click', () => loadWorkshopItems(wsCurrentPage + 1, true));
-  wsGrid.appendChild(moreWrap);
+  // Numbered Pagination
+  const pagWrap = document.createElement('div');
+  pagWrap.id = 'ws-pagination';
+  pagWrap.style.cssText = 'grid-column:1/-1; display:flex; justify-content:center; align-items:center; gap:8px; padding:16px 0 32px 0;';
+  
+  const createBtn = (label, pageNum, isActive = false) => {
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-secondary';
+    btn.style.cssText = 'min-width:40px; padding:8px 12px; font-weight:bold; transition:all 0.2s ease; border-radius:6px;';
+    if (isActive) {
+      btn.style.background = 'var(--accent)';
+      btn.style.color = '#000';
+      btn.style.borderColor = 'var(--accent)';
+    }
+    btn.textContent = label;
+    btn.addEventListener('click', () => {
+      if (pageNum !== wsCurrentPage) loadWorkshopItems(pageNum);
+    });
+    return btn;
+  };
+
+  if (wsCurrentPage > 1) {
+    pagWrap.appendChild(createBtn('← Anterior', wsCurrentPage - 1));
+  }
+  
+  const startPage = Math.max(1, wsCurrentPage - 2);
+  const endPage = startPage + 4;
+  
+  for (let i = startPage; i <= endPage; i++) {
+    // Only show future pages if we are somewhat sure they exist, but Steam always returns 30 unless it's the end.
+    if (i > wsCurrentPage && !hasMore && i !== endPage) continue;
+    pagWrap.appendChild(createBtn(i, i, i === wsCurrentPage));
+  }
+  
+  if (hasMore) {
+    pagWrap.appendChild(createBtn('Próxima →', wsCurrentPage + 1));
+  }
+  
+  wsGrid.appendChild(pagWrap);
 }
 
 function populateDetailsPanel(item) {
