@@ -373,6 +373,7 @@ function parseSingleWorkshopItem(wpDir, id) {
       src: preview,
       preview,
       tags: Array.isArray(project.tags) ? project.tags : [],
+      properties: project.general && project.general.properties ? project.general.properties : null,
     };
   }
 
@@ -386,6 +387,7 @@ function parseSingleWorkshopItem(wpDir, id) {
     src: type === 'video' ? filePath : 'file:///' + filePath.replace(/\\/g, '/'),
     preview,
     tags: Array.isArray(project.tags) ? project.tags : [],
+    properties: project.general && project.general.properties ? project.general.properties : null,
   };
 }
 
@@ -681,7 +683,8 @@ function runSteamCMD(steamcmdExe, steamcmdDir, loginArgs, workshopId) {
     proc.stdout.on('data', onData);
     proc.stderr.on('data', onData);
     proc.on('close', () => {
-      const ok = output.includes('Success') || (fs.existsSync(contentDir) && fs.readdirSync(contentDir).length > 0);
+      const hasError = /Timeout|failed \(Failure\)/i.test(output) && !output.includes('Success');
+      const ok = !hasError && (output.includes('Success') || (fs.existsSync(contentDir) && fs.readdirSync(contentDir).length > 0));
       resolve({ ok, output, contentDir });
     });
   });
@@ -742,10 +745,16 @@ ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUr
     if (savedAuth?.accountName) {
       appLog(`Conta salva: ${savedAuth.accountName}. Tentando login direto...`);
       controlWin.webContents.send('download-progress', { state: 'start', name: `${name} (${savedAuth.accountName})` });
-      const loginArgs = savedAuth.password
-        ? ['+login', savedAuth.accountName, savedAuth.password]
-        : ['+login', savedAuth.accountName];
+      let loginArgs = ['+login', savedAuth.accountName];
       result = await runSteamCMD(steamcmdExe, steamcmdDir, loginArgs, workshopId);
+      
+      // se falhou por precisar de senha e nós temos a senha salva, tenta com senha
+      if (!result.ok && /password|failed to log/i.test(result.output) && savedAuth.password) {
+        appLog(`Login sem senha falhou, tentando com senha...`);
+        loginArgs = ['+login', savedAuth.accountName, savedAuth.password];
+        result = await runSteamCMD(steamcmdExe, steamcmdDir, loginArgs, workshopId);
+      }
+      
       appLog(`Login salvo: ok=${result.ok} | saída:\n${result.output.slice(-400)}`);
       
       // If saved auth fails, don't try anonymous (since WE is paid anyway), let it fall through to error/needs-login

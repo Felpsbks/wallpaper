@@ -39,6 +39,25 @@ function showImage(wallpaper) {
 function showWeb(wallpaper) {
   hideAll();
   webEl.style.display = 'block';
+  
+  // Apply saved properties when webview finishes loading
+  const onDomReady = () => {
+    if (wallpaper.options && Object.keys(wallpaper.options).length > 0) {
+      const propsObj = {};
+      for (const [key, val] of Object.entries(wallpaper.options)) {
+        propsObj[key] = { value: val };
+      }
+      const code = `
+        if (window.wallpaperPropertyListener && window.wallpaperPropertyListener.applyUserProperties) {
+          window.wallpaperPropertyListener.applyUserProperties(${JSON.stringify(propsObj)});
+        }
+      `;
+      webEl.executeJavaScript(code).catch(() => {});
+    }
+    webEl.removeEventListener('dom-ready', onDomReady);
+  };
+  webEl.addEventListener('dom-ready', onDomReady);
+  
   webEl.src = wallpaper.src;
 }
 
@@ -85,4 +104,17 @@ window.addEventListener('resize', () => {
   canvasEl.width  = window.innerWidth;
   canvasEl.height = window.innerHeight;
   if (currentScene?.resize) currentScene.resize(window.innerWidth, window.innerHeight);
+});
+
+ipcRenderer.on('update-native-prop', (_, data) => {
+  if (webEl.style.display === 'block') {
+    const code = `
+      if (window.wallpaperPropertyListener && window.wallpaperPropertyListener.applyUserProperties) {
+        window.wallpaperPropertyListener.applyUserProperties({
+          "${data.key}": { value: ${JSON.stringify(data.value)} }
+        });
+      }
+    `;
+    webEl.executeJavaScript(code).catch(() => {});
+  }
 });

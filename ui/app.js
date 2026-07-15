@@ -118,7 +118,7 @@ function renderLibrary() {
       thumbHtml = `<div class="card-thumb">${typeIcon(w.type, w.scene)}</div>`;
     }
 
-    const hasProps = (w.type === 'scene' || w.type === 'video');
+    const hasProps = (w.type === 'scene' || w.type === 'video' || w.type === 'url' || !!w.properties);
 
     card.innerHTML = `
       <div class="card-active-badge">ATIVO</div>
@@ -269,6 +269,25 @@ const SCENE_FIELDS = {
   ],
 };
 
+function rgbToHex(str) {
+  const parts = str.split(' ').map(Number);
+  if (parts.length < 3) return '#ffffff';
+  // WE typically uses 0.0 - 1.0, but some might use 0-255
+  const isFloat = parts.some(p => p > 0 && p <= 1.0 && p.toString().includes('.'));
+  const rgb = parts.map(p => {
+    let v = isFloat || (p <= 1 && !Number.isInteger(p)) ? p * 255 : p;
+    return Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0');
+  });
+  return `#${rgb[0]}${rgb[1]}${rgb[2]}`;
+}
+
+function hexToRgb(hex) {
+  const r = parseInt(hex.slice(1, 3), 16) / 255;
+  const g = parseInt(hex.slice(3, 5), 16) / 255;
+  const b = parseInt(hex.slice(5, 7), 16) / 255;
+  return `${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)}`;
+}
+
 function openProps(w) {
   propsWallpaper = w;
   document.getElementById('props-title').textContent = `Propriedades — ${w.name}`;
@@ -276,34 +295,79 @@ function openProps(w) {
   fields.innerHTML = '';
 
   let defs = [];
-  if (w.type === 'scene') defs = SCENE_FIELDS[w.scene] || [];
-  if (w.type === 'video') defs = [{ key: 'volume', label: 'Volume (%)', type: 'range', def: 50, min: 0, max: 100, step: 1 }];
+  
+  // 1. Wallpaper Engine Native Properties
+  if (w.properties) {
+    for (const [key, prop] of Object.entries(w.properties)) {
+      defs.push({
+        isNative: true,
+        key,
+        label: prop.text || key,
+        type: prop.type === 'slider' ? 'range' : (prop.type === 'bool' ? 'bool' : prop.type),
+        def: prop.value,
+        min: prop.min !== undefined ? prop.min : 0,
+        max: prop.max !== undefined ? prop.max : 100,
+        step: 1, // we don't always have step in WE
+        opts: prop.options ? prop.options.map(o => o.value) : [],
+        optLabels: prop.options ? prop.options.map(o => o.label) : []
+      });
+    }
+  }
+  
+  // 2. Custom/Fallback Properties
+  if (w.type === 'scene' && !w.properties) defs.push(...(SCENE_FIELDS[w.scene] || []));
+  if (w.type === 'video') defs.push({ key: 'volume', label: 'Volume (%)', type: 'range', def: 50, min: 0, max: 100, step: 1 });
 
-  if (!defs.length) { fields.innerHTML = '<p style="color:var(--text2);font-size:13px">Sem propriedades configuráveis.</p>'; }
+  if (!defs.length) { 
+    fields.innerHTML = '<p style="color:var(--text2);font-size:13px">Sem propriedades configuráveis.</p>'; 
+  }
 
   for (const f of defs) {
     const opts = w.options || {};
     const val  = opts[f.key] !== undefined ? opts[f.key] : f.def;
     const row  = document.createElement('div');
     row.className = 'field';
+    row.dataset.key = f.key;
+    row.dataset.native = f.isNative ? 'true' : 'false';
 
     if (f.type === 'color') {
-      row.innerHTML = `<label>${f.label}</label><div class="color-row"><input type="color" id="pf-${f.key}" value="${val}" /><span class="color-hex" id="pf-${f.key}-hex">${val}</span></div>`;
+      const hexVal = f.isNative && typeof val === 'string' && val.includes(' ') ? rgbToHex(val) : (val || '#ffffff');
+      row.innerHTML = `<label>${f.label}</label><div class="color-row"><input type="color" id="pf-${f.key}" value="${hexVal}" /><span class="color-hex" id="pf-${f.key}-hex">${hexVal}</span></div>`;
       setTimeout(() => {
         const inp = row.querySelector(`#pf-${f.key}`);
         const hex = row.querySelector(`#pf-${f.key}-hex`);
-        inp.addEventListener('input', () => { hex.textContent = inp.value; });
+        inp.addEventListener('input', () => { 
+          hex.textContent = inp.value;
+          sendLivePropUpdate(w, f, inp.value);
+        });
       });
     } else if (f.type === 'range') {
       row.innerHTML = `<label>${f.label} <span class="range-val" id="pf-${f.key}-val" style="float:right">${val}</span></label><input type="range" id="pf-${f.key}" min="${f.min}" max="${f.max}" step="${f.step}" value="${val}" />`;
       setTimeout(() => {
         const inp = row.querySelector(`#pf-${f.key}`);
         const lbl = row.querySelector(`#pf-${f.key}-val`);
-        inp.addEventListener('input', () => { lbl.textContent = (+inp.value).toFixed(f.step < 1 ? 1 : 0); });
+        inp.addEventListener('input', () => { 
+          lbl.textContent = (+inp.value).toFixed(f.step < 1 ? 1 : 0); 
+          sendLivePropUpdate(w, f, +inp.value);
+        });
       });
-    } else if (f.type === 'select') {
+    } else if (f.type === 'bool') {
+      row.innerHTML = `<label class="toggle" style="justify-content:space-between;width:100%;margin-top:8px">${f.label}<input type="checkbox" id="pf-${f.key}" ${val ? 'checked' : ''} /><div class="toggle-slider"></div></label>`;
+      setTimeout(() => {
+        const inp = row.querySelector(`#pf-${f.key}`);
+        inp.addEventListener('change', () => {
+          sendLivePropUpdate(w, f, inp.checked);
+        });
+      });
+    } else if (f.type === 'select' || f.type === 'combo') {
       const options = f.opts.map((o, i) => `<option value="${o}" ${o === val ? 'selected' : ''}>${f.optLabels[i]}</option>`).join('');
       row.innerHTML = `<label>${f.label}</label><select id="pf-${f.key}">${options}</select>`;
+      setTimeout(() => {
+        const inp = row.querySelector(`#pf-${f.key}`);
+        inp.addEventListener('change', () => {
+          sendLivePropUpdate(w, f, inp.value);
+        });
+      });
     }
     fields.appendChild(row);
   }
@@ -311,17 +375,38 @@ function openProps(w) {
   document.getElementById('modal-props').classList.add('open');
 }
 
+function sendLivePropUpdate(w, f, value) {
+  if (w.id !== current?.id) return; // Only live update if it's the active wallpaper
+  let formattedValue = value;
+  if (f.type === 'color' && f.isNative) {
+    formattedValue = hexToRgb(value);
+  }
+  
+  if (f.isNative) {
+    ipc('update-native-prop', { key: f.key, value: formattedValue });
+  } else {
+    // For custom scenes/video volume
+    ipc('update-settings', { [f.key]: value });
+  }
+}
+
 document.getElementById('btn-props-save').addEventListener('click', async () => {
   if (!propsWallpaper) return;
   const w   = { ...propsWallpaper };
-  const defs = w.type === 'scene' ? (SCENE_FIELDS[w.scene] || []) : [{ key: 'volume', type: 'range' }];
   const opts = { ...(w.options || {}) };
+  const fields = document.getElementById('props-fields').children;
 
-  for (const f of defs) {
-    const el = document.getElementById(`pf-${f.key}`);
+  for (const row of fields) {
+    const key = row.dataset.key;
+    const isNative = row.dataset.native === 'true';
+    const el = document.getElementById(`pf-${key}`);
     if (!el) continue;
-    opts[f.key] = f.type === 'range' ? +el.value : el.value;
+    
+    let val = el.type === 'checkbox' ? el.checked : (el.type === 'range' ? +el.value : el.value);
+    if (el.type === 'color' && isNative) val = hexToRgb(val);
+    opts[key] = val;
   }
+  
   w.options = opts;
 
   // Update in library
