@@ -196,6 +196,10 @@
 
         <div class="settings-section-title">Áudio</div>
         <div class="setting-row">
+          <div><div class="setting-label">Áudio Reativo</div><div class="setting-desc">Envia áudio do sistema para wallpapers Web (Lively)</div></div>
+          <label class="toggle"><input type="checkbox" id="set-audio-reactive" /><div class="toggle-slider"></div></label>
+        </div>
+        <div class="setting-row">
           <div><div class="setting-label">Volume do vídeo</div><div class="setting-desc">Volume padrão de wallpapers em vídeo</div></div>
           <div class="range-row" style="width:200px">
             <input type="range" id="set-volume" min="0" max="100" value="50" />
@@ -215,6 +219,13 @@
         <div class="setting-row">
           <div><div class="setting-label">Iniciar com o Windows</div><div class="setting-desc">Abre o app automaticamente ao ligar o PC</div></div>
           <label class="toggle"><input type="checkbox" id="set-startup" /><div class="toggle-slider"></div></label>
+        </div>
+        
+        <div class="settings-section-title" style="margin-top:24px">Modo Screensaver (Lively Mode)</div>
+        <div class="setting-desc" style="padding:0 0 10px">O Windows usará seus wallpapers atuais como descanso de tela!</div>
+        <div class="setting-row">
+          <div><div class="setting-label">Instalar Screensaver Nativo</div><div class="setting-desc">Requer privilégios de Administrador</div></div>
+          <button class="btn btn-primary" id="btn-install-screensaver" style="margin:0; padding: 6px 12px; font-size:12px;">Instalar</button>
         </div>
 
         <div class="settings-section-title">Monitores</div>

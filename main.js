@@ -1,4 +1,21 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, dialog, screen, nativeImage, desktopCapturer } = require('electron');
+
+// ---- RAM Saver: Dieta do Chromium ----
+app.commandLine.appendSwitch('disable-print-preview');
+app.commandLine.appendSwitch('disable-spell-checking');
+app.commandLine.appendSwitch('disable-speech-api');
+app.commandLine.appendSwitch('disable-pdf-extension');
+app.commandLine.appendSwitch('disable-sync');
+app.commandLine.appendSwitch('disable-metrics');
+app.commandLine.appendSwitch('disable-logging');
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256');
+
+const args = process.argv.map(a => a.toLowerCase());
+const _isScreensaver = args.includes('/s') || args.includes('-s');
+const _isConfigMode = args.includes('/c') || args.includes('-c');
+if (args.find(a => a.startsWith('/p') || a.startsWith('-p'))) {
+  app.exit(0); // Preview mode not supported yet due to HWND complexity
+}
 try { require('electron-reload')(__dirname); } catch (_) {}
 const path       = require('path');
 const fs         = require('fs');
@@ -52,18 +69,32 @@ function spawnWallpaperWindow(display) {
     x: bounds.x, y: bounds.y,
     frame: false, transparent: true,
     resizable: false, movable: false,
-    focusable: false, skipTaskbar: true, alwaysOnTop: false,
+    focusable: _isScreensaver, skipTaskbar: true, alwaysOnTop: _isScreensaver,
+    fullscreen: _isScreensaver,
     webPreferences: {
       nodeIntegration: true, contextIsolation: false,
       webviewTag: true, webSecurity: false,
     },
   });
 
+  if (_isScreensaver) {
+    win.setAlwaysOnTop(true, 'screen-saver');
+  }
+
   win.loadFile(path.join(__dirname, 'wallpaper', 'index.html'));
-  win.setIgnoreMouseEvents(true);
+  win.setIgnoreMouseEvents(!_isScreensaver);
+
+  if (_isScreensaver) {
+    win.webContents.on('before-input-event', () => app.exit(0));
+    win.on('mousemove', () => app.exit(0)); // Exit on mouse move
+    const uIOHook = require('uiohook-napi');
+    uIOHook.uIOhook.on('mousemove', () => app.exit(0));
+    uIOHook.uIOhook.on('keydown', () => app.exit(0));
+    try { uIOHook.uIOhook.start(); } catch(e) {}
+  }
 
   win.webContents.on('did-finish-load', () => {
-    embedWallpaperBehindDesktop(win);
+    if (!_isScreensaver) embedWallpaperBehindDesktop(win);
 
     // Per-display wallpaper, fallback to global current
     const displayWallpapers = store.get('displayWallpapers') || {};
@@ -95,7 +126,7 @@ function createControlWindow() {
 
   controlWin.loadFile(path.join(__dirname, 'ui', 'index.html'));
   controlWin.once('ready-to-show', () => controlWin.show());
-  controlWin.on('close', (e) => { e.preventDefault(); controlWin.hide(); });
+  controlWin.on('closed', () => { controlWin = null; });
 
   controlWin.webContents.session.on('will-download', (_, item) => {
     const fname = item.getFilename();
@@ -113,13 +144,15 @@ function createControlWindow() {
     item.on('updated', (_, state) => {
       if (state === 'progressing' && !item.isPaused()) {
         const total = item.getTotalBytes();
-        controlWin.webContents.send('download-progress', { state: 'progress', pct: total > 0 ? item.getReceivedBytes() / total : 0 });
+        if (controlWin && !controlWin.isDestroyed()) {
+          controlWin.webContents.send('download-progress', { state: 'progress', pct: total > 0 ? item.getReceivedBytes() / total : 0 });
+        }
       }
     });
 
     item.once('done', (_, state) => {
       if (state !== 'completed') {
-        controlWin.webContents.send('download-progress', { state: 'error', msg: 'Download cancelado ou falhou.' });
+        if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'error', msg: 'Download cancelado ou falhou.' });
         return;
       }
       try {
@@ -138,12 +171,12 @@ function createControlWindow() {
           wpItem.id = Date.now().toString();
           library.push(wpItem);
           store.set('library', library);
-          controlWin.webContents.send('download-progress', { state: 'completed', wallpaper: wpItem });
+          if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'completed', wallpaper: wpItem });
         } else {
-          controlWin.webContents.send('download-progress', { state: 'error', msg: 'Formato inválido no ZIP baixado.' });
+          if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'error', msg: 'Formato inválido no ZIP baixado.' });
         }
       } catch (err) {
-        controlWin.webContents.send('download-progress', { state: 'error', msg: err.message });
+        if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'error', msg: err.message });
       }
     });
   });
@@ -172,7 +205,11 @@ function createTray() {
   tray.setToolTip('Engine Wallpaper');
 
   const menu = Menu.buildFromTemplate([
-    { label: 'Abrir painel',       click: () => { controlWin.show(); controlWin.focus(); } },
+    { label: 'Abrir painel',       click: () => { 
+        if (!controlWin || controlWin.isDestroyed()) createControlWindow();
+        else { controlWin.show(); controlWin.focus(); }
+      } 
+    },
     { type: 'separator' },
     { label: 'Próximo wallpaper',  click: () => playlist.next() },
     { label: 'Pausar',             click: () => sendToAllWallpapers('pause') },
@@ -180,7 +217,14 @@ function createTray() {
     { label: 'Sair',               click: () => app.exit(0) },
   ]);
   tray.setContextMenu(menu);
-  tray.on('double-click', () => { controlWin.show(); controlWin.focus(); });
+  tray.on('double-click', () => {
+    if (!controlWin || controlWin.isDestroyed()) {
+      createControlWindow();
+    } else {
+      controlWin.show();
+      controlWin.focus();
+    }
+  });
 }
 
 // ---- Fullscreen monitor ----
@@ -306,7 +350,7 @@ ipcMain.handle('get-library', () => {
 });
 ipcMain.handle('get-current',          () => store.get('current') || null);
 ipcMain.handle('get-playlist-config',  () => store.get('playlistConfig') || { enabled: false, interval: 30, shuffle: false });
-ipcMain.handle('get-settings',         () => store.get('settings') || { volume: 50, pauseOnFullscreen: true, muteOnFullscreen: false, startWithWindows: false });
+ipcMain.handle('get-settings',         () => store.get('settings') || { volume: 50, pauseOnFullscreen: true, muteOnFullscreen: false, startWithWindows: true, audioReactive: false });
 ipcMain.handle('get-displays',         () => screen.getAllDisplays().map(d => ({ id: d.id, bounds: d.bounds, label: d.label || null })));
 ipcMain.handle('get-display-wallpapers', () => store.get('displayWallpapers') || {});
 ipcMain.handle('get-time-rules',       () => store.get('timeRules') || []);
@@ -386,7 +430,7 @@ ipcMain.handle('open-in-steam', (_, workshopId) => {
 
 ipcMain.handle('window-minimize', () => controlWin?.minimize());
 ipcMain.handle('window-maximize', () => controlWin?.isMaximized() ? controlWin.unmaximize() : controlWin?.maximize());
-ipcMain.handle('window-close',    () => controlWin?.hide());
+ipcMain.handle('window-close',    () => controlWin?.close());
 
 // ---- Steam Workshop scanner ----
 function getSteamPath() {
@@ -702,7 +746,7 @@ function importFromContentDir(contentDir, workshopId) {
 ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUrl, fileUrl }) => {
   try {
     appLog(`Iniciando download web do wallpaper "${name}" (ID: ${workshopId})`);
-    controlWin.webContents.send('download-progress', { state: 'preparing', name });
+    if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'preparing', name });
 
     const cookies = store.get('steamWebCookies');
     if (!cookies || !cookies.sessionid || !cookies.steamLoginSecure) {
@@ -730,7 +774,7 @@ ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUr
     }
 
     appLog.ok(`Inscrito com sucesso! Aguardando a Steam do PC baixar os arquivos...`);
-    controlWin.webContents.send('download-progress', { state: 'progress', pct: 0.5, downloaded: 0, total: 100, speed: 0 });
+    if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'progress', pct: 0.5, downloaded: 0, total: 100, speed: 0 });
 
     let steamPath = '';
     try {
@@ -752,25 +796,25 @@ ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUr
             const wpItem = importFromContentDir(contentDir, workshopId);
             if (wpItem) {
               appLog.ok(`Arquivo baixado pela Steam e importado com sucesso!`);
-              controlWin.webContents.send('download-progress', { state: 'completed', wallpaper: wpItem });
+              if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'completed', wallpaper: wpItem });
               resolve({ ok: true });
             } else {
               appLog.err(`Formato não reconhecido na pasta baixada.`);
-              controlWin.webContents.send('download-progress', { state: 'error', msg: 'Formato não reconhecido.' });
+              if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'error', msg: 'Formato não reconhecido.' });
               resolve({ ok: false, msg: 'Formato não reconhecido.' });
             }
           }, 3000);
         } else if (attempts >= 120) { // 2 minutos de espera
           clearInterval(timer);
           appLog.err(`Tempo limite esperando a Steam baixar o item.`);
-          controlWin.webContents.send('download-progress', { state: 'error', msg: 'Tempo esgotado. Verifique se a Steam está aberta e baixando.' });
+          if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'error', msg: 'Tempo esgotado. Verifique se a Steam está aberta e baixando.' });
           resolve({ ok: false, msg: 'Tempo limite.' });
         }
       }, 1000);
     });
   } catch (err) {
     appLog.err(`Erro na inscrição via web: ${err.message}`);
-    controlWin.webContents.send('download-progress', { state: 'error', msg: err.message });
+    if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'error', msg: err.message });
     return { ok: false, msg: err.message };
   }
 });
@@ -812,6 +856,27 @@ ipcMain.handle('sync-steam-desktop', async () => {
   return { count: added };
 });
 
+ipcMain.handle('install-screensaver', async () => {
+  try {
+    const binDir = path.join(__dirname, 'bin');
+    const exePath = path.join(binDir, 'electron.exe');
+    const scrPath = path.join(binDir, 'EngineWallpaper.scr');
+    
+    if (!fs.existsSync(exePath)) return { ok: false, msg: 'Execute o comando "npm run pack" primeiro.' };
+    
+    fs.copyFileSync(exePath, scrPath);
+    
+    const { execSync } = require('child_process');
+    execSync(`reg add "HKCU\\Control Panel\\Desktop" /v SCRNSAVE.EXE /t REG_SZ /d "${scrPath}" /f`);
+    execSync(`reg add "HKCU\\Control Panel\\Desktop" /v ScreenSaveActive /t REG_SZ /d "1" /f`);
+    
+    return { ok: true };
+  } catch (err) {
+    appLog.err('Erro instalando screensaver: ' + err.message);
+    return { ok: false, msg: err.message };
+  }
+});
+
 // ---- Playlist ----
 playlist.on('change', (wallpaper) => {
   store.set('current', wallpaper);
@@ -821,12 +886,24 @@ playlist.on('change', (wallpaper) => {
 
 // ---- Boot ----
 app.whenReady().then(() => {
+  // First boot configuration
+  if (!store.get('settings')) {
+    const defaultSettings = { volume: 50, pauseOnFullscreen: true, muteOnFullscreen: false, startWithWindows: true, audioReactive: false };
+    store.set('settings', defaultSettings);
+    app.setLoginItemSettings({ openAtLogin: true, path: process.execPath });
+  }
+
   createWallpaperWindows();
-  createControlWindow();
-  createTray();
   playlist.start();
-  startFullscreenMonitor();
-  startTimeRulesMonitor();
+  
+  if (!_isScreensaver && !_isConfigMode) {
+    createControlWindow();
+    createTray();
+    startFullscreenMonitor();
+    startTimeRulesMonitor();
+  } else if (_isConfigMode) {
+    createControlWindow();
+  }
 });
 
 app.on('window-all-closed', (e) => e.preventDefault());

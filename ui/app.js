@@ -449,14 +449,32 @@ const setVolumeV = document.getElementById('set-volume-val');
 const setPauseFs = document.getElementById('set-pause-fs');
 const setMuteFs  = document.getElementById('set-mute-fs');
 const setStartup = document.getElementById('set-startup');
+const setAudioRe = document.getElementById('set-audio-reactive');
+const btnInstallScr = document.getElementById('btn-install-screensaver');
 
 setVolume.addEventListener('input', () => { setVolumeV.textContent = setVolume.value + '%'; });
 
 async function saveSettings() {
-  settings = { volume: +setVolume.value, pauseOnFullscreen: setPauseFs.checked, muteOnFullscreen: setMuteFs.checked, startWithWindows: setStartup.checked };
+  settings = { 
+    volume: +setVolume.value, 
+    pauseOnFullscreen: setPauseFs.checked, 
+    muteOnFullscreen: setMuteFs.checked, 
+    startWithWindows: setStartup.checked,
+    audioReactive: setAudioRe.checked
+  };
   await ipc('set-settings', settings);
 }
-[setVolume, setPauseFs, setMuteFs, setStartup].forEach(el => el.addEventListener('change', saveSettings));
+[setVolume, setPauseFs, setMuteFs, setStartup, setAudioRe].forEach(el => el.addEventListener('change', saveSettings));
+
+if (btnInstallScr) {
+  btnInstallScr.addEventListener('click', async () => {
+    btnInstallScr.textContent = 'Instalando...';
+    const res = await ipc('install-screensaver');
+    if (res.ok) btnInstallScr.textContent = 'Instalado!';
+    else { btnInstallScr.textContent = 'Erro'; alert(res.msg); }
+    setTimeout(() => btnInstallScr.textContent = 'Instalar', 3000);
+  });
+}
 
 // ---- Monitors ----
 function renderMonitors() {
@@ -1163,6 +1181,7 @@ async function init() {
     setPauseFs.checked = settings.pauseOnFullscreen ?? true;
     setMuteFs.checked  = settings.muteOnFullscreen  ?? false;
     setStartup.checked = settings.startWithWindows  ?? false;
+    setAudioRe.checked = settings.audioReactive     ?? false;
     appRules = settings.appRules || [];
 
     renderLibrary();

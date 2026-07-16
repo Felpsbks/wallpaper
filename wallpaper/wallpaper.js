@@ -60,7 +60,9 @@ function updateAudioData() {
   requestAnimationFrame(updateAudioData);
 }
 
-initAudioVisualizer();
+ipcRenderer.invoke('get-settings').then(s => {
+  if (s && s.audioReactive) initAudioVisualizer();
+});
 
 function hideAll() {
   videoEl.style.display = 'none';
@@ -171,6 +173,15 @@ ipcRenderer.on('mute',             ()     => { videoEl.volume = 0; });
 ipcRenderer.on('unmute',           (_, v) => { savedVolume = v / 100; videoEl.volume = savedVolume; });
 ipcRenderer.on('update-settings',  (_, s) => {
   if (s.volume !== undefined) { savedVolume = s.volume / 100; videoEl.volume = savedVolume; }
+  if (s.audioReactive !== undefined) {
+    if (s.audioReactive && !audioContext) initAudioVisualizer();
+    else if (!s.audioReactive && audioContext) {
+      audioContext.close();
+      audioContext = null;
+      analyser = null;
+      dataArray = null;
+    }
+  }
 });
 
 window.addEventListener('resize', () => {
