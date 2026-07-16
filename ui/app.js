@@ -319,8 +319,24 @@ function openProps(w) {
   if (w.type === 'scene' && !w.properties) defs.push(...(SCENE_FIELDS[w.scene] || []));
   if (w.type === 'video') defs.push({ key: 'volume', label: 'Volume (%)', type: 'range', def: 50, min: 0, max: 100, step: 1 });
 
-  if (!defs.length) { 
-    fields.innerHTML = '<p style="color:var(--text2);font-size:13px">Sem propriedades configuráveis.</p>'; 
+  if (!defs.length && !w.weSceneDir) {
+    fields.innerHTML = '<p style="color:var(--text2);font-size:13px">Sem propriedades configuráveis.</p>';
+  }
+
+  if (w.weSceneDir) {
+    const editRow = document.createElement('div');
+    editRow.className = 'field';
+    editRow.innerHTML = `
+      <button class="btn btn-secondary" id="btn-we-scene-edit" style="width:100%">🖊️ Ajustar posição/tamanho dos textos</button>
+      <div style="font-size:11px;color:var(--text2);margin-top:6px">Aplique este wallpaper primeiro.</div>
+    `;
+    fields.appendChild(editRow);
+    setTimeout(() => {
+      document.getElementById('btn-we-scene-edit').addEventListener('click', () => {
+        closeModal('modal-props');
+        document.getElementById('modal-we-scene-help').classList.add('open');
+      });
+    });
   }
 
   for (const f of defs) {
@@ -452,19 +468,45 @@ const setStartup = document.getElementById('set-startup');
 const setAudioRe = document.getElementById('set-audio-reactive');
 const btnInstallScr = document.getElementById('btn-install-screensaver');
 
+const clockEnabled   = document.getElementById('clock-enabled');
+const clockPosition  = document.getElementById('clock-position');
+const clockFormat24h = document.getElementById('clock-format24h');
+const clockSeconds   = document.getElementById('clock-seconds');
+const clockDate      = document.getElementById('clock-date');
+const clockDayName   = document.getElementById('clock-dayname');
+const clockColor     = document.getElementById('clock-color');
+const clockFontSize  = document.getElementById('clock-fontsize');
+const clockFontSizeV = document.getElementById('clock-fontsize-val');
+
 setVolume.addEventListener('input', () => { setVolumeV.textContent = setVolume.value + '%'; });
+clockFontSize.addEventListener('input', () => { clockFontSizeV.textContent = clockFontSize.value + 'px'; });
 
 async function saveSettings() {
-  settings = { 
-    volume: +setVolume.value, 
-    pauseOnFullscreen: setPauseFs.checked, 
-    muteOnFullscreen: setMuteFs.checked, 
+  // Spread the previous settings first — appRules and other fields not owned by
+  // this form live inside the same `settings` object and would otherwise be wiped.
+  settings = {
+    ...settings,
+    volume: +setVolume.value,
+    pauseOnFullscreen: setPauseFs.checked,
+    muteOnFullscreen: setMuteFs.checked,
     startWithWindows: setStartup.checked,
-    audioReactive: setAudioRe.checked
+    audioReactive: setAudioRe.checked,
+    clockOverlay: {
+      enabled: clockEnabled.checked,
+      position: clockPosition.value,
+      format24h: clockFormat24h.checked,
+      showSeconds: clockSeconds.checked,
+      showDate: clockDate.checked,
+      showDayName: clockDayName.checked,
+      color: clockColor.value,
+      fontSize: +clockFontSize.value,
+    },
   };
   await ipc('set-settings', settings);
 }
-[setVolume, setPauseFs, setMuteFs, setStartup, setAudioRe].forEach(el => el.addEventListener('change', saveSettings));
+[setVolume, setPauseFs, setMuteFs, setStartup, setAudioRe,
+ clockEnabled, clockPosition, clockFormat24h, clockSeconds, clockDate, clockDayName, clockColor, clockFontSize
+].forEach(el => el.addEventListener('change', saveSettings));
 
 if (btnInstallScr) {
   btnInstallScr.addEventListener('click', async () => {
@@ -715,9 +757,11 @@ document.getElementById('btn-steam-import').addEventListener('click', async () =
   for (const wp of toImport) {
     if (library.some(l => l.src === wp.src)) continue;
     let thumbnail = wp.preview ? toFileUrl(wp.preview) : null;
-    // WE Scene (.pkg) can't be rendered — import as static image using its preview
-    const importType = wp.type === 'scene' ? 'image' : wp.type;
-    const w = await ipc('add-wallpaper', { type: importType, name: wp.name, src: wp.src, thumbnail, steamId: wp.workshopId });
+    // If we managed to unpack the scene's .pkg (see main.js resolveWeSceneDir),
+    // keep it as a real 'scene' — wallpaper.js renders it live. Otherwise fall
+    // back to importing its frozen preview as a static image.
+    const importType = (wp.type === 'scene' && !wp.weSceneDir) ? 'image' : wp.type;
+    const w = await ipc('add-wallpaper', { type: importType, name: wp.name, src: wp.src, thumbnail, steamId: wp.workshopId, weSceneDir: wp.weSceneDir });
     library.push(w);
     lastAdded = w;
   }
@@ -764,6 +808,16 @@ const app = {
     setWallpaper(items[(idx + 1) % items.length]);
   },
 };
+
+// ---- Play/Pause ----
+const btnPlayPause = document.getElementById('btn-play-pause');
+const ICON_PAUSE = '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>';
+const ICON_PLAY   = '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"></polygon></svg>';
+btnPlayPause.addEventListener('click', async () => {
+  const { paused } = await ipc('toggle-playback');
+  btnPlayPause.innerHTML = paused ? ICON_PLAY : ICON_PAUSE;
+  btnPlayPause.classList.toggle('np-paused', paused);
+});
 
 // ---- Listen for events from main ----
 ipcRenderer.on('wallpaper-changed', (_, w) => {
@@ -884,6 +938,8 @@ function setWsStatus(text, detail = '', pct = null, color = 'var(--accent)') {
 
 let wsCurrentPage = 1;
 let wsItems = [];
+let wsCategoryTag = '';
+let wsOnlyCompatible = true;
 
 async function loadWorkshopItems(page = 1) {
   wsGrid.innerHTML = '<div class="empty-state"><div class="empty-icon">⏳</div><p>Carregando wallpapers...</p></div>';
@@ -894,6 +950,7 @@ async function loadWorkshopItems(page = 1) {
     sort: wsSort.value,
     search: wsSearch.value.trim(),
     page,
+    tag: wsCategoryTag,
   });
 
   if (result.error) {
@@ -907,19 +964,27 @@ async function loadWorkshopItems(page = 1) {
 }
 
 function renderWorkshopGrid(hasMore = false) {
+  const visibleItems = wsOnlyCompatible ? wsItems.filter(i => i.compatible) : wsItems;
+
   if (wsItems.length === 0) {
     wsGrid.innerHTML = '<div class="empty-state"><div class="empty-icon">🔍</div><p>Nenhum wallpaper encontrado</p><small>Tente outra busca ou filtro</small></div>';
+    return;
+  }
+  if (visibleItems.length === 0) {
+    wsGrid.innerHTML = '<div class="empty-state"><div class="empty-icon">🚫</div><p>Nenhum wallpaper compatível nesta página</p><small>Todos os resultados precisam do motor gráfico proprietário do Wallpaper Engine. Desative "Somente compatíveis" para ver mesmo assim.</small></div>';
     return;
   }
 
   wsGrid.innerHTML = '';
 
-  wsItems.forEach(item => {
+  visibleItems.forEach(item => {
     const card = document.createElement('div');
     card.className = 'ws-card-new';
     card.dataset.wsid = item.workshopId;
     card.title = `${item.title}\\n${item.tags.join(', ')}\\n${item.subscribers} inscritos`;
+    const staticBadge = item.waType === 'scene' ? '<div class="ws-card-static-badge" title="Este item usa o motor proprietário do Wallpaper Engine e será importado como imagem estática">🖼️ Estático</div>' : '';
     card.innerHTML = `
+      ${staticBadge}
       ${item.preview ? `<img class="ws-card-img" src="${item.preview}" loading="lazy" />` : '<div style="width:100%;height:100%;background:var(--bg3);display:flex;align-items:center;justify-content:center;font-size:24px">🌐</div>'}
       <div class="ws-card-overlay"></div>
       <div class="ws-card-stats">
@@ -981,53 +1046,56 @@ function renderWorkshopGrid(hasMore = false) {
   wsGrid.appendChild(pagWrap);
 }
 
+const WA_TYPE_LABELS = {
+  video: 'Vídeo',
+  web: 'Web',
+  scene: 'Cena (importa como imagem estática)',
+  application: 'Aplicativo — incompatível, não funciona neste app',
+  unknown: 'Desconhecido',
+};
+
 function populateDetailsPanel(item) {
   const details = document.getElementById('ws-details');
   const safeTitle = item.title.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-  
+  const typeLabel = WA_TYPE_LABELS[item.waType] || WA_TYPE_LABELS.unknown;
+  const createdLabel = item.timeCreated
+    ? new Date(item.timeCreated * 1000).toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' })
+    : 'Desconhecido';
+
   details.innerHTML = `
     <div class="det-img-wrap">
       ${item.preview ? `<img class="det-img" src="${item.preview}" />` : ''}
     </div>
     <div class="det-title">${item.title}</div>
-    <div class="det-author">Por: <span>Desconhecido</span> <svg class="verified-icon" viewBox="0 0 24 24"><path d="M12 2l3.09 2.26 3.83-.86 1.15 3.73 3.4 1.94-1.94 3.4 1.94 3.4-3.4 1.94-1.15 3.73-3.83-.86L12 22l-3.09-2.26-3.83.86-1.15-3.73-3.4-1.94 1.94-3.4-1.94-3.4 3.4-1.94 1.15-3.73 3.83.86z"></path><polyline points="9 12 11 14 15 10" fill="none" stroke="#fff" stroke-width="2"></polyline></svg></div>
-    
+
     <div class="det-stats-row">
       <div class="det-stat">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
         ${formatSubscribers(item.subscribers)}
       </div>
       <div class="det-stat">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
-        4.8
-      </div>
-      <div class="det-stat">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="10" rx="2" ry="2"></rect><line x1="12" y1="7" x2="12" y2="17"></line></svg>
-        16:9
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+        ${formatSubscribers(item.views)}
       </div>
     </div>
 
+    ${!item.compatible ? `<div class="det-incompatible-warning">⚠️ Este wallpaper precisa do motor gráfico proprietário do Wallpaper Engine e não vai funcionar aqui.</div>` : ''}
+
     <div class="det-btn-row">
-      <button class="btn-apply" onclick="startWorkshopDownload('${item.workshopId}', '${safeTitle}', '${item.preview || ''}', '${item.file_url || ''}')">
+      <button class="btn-apply" ${!item.compatible ? 'disabled title="Incompatível com este app"' : ''} onclick="startWorkshopDownload('${item.workshopId}', '${safeTitle}', '${item.preview || ''}', '${item.file_url || ''}')">
         📥 Baixar wallpaper
-      </button>
-      <button class="btn-secondary-full">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
-        Adicionar à playlist
       </button>
     </div>
 
     <div class="det-section-title">Informações</div>
     <div class="det-info-grid">
-      <div class="det-info-lbl">Tipo:</div><div class="det-info-val">Vídeo</div>
-      <div class="det-info-lbl">Resolução:</div><div class="det-info-val">1920x1080</div>
-      <div class="det-info-lbl">Duração:</div><div class="det-info-val">00:24</div>
+      <div class="det-info-lbl">Tipo:</div><div class="det-info-val">${typeLabel}</div>
       <div class="det-info-lbl">Tags:</div><div class="det-info-val">${(item.tags || []).slice(0, 4).join(', ')}</div>
     </div>
 
     <div class="det-section-title">Criado em</div>
     <div class="det-info-grid">
-      <div class="det-info-val" style="grid-column:1/-1">20 de abr. de 2024</div>
+      <div class="det-info-val" style="grid-column:1/-1">${createdLabel}</div>
     </div>
   `;
 }
@@ -1049,6 +1117,22 @@ async function startWorkshopDownload(workshopId, title, previewUrl, fileUrl) {
     document.getElementById('modal-steam-login').classList.add('open');
   }
 }
+
+// Category filter buttons
+document.querySelectorAll('.cat-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.cat-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    wsCategoryTag = btn.dataset.tag || '';
+    loadWorkshopItems(1);
+  });
+});
+
+// "Somente compatíveis" toggle — just re-filters the already-loaded page, no refetch needed
+document.getElementById('ws-only-compatible').addEventListener('change', (e) => {
+  wsOnlyCompatible = e.target.checked;
+  renderWorkshopGrid(wsItems.length >= 30);
+});
 
 // Sort / search events
 wsSort.addEventListener('change', () => loadWorkshopItems(1, false));
@@ -1094,6 +1178,11 @@ document.getElementById('btn-sl-use-preview').addEventListener('click', async ()
   closeModal('modal-steam-login');
   setWallpaper(w);
   _slPending = null;
+});
+
+document.getElementById('btn-we-scene-help-start').addEventListener('click', async () => {
+  closeModal('modal-we-scene-help');
+  await ipc('we-scene-enter-edit');
 });
 
 function openSetupModal() {
@@ -1184,15 +1273,55 @@ async function init() {
     setAudioRe.checked = settings.audioReactive     ?? false;
     appRules = settings.appRules || [];
 
+    // Clock overlay UI
+    const co = settings.clockOverlay || {};
+    clockEnabled.checked   = co.enabled     ?? false;
+    clockPosition.value    = co.position    ?? 'top-left';
+    clockFormat24h.checked = co.format24h   ?? true;
+    clockSeconds.checked   = co.showSeconds ?? false;
+    clockDate.checked      = co.showDate    ?? true;
+    clockDayName.checked   = co.showDayName ?? true;
+    clockColor.value       = co.color       ?? '#ffffff';
+    clockFontSize.value    = co.fontSize    ?? 48;
+    clockFontSizeV.textContent = (co.fontSize ?? 48) + 'px';
+
     renderLibrary();
     updateNowPlaying();
     renderMonitors();
     renderAppRules();
     renderTimeRules();
     loadWorkshopItems(1);
+    checkFirstRunNotice();
   } catch (e) {
     alert('Erro crítico no init: ' + e.stack);
   }
+}
+
+async function checkFirstRunNotice() {
+  const shouldShow = await ipc('should-show-we-scene-notice');
+  if (!shouldShow) return;
+
+  const modal = document.getElementById('modal-first-run-notice');
+  const btn = document.getElementById('btn-first-run-notice-close');
+  modal.classList.add('open');
+
+  let secondsLeft = 3;
+  btn.textContent = `Entendi (${secondsLeft})`;
+  const countdown = setInterval(() => {
+    secondsLeft--;
+    if (secondsLeft <= 0) {
+      clearInterval(countdown);
+      btn.textContent = 'Entendi';
+      btn.disabled = false;
+    } else {
+      btn.textContent = `Entendi (${secondsLeft})`;
+    }
+  }, 1000);
+
+  btn.addEventListener('click', async () => {
+    closeModal('modal-first-run-notice');
+    await ipc('mark-we-scene-notice-shown');
+  }, { once: true });
 }
 
 document.getElementById('btn-sync-steam')?.addEventListener('click', async () => {

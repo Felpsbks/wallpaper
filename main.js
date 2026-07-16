@@ -229,7 +229,15 @@ function createTray() {
 
 // ---- Fullscreen monitor ----
 let _appState = { pause: false, mute: false, stop: false };
+let _manualPause = false;
 let _fsTimer = null;
+
+ipcMain.handle('toggle-playback', () => {
+  _manualPause = !_manualPause;
+  sendToAllWallpapers(_manualPause ? 'pause' : 'resume');
+  _appState.pause = _manualPause;
+  return { paused: _manualPause };
+});
 
 function getRunningProcesses() {
   return new Promise((resolve) => {
@@ -273,6 +281,10 @@ function startFullscreenMonitor() {
         }
       } catch {}
     }
+
+    // Manual pause from the control panel's play/pause button always wins,
+    // regardless of what the automation rules computed this tick.
+    if (_manualPause) rulesActive.pause = true;
 
     const vol = settings.volume ?? 50;
 
@@ -350,7 +362,8 @@ ipcMain.handle('get-library', () => {
 });
 ipcMain.handle('get-current',          () => store.get('current') || null);
 ipcMain.handle('get-playlist-config',  () => store.get('playlistConfig') || { enabled: false, interval: 30, shuffle: false });
-ipcMain.handle('get-settings',         () => store.get('settings') || { volume: 50, pauseOnFullscreen: true, muteOnFullscreen: false, startWithWindows: true, audioReactive: false });
+const DEFAULT_CLOCK_OVERLAY = { enabled: false, position: 'top-left', format24h: true, showSeconds: false, showDate: true, showDayName: true, color: '#ffffff', fontSize: 48 };
+ipcMain.handle('get-settings',         () => store.get('settings') || { volume: 50, pauseOnFullscreen: true, muteOnFullscreen: false, startWithWindows: true, audioReactive: false, clockOverlay: DEFAULT_CLOCK_OVERLAY });
 ipcMain.handle('get-displays',         () => screen.getAllDisplays().map(d => ({ id: d.id, bounds: d.bounds, label: d.label || null })));
 ipcMain.handle('get-display-wallpapers', () => store.get('displayWallpapers') || {});
 ipcMain.handle('get-time-rules',       () => store.get('timeRules') || []);
@@ -388,6 +401,41 @@ ipcMain.handle('update-wallpaper', (_, wallpaper) => {
     sendToAllWallpapers('set-wallpaper', wallpaper);
   }
   return wallpaper;
+});
+
+// ---- We-scene manual layout editing ----
+// Reverse-engineering WE's exact pixel formula for every scene field has no
+// official spec to check against, so instead of chasing it forever the user
+// can drag/scroll text objects to where they want and we persist that.
+ipcMain.handle('we-scene-enter-edit', () => {
+  // The control panel sits in front of the desktop — minimize it out of the
+  // way so the user can actually see and drag the wallpaper's text objects.
+  if (controlWin && !controlWin.isDestroyed()) controlWin.minimize();
+  for (const win of wallpaperWindows.values()) {
+    if (!win.isDestroyed()) {
+      win.setIgnoreMouseEvents(false);
+      win.webContents.send('we-scene-enter-edit');
+    }
+  }
+});
+
+ipcMain.handle('should-show-we-scene-notice', () => !store.get('weSceneNoticeShown'));
+ipcMain.handle('mark-we-scene-notice-shown', () => { store.set('weSceneNoticeShown', true); return true; });
+
+ipcMain.handle('we-scene-save-overrides', (_, { wallpaperId, overrides }) => {
+  const library = store.get('library') || [];
+  const idx = library.findIndex(w => w.id === wallpaperId);
+  if (idx !== -1) {
+    library[idx].weSceneOverrides = { ...(library[idx].weSceneOverrides || {}), ...overrides };
+    store.set('library', library);
+    const current = store.get('current');
+    if (current && current.id === wallpaperId) store.set('current', library[idx]);
+  }
+  for (const win of wallpaperWindows.values()) {
+    if (!win.isDestroyed()) win.setIgnoreMouseEvents(!_isScreensaver);
+  }
+  if (controlWin && !controlWin.isDestroyed()) { controlWin.restore(); controlWin.focus(); }
+  return { ok: true };
 });
 
 ipcMain.handle('set-playlist-config', (_, config) => {
@@ -462,6 +510,30 @@ function getWorkshopDirs(steamPath) {
   return dirs;
 }
 
+// A Workshop "scene" item ships either as a loose scene.json (already
+// unpacked) or as a packed scene.pkg. If it's packed, unpack it once into a
+// cache folder so we-scene-render.js can read it like any other scene.
+// Returns null if there's nothing we can read — callers keep the existing
+// frozen-preview-image fallback in that case, so this never breaks import.
+function resolveWeSceneDir(wpDir, workshopId) {
+  if (fs.existsSync(path.join(wpDir, 'scene.json'))) return wpDir;
+
+  const pkgPath = path.join(wpDir, 'scene.pkg');
+  if (!fs.existsSync(pkgPath)) return null;
+
+  const cacheDir = path.join(app.getPath('userData'), 'we-scene-cache', workshopId);
+  if (fs.existsSync(path.join(cacheDir, 'scene.json'))) return cacheDir;
+
+  try {
+    const { unpackPkg } = require('./src/we-scene');
+    unpackPkg(pkgPath, cacheDir);
+    return fs.existsSync(path.join(cacheDir, 'scene.json')) ? cacheDir : null;
+  } catch (err) {
+    appLog.warn(`Não foi possível descompactar scene.pkg de ${workshopId}: ${err.message}`);
+    return null;
+  }
+}
+
 function parseSingleWorkshopItem(wpDir, id) {
   const pf = path.join(wpDir, 'project.json');
   if (!fs.existsSync(pf)) return null;
@@ -483,6 +555,7 @@ function parseSingleWorkshopItem(wpDir, id) {
       type: 'scene',
       src: preview,
       preview,
+      weSceneDir: resolveWeSceneDir(wpDir, id),
       tags: Array.isArray(project.tags) ? project.tags : [],
       properties: project.general && project.general.properties ? project.general.properties : null,
     };
@@ -597,11 +670,23 @@ function httpPostJSON(url, body) {
   });
 }
 
-ipcMain.handle('browse-workshop', async (_, { sort, search, page }) => {
+// Wallpaper Engine tags every Workshop item with exactly one content-type tag.
+// 'application' items are proprietary executables we can never run; 'unknown'
+// items didn't declare a recognizable type. Both get flagged as incompatible
+// so the UI can filter them out before the user wastes time downloading.
+const WA_TYPE_TAGS = ['video', 'web', 'scene', 'application'];
+function inferWaType(tags) {
+  const lower = (tags || []).map(t => t.toLowerCase());
+  for (const t of WA_TYPE_TAGS) if (lower.includes(t)) return t;
+  return 'unknown';
+}
+
+ipcMain.handle('browse-workshop', async (_, { sort, search, page, tag }) => {
   try {
     // Step 1: Scrape the browse page to get workshop item IDs
     let browseUrl = `https://steamcommunity.com/workshop/browse/?appid=431960&browsesort=${sort || 'trend'}&section=readytouseitems&actualsort=${sort || 'trend'}&p=${page || 1}`;
     if (search) browseUrl += '&searchtext=' + encodeURIComponent(search);
+    if (tag) browseUrl += '&requiredtags%5B%5D=' + encodeURIComponent(tag);
 
     const html = await httpGet(browseUrl);
     const idPattern = /sharedfiles\/filedetails\/\?id=(\d+)/g;
@@ -618,17 +703,26 @@ ipcMain.handle('browse-workshop', async (_, { sort, search, page }) => {
     const detailJson = await httpPost('https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/', formData);
     const details = JSON.parse(detailJson);
 
-    const items = (details.response?.publishedfiledetails || []).map(d => ({
-      workshopId: d.publishedfileid,
-      title: d.title || 'Sem título',
-      preview: d.preview_url || '',
-      file_url: d.file_url || '',
-      description: (d.description || '').substring(0, 200),
-      tags: (d.tags || []).map(t => t.tag),
-      subscribers: d.subscriptions || 0,
-      views: d.views || 0,
-      favorited: d.favorited || 0,
-    }));
+    const items = (details.response?.publishedfiledetails || []).map(d => {
+      const tags = (d.tags || []).map(t => t.tag);
+      const waType = inferWaType(tags);
+      return {
+        workshopId: d.publishedfileid,
+        title: d.title || 'Sem título',
+        preview: d.preview_url || '',
+        file_url: d.file_url || '',
+        description: (d.description || '').substring(0, 200),
+        tags,
+        subscribers: d.subscriptions || 0,
+        views: d.views || 0,
+        favorited: d.favorited || 0,
+        timeCreated: d.time_created || null,
+        waType,
+        // 'scene' still works here — it just renders as a static preview image
+        // instead of the animated proprietary scene (see wallpaper.js fallback).
+        compatible: waType === 'video' || waType === 'web' || waType === 'scene',
+      };
+    });
 
     return { items, total: items.length };
   } catch (e) {

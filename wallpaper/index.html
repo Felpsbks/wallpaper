@@ -6,13 +6,34 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
-    #video-layer, #image-layer, #web-layer, #scene-layer {
+    #video-layer, #image-layer, #web-layer, #scene-layer, #we-scene-layer {
       display: none;
       position: fixed; inset: 0;
       width: 100%; height: 100%;
     }
     #video-layer, #image-layer { object-fit: cover; }
     #web-layer { border: none; }
+    #we-scene-layer { overflow: hidden; background: #000; }
+
+    #clock-overlay {
+      display: none;
+      position: fixed;
+      z-index: 10;
+      pointer-events: none;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      color: #fff;
+      text-shadow: 0 2px 12px rgba(0,0,0,0.5);
+      line-height: 1.25;
+    }
+    #clock-overlay.pos-top-left     { top: 5%;    left: 5%; }
+    #clock-overlay.pos-top-right    { top: 5%;    right: 5%;   text-align: right; }
+    #clock-overlay.pos-bottom-left  { bottom: 8%; left: 5%; }
+    #clock-overlay.pos-bottom-right { bottom: 8%; right: 5%;   text-align: right; }
+    #clock-overlay.pos-center       { top: 50%;   left: 50%;  transform: translate(-50%, -50%); text-align: center; }
+
+    #clock-overlay .co-day  { font-weight: 600; letter-spacing: 0.35em; text-transform: uppercase; opacity: 0.9; }
+    #clock-overlay .co-time { font-weight: 300; }
+    #clock-overlay .co-date { font-weight: 400; opacity: 0.85; }
   </style>
 </head>
 <body>
@@ -20,6 +41,8 @@
   <img    id="image-layer"  />
   <webview id="web-layer"  allowpopups disablewebsecurity></webview>
   <canvas id="scene-layer"></canvas>
+  <div id="we-scene-layer"></div>
+  <div id="clock-overlay"></div>
   <script src="wallpaper.js"></script>
 </body>
 </html>
