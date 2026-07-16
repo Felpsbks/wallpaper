@@ -145,12 +145,20 @@ let _activeWallpaper = null;
 function setWallpaper(wallpaper) {
   if (!wallpaper) return;
   _activeWallpaper = wallpaper;
-  switch (wallpaper.type) {
+  
+  let renderType = wallpaper.type;
+  // If it's a Steam Workshop scene, we don't have the proprietary WE engine to run it.
+  // We fall back to rendering its preview.gif as an image.
+  if (renderType === 'scene' && wallpaper.workshopId) {
+    renderType = 'image';
+  }
+
+  switch (renderType) {
     case 'video': showVideo(wallpaper); break;
     case 'image': showImage(wallpaper); break;
     case 'url':   showWeb(wallpaper);   break;
     case 'scene': showScene(wallpaper); break;
-    default: console.warn('[wallpaper] Unknown type:', wallpaper.type);
+    default: console.warn('[wallpaper] Unknown type:', renderType);
   }
 }
 

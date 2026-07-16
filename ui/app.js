@@ -2,11 +2,11 @@ const { ipcRenderer } = require('electron');
 
 async function ipc(channel, ...args) { return ipcRenderer.invoke(channel, ...args); }
 
-function formatBytes(b) {
-  if (!b || b <= 0) return '';
-  if (b < 1024 * 1024) return (b / 1024).toFixed(0) + ' KB';
-  if (b < 1024 * 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MB';
-  return (b / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+  const k = 1024, sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
 // ---- State ----
@@ -153,6 +153,7 @@ async function setWallpaper(w) {
 }
 
 async function removeWallpaper(id) {
+  if (!confirm('Tem certeza que deseja remover este wallpaper da sua biblioteca?')) return;
   await ipc('remove-wallpaper', id);
   library = library.filter(w => w.id !== id);
   if (current && current.id === id) { current = null; updateNowPlaying(); }
@@ -764,12 +765,95 @@ const wsStatusDetail = document.getElementById('ws-status-detail');
 const wsProgressFill = document.getElementById('ws-progress-fill');
 const wsLogBar       = document.getElementById('ws-log-bar');
 const wsLogLines     = document.getElementById('ws-log-lines');
+const wsLogCount     = document.getElementById('ws-log-count');
 
-ipcRenderer.on('app-log', (_, msg) => {
-  wsLogBar.style.display = 'block';
-  wsLogLines.textContent += msg + '\n';
+let _logLineCount = 0;
+const _logRawLines = []; // plain text for copy
+
+const LOG_COLORS = {
+  info:    { badge: '#5c6bc0', text: '#c0c8e8' },
+  success: { badge: '#43a047', text: '#81c784' },
+  warn:    { badge: '#ff9800', text: '#ffcc80' },
+  error:   { badge: '#e53935', text: '#ef9a9a' },
+  debug:   { badge: '#555',    text: '#777' },
+};
+
+const LOG_LABELS = {
+  info: 'INFO', success: 'OK', warn: 'AVISO', error: 'ERRO', debug: 'DEBUG',
+};
+
+const LOG_ICONS = {
+  info: 'ℹ️', success: '✅', warn: '⚠️', error: '❌', debug: '🔍',
+};
+
+function appendLogLine(data) {
+  // Support both old string format and new structured format
+  let ts, msg, level;
+  if (typeof data === 'string') {
+    // Legacy format: "[HH:MM:SS] message"
+    const m = data.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*(.*)/);
+    ts = m ? m[1] : '';
+    msg = m ? m[2] : data;
+    level = 'info';
+  } else {
+    ts = data.ts || '';
+    msg = data.msg || '';
+    level = data.level || 'info';
+  }
+
+  const colors = LOG_COLORS[level] || LOG_COLORS.info;
+  const label = LOG_LABELS[level] || 'INFO';
+  const icon = LOG_ICONS[level] || '';
+
+  _logLineCount++;
+  _logRawLines.push(`[${ts}] [${label}] ${msg}`);
+
+  const line = document.createElement('div');
+  line.style.cssText = `display:flex;align-items:flex-start;gap:8px;padding:2px 0;border-bottom:1px solid #1a1a1a;`;
+
+  line.innerHTML = `
+    <span style="color:#444;font-size:11px;flex-shrink:0;min-width:60px;">${ts}</span>
+    <span style="background:${colors.badge};color:#fff;font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px;flex-shrink:0;min-width:42px;text-align:center;">${label}</span>
+    <span style="color:${colors.text};flex:1;word-break:break-word;">${escapeHtml(msg)}</span>
+  `;
+
+  wsLogLines.appendChild(line);
   wsLogLines.scrollTop = wsLogLines.scrollHeight;
+  wsLogCount.textContent = `${_logLineCount} linha${_logLineCount !== 1 ? 's' : ''}`;
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+ipcRenderer.on('app-log', (_, data) => {
+  wsLogBar.style.display = 'flex';
+  appendLogLine(data);
 });
+
+// Log panel buttons
+document.getElementById('btn-log-copy').addEventListener('click', () => {
+  const text = _logRawLines.join('\n');
+  if (!text) return;
+  require('electron').clipboard.writeText(text);
+  const btn = document.getElementById('btn-log-copy');
+  const original = btn.innerHTML;
+  btn.innerHTML = '✅ Copiado!';
+  btn.style.color = '#4caf50';
+  setTimeout(() => { btn.innerHTML = original; btn.style.color = '#8888cc'; }, 2000);
+});
+
+document.getElementById('btn-log-clear').addEventListener('click', () => {
+  wsLogLines.innerHTML = '';
+  _logLineCount = 0;
+  _logRawLines.length = 0;
+  wsLogCount.textContent = '0 linhas';
+});
+
+document.getElementById('btn-log-close').addEventListener('click', () => {
+  wsLogBar.style.display = 'none';
+});
+
 
 function setWsStatus(text, detail = '', pct = null, color = 'var(--accent)') {
   wsStatus.style.display = 'block';
@@ -937,8 +1021,15 @@ function formatSubscribers(n) {
 }
 
 async function startWorkshopDownload(workshopId, title, previewUrl, fileUrl) {
-  setWsStatus(`⏳ Preparando: ${title}...`);
-  await ipc('download-workshop-item', { workshopId, name: title, previewUrl: previewUrl || null, fileUrl: fileUrl || null });
+  setWsStatus(`⏳ Preparando inscrição invisível: ${title}...`);
+  const result = await ipc('download-workshop-item', { workshopId, name: title, previewUrl: previewUrl || null, fileUrl: fileUrl || null });
+  
+  if (result && result.msg === 'needs_login') {
+    _slPending = { workshopId, name: title, previewUrl };
+    document.getElementById('sl-preview-img').src = previewUrl || '';
+    document.getElementById('sl-preview-wrap').style.display = previewUrl ? 'block' : 'none';
+    document.getElementById('modal-steam-login').classList.add('open');
+  }
 }
 
 // Sort / search events
@@ -952,61 +1043,26 @@ wsSearch.addEventListener('input', () => {
 });
 
 // Download progress from main process
-// ---- QR Code Login ----
-let _qrPollTimer = null;
-
-async function startQRLogin() {
-  document.getElementById('qr-loading').style.display = 'block';
-  document.getElementById('qr-code-img').style.display = 'none';
-  document.getElementById('qr-status').textContent = 'Gerando QR code...';
-  document.getElementById('qr-status').style.color = 'var(--text2)';
-  document.getElementById('modal-qr-login').classList.add('open');
-
-  const res = await ipc('begin-qr-auth');
-  if (res.error) {
-    document.getElementById('qr-status').textContent = '❌ ' + res.error;
-    return;
-  }
-
-  document.getElementById('qr-loading').style.display = 'none';
-  const img = document.getElementById('qr-code-img');
-  img.src = res.qrDataUrl;
-  img.style.display = 'block';
-  document.getElementById('qr-status').textContent = 'Aguardando scan no app Steam...';
-
-  _qrPollTimer = setInterval(async () => {
-    const poll = await ipc('poll-qr-auth');
-    if (poll.status === 'approved') {
-      clearInterval(_qrPollTimer); _qrPollTimer = null;
-      document.getElementById('qr-status').style.color = 'var(--success)';
-      document.getElementById('qr-status').textContent = `✅ Conectado como ${poll.accountName}! Credenciais salvas.`;
-      setTimeout(() => {
-        closeModal('modal-qr-login');
-        closeModal('modal-steam-login');
-        document.getElementById('qr-status').style.color = 'var(--text2)';
-      }, 2000);
-    } else if (poll.status === 'refresh') {
-      img.src = poll.qrDataUrl;
-    } else if (poll.status === 'error') {
-      clearInterval(_qrPollTimer); _qrPollTimer = null;
-      document.getElementById('qr-status').textContent = '❌ ' + poll.error;
-    }
-  }, 3000);
-}
-
-document.getElementById('btn-open-qr').addEventListener('click', () => {
-  closeModal('modal-steam-login');
-  startQRLogin();
-});
-
-document.getElementById('btn-qr-cancel').addEventListener('click', () => {
-  if (_qrPollTimer) { clearInterval(_qrPollTimer); _qrPollTimer = null; }
-  closeModal('modal-qr-login');
-});
-
-// ---- Steam login modal ----
 let _slPending  = null; // { workshopId, name, previewUrl }
-let _setupMode  = false; // true when modal is opened at startup to configure credentials
+let _setupMode  = false;
+
+document.getElementById('btn-steam-web-login').addEventListener('click', async () => {
+  setWsStatus('⏳ Abrindo janela de login da Steam...');
+  const result = await ipc('steam-web-login');
+  if (result.ok) {
+    setWsStatus('✅ Login Steam realizado com sucesso!', 'Inscrições invisíveis habilitadas.', 1, '#4caf50');
+    setTimeout(() => { wsStatus.style.display = 'none'; }, 4000);
+    closeModal('modal-steam-login');
+    
+    // Se tinha um download pendente, tenta baixar de novo agora que tem cookies
+    if (_slPending) {
+      startWorkshopDownload(_slPending.workshopId, _slPending.name, _slPending.previewUrl);
+    }
+  } else {
+    setWsStatus('❌ ' + (result.msg || 'Login cancelado/falhou.'), '', null, '#c0392b');
+    setTimeout(() => { wsStatus.style.display = 'none'; }, 4000);
+  }
+});
 
 document.getElementById('btn-sl-use-preview').addEventListener('click', async () => {
   if (!_slPending?.previewUrl) { closeModal('modal-steam-login'); return; }
@@ -1022,62 +1078,14 @@ document.getElementById('btn-sl-use-preview').addEventListener('click', async ()
   _slPending = null;
 });
 
-function _resetLoginModal() {
-  document.querySelector('#modal-steam-login h3').textContent = '🔑 Login Steam necessário';
-  document.getElementById('sl-desc').textContent =
-    'Este wallpaper requer o Wallpaper Engine. Se não lembra a senha, use o QR Code abaixo.';
-  document.getElementById('btn-sl-use-preview').style.display = '';
-  document.getElementById('btn-sl-login').textContent = '📥 Baixar';
-  document.getElementById('sl-2fa-wrap').style.display = 'none';
-  _setupMode = false;
-}
-
 function openSetupModal() {
   _setupMode = true;
-  document.querySelector('#modal-steam-login h3').textContent = '🔑 Configurar conta Steam';
-  document.getElementById('sl-desc').textContent =
-    'Entre com sua conta Steam para baixar wallpapers do Workshop sem precisar digitar a senha toda vez.';
   document.getElementById('btn-sl-use-preview').style.display = 'none';
-  document.getElementById('btn-sl-login').textContent = '💾 Salvar';
-  document.getElementById('sl-user').value = '';
-  document.getElementById('sl-pass').value = '';
+  document.getElementById('sl-preview-wrap').style.display = 'none';
   document.getElementById('modal-steam-login').classList.add('open');
 }
 
-document.getElementById('btn-sl-login').addEventListener('click', async () => {
-  const username   = document.getElementById('sl-user').value.trim();
-  const password   = document.getElementById('sl-pass').value;
-  const steamGuard = document.getElementById('sl-2fa').value.trim();
-  if (!username || !password) return;
-
-  if (_setupMode) {
-    closeModal('modal-steam-login');
-    _resetLoginModal();
-    setWsStatus('⏳ Verificando conta Steam...');
-    const result = await ipc('validate-steam-login', { username, password, steamGuard });
-    if (result.ok) {
-      setWsStatus(`✅ Conta ${username} configurada!`, 'Downloads do Workshop habilitados.', 1, '#4caf50');
-      setTimeout(() => { wsStatus.style.display = 'none'; }, 5000);
-    } else if (result.needs2fa) {
-      document.getElementById('sl-2fa-wrap').style.display = 'block';
-      openSetupModal();
-    } else {
-      setWsStatus(`❌ ${result.msg || 'Falha ao verificar conta.'}`, '', null, '#c0392b');
-      setTimeout(() => { wsStatus.style.display = 'none'; }, 6000);
-    }
-    return;
-  }
-
-  closeModal('modal-steam-login');
-  setWsStatus('⏳ Fazendo login e baixando...');
-  await ipc('download-workshop-with-login', {
-    workshopId: _slPending?.workshopId,
-    name:       _slPending?.name,
-    username, password, steamGuard,
-  });
-});
-
-ipcRenderer.on('download-progress', (_, data) => {
+ipcRenderer.on('download-progress', async (_, data) => {
   if (data.state === 'preparing') {
     setWsStatus(`⏳ ${data.name}`);
   } else if (data.state === 'start') {
@@ -1109,8 +1117,9 @@ ipcRenderer.on('download-progress', (_, data) => {
     } else {
       previewWrap.style.display = 'none';
     }
-    document.getElementById('sl-user').value = '';
-    document.getElementById('sl-pass').value = '';
+    const savedAuth = (await ipc('get-steam-auth')) || {};
+    document.getElementById('sl-user').value = savedAuth.accountName || '';
+    document.getElementById('sl-pass').value = savedAuth.password || '';
     document.getElementById('sl-2fa').value = '';
     document.getElementById('sl-2fa-wrap').style.display = 'none';
     document.getElementById('modal-steam-login').classList.add('open');
@@ -1131,42 +1140,64 @@ ipcRenderer.on('download-progress', (_, data) => {
 
 // ---- Init ----
 async function init() {
-  [library, current, playlistConfig, settings, allDisplays, displayWallpapers, timeRules] = await Promise.all([
-    ipc('get-library'),
-    ipc('get-current'),
-    ipc('get-playlist-config'),
-    ipc('get-settings'),
-    ipc('get-displays'),
-    ipc('get-display-wallpapers'),
-    ipc('get-time-rules'),
-  ]);
+  try {
+    [library, current, playlistConfig, settings, allDisplays, displayWallpapers, timeRules] = await Promise.all([
+      ipc('get-library'),
+      ipc('get-current'),
+      ipc('get-playlist-config'),
+      ipc('get-settings'),
+      ipc('get-displays'),
+      ipc('get-display-wallpapers'),
+      ipc('get-time-rules'),
+    ]);
 
-  // Playlist UI
-  plEnabled.checked = playlistConfig.enabled || false;
-  plInterval.value  = playlistConfig.interval || 30;
-  plIntervalVal.textContent = formatInterval(playlistConfig.interval || 30);
-  plShuffle.checked = playlistConfig.shuffle || false;
+    // Playlist UI
+    plEnabled.checked = playlistConfig.enabled || false;
+    plInterval.value  = playlistConfig.interval || 30;
+    plIntervalVal.textContent = formatInterval(playlistConfig.interval || 30);
+    plShuffle.checked = playlistConfig.shuffle || false;
 
-  // Settings UI
-  setVolume.value = settings.volume ?? 50;
-  setVolumeV.textContent = (settings.volume ?? 50) + '%';
-  setPauseFs.checked = settings.pauseOnFullscreen ?? true;
-  setMuteFs.checked  = settings.muteOnFullscreen  ?? false;
-  setStartup.checked = settings.startWithWindows  ?? false;
-  appRules = settings.appRules || [];
+    // Settings UI
+    setVolume.value = settings.volume ?? 50;
+    setVolumeV.textContent = (settings.volume ?? 50) + '%';
+    setPauseFs.checked = settings.pauseOnFullscreen ?? true;
+    setMuteFs.checked  = settings.muteOnFullscreen  ?? false;
+    setStartup.checked = settings.startWithWindows  ?? false;
+    appRules = settings.appRules || [];
 
-  renderLibrary();
-  updateNowPlaying();
-  renderMonitors();
-  renderAppRules();
-  renderTimeRules();
-  loadWorkshopItems(1);
-
-  // Ask for Steam credentials on first launch if not configured
-  const savedAuth = await ipc('get-steam-auth');
-  if (!savedAuth) {
-    setTimeout(() => openSetupModal(), 800);
+    renderLibrary();
+    updateNowPlaying();
+    renderMonitors();
+    renderAppRules();
+    renderTimeRules();
+    loadWorkshopItems(1);
+  } catch (e) {
+    alert('Erro crítico no init: ' + e.stack);
   }
 }
+
+document.getElementById('btn-sync-steam')?.addEventListener('click', async () => {
+  const btn = document.getElementById('btn-sync-steam');
+  const oldText = btn.innerHTML;
+  btn.innerHTML = 'Sincronizando...';
+  btn.disabled = true;
+  try {
+    const res = await ipc('sync-steam-desktop');
+    if (res.error) {
+      alert('Erro ao sincronizar: ' + res.error);
+    } else if (res.count === 0) {
+      alert('Nenhum wallpaper novo encontrado na pasta da Steam. Você já tem todos ou ainda não se inscreveu em nenhum!');
+    } else {
+      alert(`Sincronização concluída! ${res.count} novo(s) wallpaper(s) importado(s).`);
+      library = await ipc('get-library');
+      renderLibrary();
+    }
+  } catch (e) {
+    alert('Erro: ' + e.message);
+  } finally {
+    btn.innerHTML = oldText;
+    btn.disabled = false;
+  }
+});
 
 init();

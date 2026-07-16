@@ -8,13 +8,13 @@ function loadUser32() {
   try {
     user32 = koffi.load('user32.dll');
 
-    EnumWindowsCb = koffi.proto('EnumWindowsCb', 'bool __stdcall (void* hWnd, intptr_t lParam)');
+    EnumWindowsCb = koffi.proto('bool __stdcall EnumWindowsCb(void* hWnd, intptr_t lParam)');
 
     FindWindowA = user32.func('void* FindWindowA(const char* lpClassName, const char* lpWindowName)');
     FindWindowExA = user32.func('void* FindWindowExA(void* hwndParent, void* hwndChildAfter, const char* lpszClass, const char* lpszWindow)');
     SendMessageTimeoutA = user32.func('intptr_t SendMessageTimeoutA(void* hWnd, uint Msg, uintptr_t wParam, intptr_t lParam, uint fuFlags, uint uTimeout, _Out_ uint* lpdwResult)');
     SetParent = user32.func('void* SetParent(void* hWndChild, void* hWndNewParent)');
-    EnumWindows = user32.func('bool EnumWindows(EnumWindowsCb* lpEnumFunc, intptr_t lParam)');
+    EnumWindows = user32.func('bool __stdcall EnumWindows(EnumWindowsCb* lpEnumFunc, intptr_t lParam)');
 
     return true;
   } catch (err) {

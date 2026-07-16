@@ -107,6 +107,10 @@
               <option value="totaluniquesubscribers">Populares</option>
             </select>
           </div>
+          <button class="btn btn-primary" id="btn-sync-steam" style="margin-right: 8px;">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.13 15.57a9 9 0 1 0 3.84-10.36L2 8"></path></svg>
+            Sincronizar Steam
+          </button>
           <button class="btn btn-primary ws-refresh-btn" id="ws-refresh">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
             Atualizar
@@ -153,12 +157,19 @@
       </div>
 
     <!-- Global Terminal / Logs -->
-    <div id="ws-log-bar" style="display:none; position:absolute; bottom:0; left:0; width:100%; height:200px; background:#0a0a0a; border-top:1px solid #333; padding:12px; z-index:100; box-shadow:0 -5px 20px rgba(0,0,0,0.5);">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <span style="font-size:12px;color:var(--accent);font-family:monospace;font-weight:bold;">> TERMINAL / LOGS</span>
-        <button onclick="document.getElementById('ws-log-bar').style.display='none'" style="background:var(--bg3);border:1px solid var(--border);color:#fff;cursor:pointer;font-size:11px;padding:4px 10px;border-radius:4px;">Fechar</button>
+    <div id="ws-log-bar" style="display:none; position:absolute; bottom:0; left:0; width:100%; height:280px; background:#0d0d0d; border-top:2px solid #2a2a3a; padding:0; z-index:100; box-shadow:0 -8px 30px rgba(0,0,0,0.6); flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px 8px;border-bottom:1px solid #1e1e2e;flex-shrink:0;">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="font-size:12px;color:#7c84f4;font-family:Consolas,monospace;font-weight:bold;letter-spacing:0.5px;">⚡ TERMINAL</span>
+          <span id="ws-log-count" style="font-size:10px;color:#555;font-family:Consolas,monospace;">0 linhas</span>
+        </div>
+        <div style="display:flex;gap:6px;">
+          <button id="btn-log-copy" style="background:#1a1a2e;border:1px solid #2d2d4a;color:#8888cc;cursor:pointer;font-size:11px;padding:4px 12px;border-radius:4px;transition:all 0.2s;" title="Copiar todos os logs">📋 Copiar</button>
+          <button id="btn-log-clear" style="background:#1a1a2e;border:1px solid #2d2d4a;color:#8888cc;cursor:pointer;font-size:11px;padding:4px 12px;border-radius:4px;transition:all 0.2s;" title="Limpar terminal">🗑️ Limpar</button>
+          <button id="btn-log-close" style="background:#1a1a2e;border:1px solid #2d2d4a;color:#8888cc;cursor:pointer;font-size:11px;padding:4px 12px;border-radius:4px;transition:all 0.2s;" title="Fechar terminal">✕</button>
+        </div>
       </div>
-      <div id="ws-log-lines" style="font-family:Consolas, monospace;font-size:12px;color:#0f0;height:calc(100% - 30px);overflow-y:auto;white-space:pre-wrap;"></div>
+      <div id="ws-log-lines" style="font-family:Consolas,'Courier New',monospace;font-size:12px;line-height:1.7;flex:1;overflow-y:auto;white-space:pre-wrap;padding:10px 14px;min-height:0;"></div>
     </div>
 
     <!-- ===== SETTINGS ===== -->
@@ -357,39 +368,23 @@
   </div>
 </div>
 
-<!-- QR Code Login -->
-<div class="modal-backdrop" id="modal-qr-login">
-  <div class="modal" style="width:320px; text-align:center;">
-    <h3>📱 Login via QR Code</h3>
-    <p style="font-size:12px;color:var(--text2);margin-bottom:14px;">Abra o app <b>Steam</b> no celular → toque no ícone de câmera → escaneie o código abaixo</p>
-    <div id="qr-code-wrap" style="display:flex;justify-content:center;margin-bottom:14px;min-height:224px;align-items:center;">
-      <span id="qr-loading" style="color:var(--text2);font-size:13px;">Gerando QR code...</span>
-      <img id="qr-code-img" style="display:none;width:220px;height:220px;border-radius:8px;" />
-    </div>
-    <div id="qr-status" style="font-size:13px;color:var(--text2);margin-bottom:16px;min-height:20px;">Aguardando scan...</div>
-    <div class="modal-actions" style="justify-content:center;">
-      <button class="btn btn-secondary" id="btn-qr-cancel">Cancelar</button>
-    </div>
-  </div>
-</div>
-
 <!-- Steam Login -->
 <div class="modal-backdrop" id="modal-steam-login">
-  <div class="modal" style="width:420px">
+  <div class="modal" style="width:420px; text-align: center;">
     <h3>🔑 Login Steam necessário</h3>
     <div id="sl-preview-wrap" style="display:none; margin-bottom:12px;">
       <img id="sl-preview-img" style="width:100%; border-radius:6px; aspect-ratio:16/9; object-fit:cover; background:var(--bg3);" />
     </div>
-    <p id="sl-desc" style="font-size:12px;color:var(--text2);margin-bottom:14px">Este wallpaper requer o <strong>Wallpaper Engine</strong>. Se não lembra a senha, use o QR Code abaixo.</p>
-    <div class="field"><label>Usuário Steam</label><input type="text" id="sl-user" placeholder="seu_usuario" autocomplete="username" /></div>
-    <div class="field"><label>Senha</label><input type="password" id="sl-pass" placeholder="••••••••" autocomplete="current-password" /></div>
-    <div class="field" id="sl-2fa-wrap" style="display:none"><label>Código Steam Guard (2FA)</label><input type="text" id="sl-2fa" placeholder="XXXXX" maxlength="8" /></div>
-    <p id="sl-note" style="font-size:11px;color:var(--text2);margin-bottom:4px">Credenciais salvas localmente no seu AppData para downloads automáticos.</p>
-    <div class="modal-actions">
-      <button class="btn btn-secondary" id="btn-sl-use-preview">🖼️ Usar preview</button>
-      <button class="btn btn-secondary" id="btn-open-qr">📱 QR Code</button>
-      <button class="btn btn-secondary" onclick="closeModal('modal-steam-login')">Cancelar</button>
-      <button class="btn btn-primary" id="btn-sl-login">📥 Baixar</button>
+    <p id="sl-desc" style="font-size:13px;color:var(--text2);margin-bottom:14px">
+      Para baixar este wallpaper, faça login na sua conta Steam. Uma janela oficial da Steam será aberta. Você pode usar o aplicativo do celular para escanear o QR Code rapidamente.
+    </p>
+    <div class="modal-actions" style="justify-content:center; flex-wrap: wrap; gap: 8px;">
+      <button class="btn btn-primary" id="btn-steam-web-login" style="width: 100%; padding: 12px; font-size: 14px;">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 8px; vertical-align: text-bottom;"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path><polyline points="10 17 15 12 10 7"></polyline><line x1="15" y1="12" x2="3" y2="12"></line></svg>
+        Fazer Login pela Web (Seguro)
+      </button>
+      <button class="btn btn-secondary" id="btn-sl-use-preview" style="flex: 1;">🖼️ Usar preview</button>
+      <button class="btn btn-secondary" onclick="closeModal('modal-steam-login')" style="flex: 1;">Cancelar</button>
     </div>
   </div>
 </div>
