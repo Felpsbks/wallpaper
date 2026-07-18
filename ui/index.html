@@ -4,163 +4,466 @@
   <meta charset="UTF-8" />
   <title>Engine Wallpaper</title>
   <link rel="stylesheet" href="styles.css?v=3" />
+  <link rel="stylesheet" href="editor-styles.css?v=1" />
 </head>
 <body>
 
-<!-- Window controls overlay -->
-<div id="titlebar">
-  <div class="drag-region"></div>
-  <button class="win-btn" onclick="ipc('window-minimize')">─</button>
-  <button class="win-btn" onclick="ipc('window-maximize')">□</button>
-  <button class="win-btn close" onclick="ipc('window-close')">✕</button>
+<div id="app-loading-overlay">
+  <div class="app-loading-bg"></div>
+  <div class="app-loading-content">
+    <div class="app-loading-glow"></div>
+    <img src="logo21.png" alt="Fynix Wallpaper Engine" class="app-loading-logo" />
+    <div class="app-loading-bar-track"><div class="app-loading-bar-fill"></div></div>
+    <div class="app-loading-message" id="app-loading-message">Carregando sua biblioteca...</div>
+  </div>
 </div>
 
 <div id="app">
+  <!-- Window controls overlay moved inside #app -->
+  <div id="titlebar">
+    <div class="drag-region"></div>
+    <button class="win-btn" onclick="ipc('window-minimize')">─</button>
+    <button class="win-btn" onclick="ipc('window-maximize')">□</button>
+    <button class="win-btn close" onclick="ipc('window-close')">✕</button>
+  </div>
+
   <!-- Sidebar -->
   <nav id="sidebar">
     <div class="sidebar-logo">
-      <span class="logo-icon">⚡</span>
-      <div class="logo-text">Engine<br><b>Wallpaper</b></div>
+      <!-- Coloque a imagem da logo na pasta 'ui' com o nome 'logo.png' -->
+      <img src="logo21.png" alt="FYNIX Wallpaper Engine" class="logo-img" />
     </div>
     
     <div class="nav-list">
+      <div class="nav-item active" data-panel="discover">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        Descobrir
+      </div>
       <div class="nav-item" data-panel="library">
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
         Biblioteca
       </div>
-      <div class="nav-item active" data-panel="downloader">
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"></rect><path d="M6 12h4"></path><path d="M8 10v4"></path><path d="M15 11v.01"></path><path d="M18 13v.01"></path></svg>
-        Workshop
+      <div class="nav-item" data-panel="favorites">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>
+        Favoritos
       </div>
-      <div class="nav-item" data-panel="settings">
+      <div class="nav-item" data-panel="playlists">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+        Playlists
+      </div>
+      <div class="nav-item" data-panel="downloader">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"></rect><path d="M6 12h4"></path><path d="M8 10v4"></path><path d="M15 11v.01"></path><path d="M18 13v.01"></path></svg>
+        Oficina
+      </div>
+
+      <div class="sidebar-divider"></div>
+
+      <!-- Configurações não aparece mais na lista: a engrenagem do cabeçalho
+           (#btn-header-settings) já aciona este item via data-panel, então
+           ele fica oculto mas continua no DOM para o clique funcionar. -->
+      <div class="nav-item" data-panel="settings" style="display:none">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
         Configurações
       </div>
-      <div class="nav-item" style="margin-top:20px; border-top:1px solid #333; padding-top:16px;" onclick="document.getElementById('ws-log-bar').style.display='block'">
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
-        Terminal Logs
+
+      <div class="nav-section-label">EXPLORAR</div>
+      <div class="nav-item-sm" data-discover-sort="trend">
+        <svg class="nav-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
+        Em alta
+      </div>
+      <div class="nav-item-sm" data-discover-sort="mostrecent">
+        <svg class="nav-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+        Mais recentes
+      </div>
+      <div class="nav-item-sm" data-discover-action="categories">
+        <svg class="nav-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+        Categorias
       </div>
     </div>
 
-    <div class="sidebar-status">
-      <div class="status-box">
-        <div class="status-icon">✨</div>
-        <div class="status-info">
-          <div class="status-title">Engine Wallpaper</div>
-          <div class="status-ver">Versão 2.0.0</div>
+    <!-- Uso real da máquina: CPU/RAM vêm do processo principal (módulo `os`,
+         sem lib nova), FPS vem do próprio renderer do wallpaper ativo. Ver
+         'system-stats' e 'wallpaper-fps-update' em app.js. -->
+    <div class="system-stats">
+      <div class="nav-section-label" style="padding-left:0;margin-bottom:10px;">SISTEMA</div>
+      <div class="stat-row-mini"><span>CPU</span><span id="stat-cpu-val">--%</span></div>
+      <div class="stat-bar-track"><div class="stat-bar-fill" id="stat-cpu-bar"></div></div>
+      <div class="stat-row-mini"><span>RAM</span><span id="stat-ram-val">--%</span></div>
+      <div class="stat-bar-track"><div class="stat-bar-fill" id="stat-ram-bar"></div></div>
+      <div class="stat-row-mini"><span>FPS</span><span id="stat-fps-val">--</span></div>
+    </div>
+
+    <div class="sidebar-user">
+      <div class="user-profile">
+        <div class="user-avatar-fallback" id="user-avatar-fallback">U</div>
+        <div class="user-info">
+          <span class="user-name" id="sidebar-user-name">…</span>
         </div>
       </div>
-      <div class="status-progress"><div class="progress-fill"></div></div>
-      <div class="status-text"><span class="dot-green"></span> Sincronizado</div>
     </div>
   </nav>
 
   <div id="content">
 
-    <!-- ===== LIBRARY ===== -->
-    <div class="panel active" id="panel-library">
-      <div class="panel-header">
-        <h2>Biblioteca</h2>
-        <div class="search-wrap">
-          <span class="search-icon">🔍</span>
-          <input type="text" id="search-input" placeholder="Buscar..." />
-        </div>
-        <button class="btn btn-primary"   id="btn-add-video">🎬</button>
-        <button class="btn btn-secondary" id="btn-add-image">🖼️</button>
-        <button class="btn btn-secondary" id="btn-add-url">🌐</button>
-        <button class="btn btn-secondary" id="btn-add-scene">✨</button>
-        <button class="btn btn-steam"     id="btn-add-steam">🎮 Steam</button>
-      </div>
-      <div id="monitor-target-bar" class="monitor-target-bar" style="display:none">
-        <span id="monitor-target-label">Aplicando no Monitor 1</span>
-        <button class="btn btn-secondary btn-xs" id="btn-clear-monitor-target">Todos</button>
-      </div>
-      <div id="wallpaper-grid">
-        <div class="empty-state" id="empty-state">
-          <div class="empty-icon">🎨</div>
-          <p>Nenhum wallpaper na biblioteca</p>
-          <small>Adicione um vídeo, imagem, URL ou cena animada</small>
-        </div>
-      </div>
-    </div>
-
-
-
-    <!-- ===== WORKSHOP STORE ===== -->
-    <div class="panel active" id="panel-downloader">
-      <div class="panel-header ws-header">
-        <div class="ws-header-left">
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"></rect><path d="M6 12h4"></path><path d="M8 10v4"></path><path d="M15 11v.01"></path><path d="M18 13v.01"></path></svg>
-          <h2>Workshop</h2>
-        </div>
-        
-        <div class="ws-header-right">
-          <div class="search-wrap">
-            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-            <input type="text" id="ws-search" placeholder="Buscar wallpapers..." />
+    <!-- ===== DESCOBRIR (NOVO) ===== -->
+    <div class="panel active" id="panel-discover">
+      <div class="discover-main">
+        <!-- Header interno transparente -->
+        <div class="discover-header discover-header-new">
+          <div class="greeting">
+            <h2 id="discover-greeting">Olá 👋</h2>
+            <p class="greeting-sub">Encontre wallpapers incríveis para seu desktop.</p>
           </div>
-          <div class="select-wrap">
-            <svg class="select-icon" viewBox="0 0 24 24" fill="none" stroke="#ff9800" stroke-width="2"><path d="M12 2c0 0-5 6.5-5 11a5 5 0 0 0 10 0c0-4.5-5-11-5-11z"></path><path d="M12 2c0 0-2 4-2 7s2 4 2 4"></path></svg>
-            <select id="ws-sort" class="btn btn-secondary">
-              <option value="trend">Em alta</option>
-              <option value="mostrecent">Recentes</option>
-              <option value="totaluniquesubscribers">Populares</option>
-            </select>
-          </div>
-          <button class="btn btn-primary" id="btn-sync-steam" style="margin-right: 8px;">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.13 15.57a9 9 0 1 0 3.84-10.36L2 8"></path></svg>
-            Sincronizar Steam
-          </button>
-          <button class="btn btn-primary ws-refresh-btn" id="ws-refresh">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
-            Atualizar
-          </button>
-        </div>
-      </div>
-
-      <div class="ws-categories">
-        <button class="cat-btn active" data-tag=""><span>⊞</span> Todos</button>
-        <button class="cat-btn" data-tag="Anime"><span>👤</span> Anime</button>
-        <button class="cat-btn" data-tag="Games"><span>🎮</span> Jogos</button>
-        <button class="cat-btn" data-tag="Landscape"><span>⛰️</span> Paisagens</button>
-        <button class="cat-btn" data-tag="Abstract"><span>✨</span> Abstrato</button>
-        <button class="cat-btn" data-tag="Minimal"><span>◯</span> Minimalista</button>
-        <button class="cat-btn" data-tag="Sci-Fi"><span>🚀</span> Sci-Fi</button>
-        <label class="ws-compat-toggle" title="Esconde wallpapers que precisam do motor gráfico proprietário do Wallpaper Engine e nunca funcionariam aqui">
-          <input type="checkbox" id="ws-only-compatible" checked />
-          Somente compatíveis
-        </label>
-      </div>
-
-      <div class="ws-main-area">
-        <div class="ws-list-container">
-          <div id="ws-grid" class="ws-grid-new">
-            <div class="empty-state" id="ws-empty">
-              <div class="empty-icon">🌐</div>
-              <p>Carregando wallpapers da Steam...</p>
-              <small>Aguarde enquanto buscamos os melhores wallpapers para você</small>
+          <div class="header-right">
+            <div class="search-wrap" style="position:relative;">
+              <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              <input type="text" id="discover-search-input" placeholder="Pesquisar wallpapers..." autocomplete="off" />
+              <kbd class="search-kbd">Ctrl+K</kbd>
+              <div id="discover-search-dropdown" class="discover-search-dropdown"></div>
+            </div>
+            <button class="icon-btn" id="btn-header-settings" title="Configurações">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            </button>
+            <div class="steam-status-badge" id="steam-status-badge" title="Status da sessão Steam">
+              <span class="steam-status-dot"></span><span id="steam-status-label">Steam</span>
             </div>
           </div>
         </div>
 
-        <div class="ws-details-panel" id="ws-details">
-          <!-- Populated by JS -->
-          <div class="ws-details-empty">
-            Selecione um wallpaper para ver detalhes
+        <!-- Pills de filtro rápido — usam as mesmas tags reais já validadas
+             contra a Steam (ver applyDiscoverFilter/initCategoryPills em app.js) -->
+        <div class="filter-pills" id="filter-pills">
+          <div class="pill active" data-clear="1">Todos</div>
+          <div class="pill" data-tag="Anime">Anime</div>
+          <div class="pill" data-tag="Game">Jogos</div>
+          <div class="pill" data-tag="Landscape">Paisagens</div>
+          <div class="pill" data-search="4k">4K</div>
+          <div class="pill" data-tag="Video">Vídeo</div>
+          <div class="pill" data-tag="Abstract">Abstrato</div>
+          <div class="pill" data-tag="Sci-Fi">Sci-Fi</div>
+          <div class="pill" data-search="minimalist">Minimalista</div>
+        </div>
+
+        <!-- Seções de navegação padrão — somem temporariamente quando uma busca é confirmada (Enter), voltam quando a busca é limpa -->
+        <div id="discover-browse-sections">
+        <!-- Hero Section -->
+        <div class="hero-section">
+          <div class="hero-content">
+            <span class="hero-badge">EM DESTAQUE</span>
+            <h1 class="hero-title">Astral Peaks</h1>
+            <p class="hero-meta">Paisagem • 4K • Áudio reativo</p>
+            <p class="hero-desc">Um pôr do sol cósmico em um mundo distante.</p>
+            <div class="hero-actions">
+              <button class="btn-primary hero-btn">Aplicar Wallpaper</button>
+              <button class="btn-secondary hero-btn-icon"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg></button>
+            </div>
+          </div>
+          <div class="hero-image-wrap">
+            <img src="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=1000&auto=format&fit=crop" class="hero-image" />
+          </div>
+        </div>
+
+        <!-- Populares -->
+        <div class="section-title-row">
+          <h3>Populares</h3>
+          <a href="#" class="view-all" id="discover-viewall-popular">Ver todos</a>
+        </div>
+        <div class="popular-grid" id="discover-popular-grid">
+          <div style="grid-column:1/-1;color:var(--text2);text-align:center;padding:24px;">Carregando wallpapers...</div>
+        </div>
+
+        <!-- Mais Baixados -->
+        <div class="section-title-row">
+          <h3>Mais Baixados</h3>
+          <a href="#" class="view-all" id="discover-viewall-toprated">Ver todos</a>
+        </div>
+        <div class="popular-grid" id="discover-toprated-grid">
+          <div style="grid-column:1/-1;color:var(--text2);text-align:center;padding:24px;">Carregando wallpapers...</div>
+        </div>
+
+        </div>
+        <!-- /discover-browse-sections -->
+
+        <!-- Feed Infinito (Explorar) -->
+        <div class="section-title-row" style="margin-top: 16px;">
+          <h3 id="discover-feed-title">Explorar mais</h3>
+        </div>
+        <div class="popular-grid" id="discover-feed-grid">
+          <!-- Carregado via JS -->
+        </div>
+        <div id="discover-feed-footer" style="grid-column:1/-1;text-align:center;padding:16px 0 32px 0;color:var(--text2);font-size:13px;"></div>
+      </div>
+    </div>
+
+    <!-- ===== LIBRARY ===== -->
+    <div class="panel" id="panel-library">
+      <div class="library-main">
+        <div class="panel-header lib-header">
+          <div class="lib-header-title">
+            <h2>Biblioteca</h2>
+            <p class="lib-header-sub">Sua coleção de wallpapers.</p>
+          </div>
+          <div class="search-wrap lib-search">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input type="text" id="search-input" placeholder="Buscar wallpapers..." />
+          </div>
+          <div class="lib-add-actions">
+            <button class="lib-icon-btn active" id="btn-add-video" title="Adicionar vídeo">
+              <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2"></rect></svg>
+            </button>
+            <button class="lib-icon-btn" id="btn-add-image" title="Adicionar imagem">
+              <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+            </button>
+            <button class="lib-icon-btn" id="btn-add-url" title="Adicionar URL/Web">
+              <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+            </button>
+            <button class="lib-icon-btn" id="btn-add-scene" title="Adicionar cena animada">
+              <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.3L18 9l-4.1 1.7L12 15l-1.9-4.3L6 9l4.1-1.7L12 3z"></path><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z"></path></svg>
+            </button>
+            <button class="btn btn-steam" id="btn-add-steam" title="Importar wallpapers já baixados/subscritos da sua pasta local do Steam Workshop">🎮 Steam</button>
+          </div>
+        </div>
+        <div class="lib-filter-row">
+          <div class="filter-pills lib-type-pills" id="lib-type-pills">
+            <div class="pill active" data-lib-type="">Todos</div>
+            <div class="pill" data-lib-type="video">Vídeos</div>
+            <div class="pill" data-lib-type="scene">Cenas</div>
+            <div class="pill" data-lib-type="application">Aplicações</div>
+            <div class="pill" data-lib-type="url">Web</div>
+          </div>
+          <select id="lib-sort-select" class="fynix-select lib-sort-select">
+            <option value="recent">Mais recentes</option>
+            <option value="name">Nome (A-Z)</option>
+          </select>
+        </div>
+        <div id="monitor-target-bar" class="monitor-target-bar" style="display:none">
+          <span id="monitor-target-label">Aplicando no Monitor 1</span>
+          <button class="btn btn-secondary btn-xs" id="btn-clear-monitor-target">Todos</button>
+        </div>
+        <div id="wallpaper-grid">
+          <div class="empty-state" id="empty-state">
+            <div class="empty-icon">🎨</div>
+            <p>Nenhum wallpaper na biblioteca</p>
+            <small>Adicione um vídeo, imagem, URL ou cena animada</small>
+          </div>
+        </div>
+        <div class="lib-stats-bar" id="lib-stats-bar">
+          <div class="lib-stats-left">
+            <span class="lib-stats-icon">⚡</span>
+            <span id="lib-stats-text">0 wallpapers</span>
+          </div>
+          <div class="lib-stats-right">
+            <button class="lib-view-btn active" id="lib-view-grid" title="Visualização em grade">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+            </button>
+            <button class="lib-view-btn" id="lib-view-list" title="Visualização em lista">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+            </button>
+            <input type="range" id="lib-size-slider" min="120" max="220" step="10" value="150" title="Tamanho dos cards" />
           </div>
         </div>
       </div>
+    </div>
 
-      <div id="ws-status-bar" style="display:none; position:relative; overflow:hidden; padding:10px 14px; font-size:13px; font-weight:600;">
-        <div id="ws-progress-fill" style="position:absolute;top:0;left:0;height:100%;width:0%;background:rgba(255,255,255,0.12);transition:width 0.6s ease;pointer-events:none;"></div>
-        <span id="ws-status-text" style="position:relative;z-index:1;">Iniciando download...</span>
-        <span id="ws-status-detail" style="position:relative;z-index:1;float:right;opacity:0.8;font-weight:400;"></span>
+    <!-- ===== FAVORITOS ===== -->
+    <div class="panel" id="panel-favorites">
+      <div class="fav-main">
+        <div class="panel-header lib-header">
+          <div class="lib-header-title">
+            <h2>Favoritos ♥</h2>
+            <p class="lib-header-sub">Seus wallpapers favoritos em um só lugar.</p>
+          </div>
+          <div class="search-wrap lib-search">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input type="text" id="fav-search-input" placeholder="Buscar nos favoritos..." />
+          </div>
+          <div class="lib-add-actions">
+            <button class="lib-icon-btn active" id="fav-view-grid" title="Visualização em grade">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+            </button>
+            <button class="lib-icon-btn" id="fav-view-list" title="Visualização em lista">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="fav-stats-row" id="fav-stats-row">
+          <div class="fav-stat-card active" data-fav-type="">
+            <span class="fav-stat-icon">♥</span>
+            <div><div class="fav-stat-val" id="fav-stat-total">0</div><div class="fav-stat-label">Favoritos</div></div>
+          </div>
+          <div class="fav-stat-card" data-fav-type="video">
+            <span class="fav-stat-icon">▶</span>
+            <div><div class="fav-stat-val" id="fav-stat-video">0</div><div class="fav-stat-label">Vídeos</div></div>
+          </div>
+          <div class="fav-stat-card" data-fav-type="scene">
+            <span class="fav-stat-icon">✨</span>
+            <div><div class="fav-stat-val" id="fav-stat-scene">0</div><div class="fav-stat-label">Cenas</div></div>
+          </div>
+          <select id="fav-sort-select" class="fynix-select lib-sort-select fav-sort-select">
+            <option value="recent">Mais recentes</option>
+            <option value="name">Nome (A-Z)</option>
+          </select>
+        </div>
+
+        <div class="popular-grid" id="favorites-grid">
+          <div class="empty-state" id="favorites-empty">
+            <div class="empty-icon">🤍</div>
+            <p>Nenhum favorito ainda</p>
+            <small>Clique em "Favoritar" num wallpaper da Oficina para ele aparecer aqui</small>
+          </div>
+        </div>
+
+        <div class="fav-tip-bar">
+          <div class="fav-tip-left">
+            <span class="fav-tip-icon">♥</span>
+            <div>
+              <div class="fav-tip-title">Dica rápida</div>
+              <div class="fav-tip-desc">Adicione wallpapers à sua lista de favoritos clicando no ♥</div>
+            </div>
+          </div>
+          <button class="btn btn-primary" id="btn-fav-explore">✨ Explorar mais wallpapers</button>
+        </div>
       </div>
+    </div>
 
+    <!-- ===== PLAYLISTS & ROTINAS ===== -->
+    <div class="panel" id="panel-playlists">
+      <div class="pl-main">
+        <div class="panel-header lib-header">
+          <div class="lib-header-title">
+            <h2>Playlists & Rotinas</h2>
+            <p class="lib-header-sub">Crie coleções de wallpapers e regras pra elas trocarem sozinhas.</p>
+          </div>
+          <div class="search-wrap lib-search">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input type="text" id="pl-search-input" placeholder="Buscar playlists..." />
+          </div>
+          <div class="lib-add-actions">
+            <button class="btn btn-primary" id="btn-new-playlist">+ Nova Playlist</button>
+          </div>
+        </div>
+
+        <div class="lib-filter-row">
+          <div class="filter-pills" id="pl-status-pills">
+            <div class="pill active" data-pl-status="">Todas</div>
+            <div class="pill" data-pl-status="active">Ativas</div>
+            <div class="pill" data-pl-status="noroutine">Sem rotina</div>
+          </div>
+          <select id="pl-sort-select" class="fynix-select lib-sort-select">
+            <option value="recent">Mais recentes</option>
+            <option value="name">Nome (A-Z)</option>
+            <option value="mostused">Mais usadas</option>
+            <option value="lastapplied">Última aplicada</option>
+          </select>
+        </div>
+
+        <div class="popular-grid" id="playlists-grid">
+          <div class="empty-state" id="playlists-empty">
+            <div class="empty-icon">🎵</div>
+            <p>Nenhuma playlist ainda</p>
+            <small>Crie uma playlist e anexe rotinas (horário, dia da semana, jogo...) pra ela trocar sozinha</small>
+          </div>
+        </div>
+
+        <div class="lib-stats-bar" id="pl-stats-bar">
+          <div class="lib-stats-left">
+            <span class="lib-stats-icon">🎵</span>
+            <span id="pl-stats-text">0 playlists</span>
+          </div>
+        </div>
       </div>
+    </div>
 
-    <!-- Global Terminal / Logs -->
-    <div id="ws-log-bar" style="display:none; position:absolute; bottom:0; left:0; width:100%; height:280px; background:#0d0d0d; border-top:2px solid #2a2a3a; padding:0; z-index:100; box-shadow:0 -8px 30px rgba(0,0,0,0.6); flex-direction:column;">
+    <!-- ===== OFICINA: EDITOR VISUAL DE WALLPAPERS ===== -->
+    <div class="panel" id="panel-downloader">
+      <div class="oficina-editor" id="oficina-editor">
+        <div class="ed-toolbar" id="ed-toolbar">
+          <div class="ed-toolbar-group">
+            <button class="ed-tool-btn active" data-tool="select" title="Selecionar">↖</button>
+            <button class="ed-tool-btn" data-tool="move" title="Mover">✥</button>
+          </div>
+          <div class="ed-toolbar-group">
+            <button class="ed-tool-btn" id="ed-btn-duplicate" title="Duplicar">⧉</button>
+            <button class="ed-tool-btn" id="ed-btn-group" title="Agrupar">▣</button>
+            <button class="ed-tool-btn" id="ed-btn-ungroup" title="Desagrupar">▢</button>
+          </div>
+          <div class="ed-toolbar-group">
+            <button class="ed-tool-btn" id="ed-btn-align-h" title="Alinhar horizontalmente">⬌</button>
+            <button class="ed-tool-btn" id="ed-btn-align-v" title="Alinhar verticalmente">⬍</button>
+          </div>
+          <div class="ed-toolbar-group">
+            <button class="ed-tool-btn" id="ed-btn-lock" title="Bloquear camada selecionada">🔒</button>
+            <button class="ed-tool-btn" id="ed-btn-hide" title="Ocultar camada selecionada">👁</button>
+            <button class="ed-tool-btn" id="ed-btn-delete" title="Excluir camada selecionada">✕</button>
+          </div>
+          <div class="ed-toolbar-spacer"></div>
+          <div class="ed-toolbar-group">
+            <button class="ed-tool-btn" id="ed-btn-undo" title="Desfazer (Ctrl+Z)">↶</button>
+            <button class="ed-tool-btn" id="ed-btn-redo" title="Refazer (Ctrl+Y)">↷</button>
+          </div>
+        </div>
+
+        <div class="ed-body">
+          <div class="ed-left-panel">
+            <div class="ed-add-section">
+              <div class="ed-section-label">Adicionar</div>
+              <div class="ed-add-grid">
+                <button class="ed-add-btn" id="ed-add-image">🖼<span>Imagem</span></button>
+                <button class="ed-add-btn" id="ed-add-text">📝<span>Texto</span></button>
+                <button class="ed-add-btn" id="ed-add-rect">▭<span>Retângulo</span></button>
+                <button class="ed-add-btn" id="ed-add-ellipse">⬭<span>Elipse</span></button>
+              </div>
+            </div>
+            <div class="ed-layers-section">
+              <div class="ed-section-label">Camadas</div>
+              <div class="ed-layers-list" id="ed-layers-list">
+                <p class="ed-empty-hint">Nenhuma camada ainda</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="ed-canvas-area">
+            <div class="ed-canvas-toolbar">
+              <button class="ed-mini-btn" id="ed-zoom-out" title="Diminuir zoom">−</button>
+              <span class="ed-zoom-label" id="ed-zoom-label">100%</span>
+              <button class="ed-mini-btn" id="ed-zoom-in" title="Aumentar zoom">+</button>
+              <button class="ed-mini-btn" id="ed-zoom-fit" title="Ajustar à tela">Ajustar</button>
+              <label class="ed-grid-toggle"><input type="checkbox" id="ed-toggle-grid" /> Grade</label>
+            </div>
+            <div class="ed-canvas-wrap" id="ed-canvas-wrap">
+              <div id="ed-konva-container"></div>
+            </div>
+          </div>
+
+          <div class="ed-right-panel">
+            <div class="ed-section-label">Propriedades</div>
+            <div id="ed-properties-panel" class="ed-properties-panel">
+              <p class="ed-empty-hint">Selecione uma camada pra editar</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="ed-bottom-bar">
+          <select id="ed-aspect-select" class="ed-mini-select" title="Proporção do wallpaper">
+            <option value="free">Livre</option>
+            <option value="16:9" selected>16:9</option>
+            <option value="21:9">21:9 Ultrawide</option>
+            <option value="9:16">9:16 Vertical</option>
+            <option value="1:1">1:1</option>
+            <option value="dual">Monitor Duplo</option>
+            <option value="triple">Monitor Triplo</option>
+          </select>
+          <span id="ed-canvas-size-label" class="ed-canvas-size-label">1920 × 1080</span>
+          <div class="ed-bottom-spacer"></div>
+          <span id="ed-autosave-label" class="ed-autosave-label">Salvo automaticamente</span>
+          <button class="btn btn-primary" id="ed-btn-export">📤 Exportar como Wallpaper</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== TERMINAL LOGS ===== -->
+    <div class="panel" id="panel-logs" style="background:#0d0d0d;">
       <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px 8px;border-bottom:1px solid #1e1e2e;flex-shrink:0;">
         <div style="display:flex;align-items:center;gap:8px;">
           <span style="font-size:12px;color:#7c84f4;font-family:Consolas,monospace;font-weight:bold;letter-spacing:0.5px;">⚡ TERMINAL</span>
@@ -169,7 +472,6 @@
         <div style="display:flex;gap:6px;">
           <button id="btn-log-copy" style="background:#1a1a2e;border:1px solid #2d2d4a;color:#8888cc;cursor:pointer;font-size:11px;padding:4px 12px;border-radius:4px;transition:all 0.2s;" title="Copiar todos os logs">📋 Copiar</button>
           <button id="btn-log-clear" style="background:#1a1a2e;border:1px solid #2d2d4a;color:#8888cc;cursor:pointer;font-size:11px;padding:4px 12px;border-radius:4px;transition:all 0.2s;" title="Limpar terminal">🗑️ Limpar</button>
-          <button id="btn-log-close" style="background:#1a1a2e;border:1px solid #2d2d4a;color:#8888cc;cursor:pointer;font-size:11px;padding:4px 12px;border-radius:4px;transition:all 0.2s;" title="Fechar terminal">✕</button>
         </div>
       </div>
       <div id="ws-log-lines" style="font-family:Consolas,'Courier New',monospace;font-size:12px;line-height:1.7;flex:1;overflow-y:auto;white-space:pre-wrap;padding:10px 14px;min-height:0;"></div>
@@ -179,23 +481,6 @@
     <div class="panel" id="panel-settings">
       <div class="panel-header"><h2>Configurações</h2></div>
       <div class="settings-body">
-
-        <div class="settings-section-title">Playlist (Modo Automático)</div>
-        <div class="setting-row">
-          <div><div class="setting-label">Ativar playlist</div><div class="setting-desc">Alternar wallpapers automaticamente</div></div>
-          <label class="toggle"><input type="checkbox" id="pl-enabled" /><div class="toggle-slider"></div></label>
-        </div>
-        <div class="setting-row">
-          <div><div class="setting-label">Intervalo</div><div class="setting-desc">Tempo entre cada wallpaper</div></div>
-          <div class="range-row" style="width:200px">
-            <input type="range" id="pl-interval" min="5" max="3600" step="5" value="30" />
-            <span class="range-val" id="pl-interval-val">30s</span>
-          </div>
-        </div>
-        <div class="setting-row">
-          <div><div class="setting-label">Aleatório</div><div class="setting-desc">Ordem aleatória na playlist</div></div>
-          <label class="toggle"><input type="checkbox" id="pl-shuffle" /><div class="toggle-slider"></div></label>
-        </div>
 
         <div class="settings-section-title">Áudio</div>
         <div class="setting-row">
@@ -222,6 +507,16 @@
         <div class="setting-row">
           <div><div class="setting-label">Iniciar com o Windows</div><div class="setting-desc">Abre o app automaticamente ao ligar o PC</div></div>
           <label class="toggle"><input type="checkbox" id="set-startup" /><div class="toggle-slider"></div></label>
+        </div>
+
+        <div class="settings-section-title" style="margin-top:24px">Conta Steam</div>
+        <div class="setting-row">
+          <div><div class="setting-label">Sessão de download</div><div class="setting-desc">Login usado para baixar itens do Workshop, ou exportar/importar sessão para outro PC</div></div>
+          <button class="btn btn-secondary" id="btn-settings-steam-session">🔑 Gerenciar</button>
+        </div>
+        <div class="setting-row">
+          <div><div class="setting-label">Downloads travados</div><div class="setting-desc">Se um download ficar parado, a Steam pode ter pausado a atualização do Wallpaper Engine sozinha (erro "File locked"). Clique para pedir que ela verifique e retome.</div></div>
+          <button class="btn btn-secondary" id="btn-unstick-steam">🔓 Destravar</button>
         </div>
 
         <div class="settings-section-title" style="margin-top:24px">Relógio na Área de Trabalho</div>
@@ -284,10 +579,10 @@
         <div id="app-rules-list"></div>
         <button class="btn btn-secondary" id="btn-add-app-rule" style="margin-top:10px; margin-bottom:10px">+ Adicionar regra de app</button>
 
-        <div class="settings-section-title" style="margin-top:24px">Regras de Horário</div>
-        <div class="setting-desc" style="padding:0 0 10px">Troca wallpaper automaticamente no horário definido</div>
-        <div id="time-rules-list"></div>
-        <button class="btn btn-secondary" id="btn-add-time-rule" style="margin-top:10px">+ Adicionar regra de horário</button>
+        <div class="settings-section-title" style="margin-top:24px">Sobre</div>
+        <div class="setting-row">
+          <div><div class="setting-label">Fynix Wallpaper Engine</div><div class="setting-desc">Versão <span id="about-version">--</span></div></div>
+        </div>
 
       </div>
     </div>
@@ -404,18 +699,91 @@
   </div>
 </div>
 
-<!-- Add Time Rule -->
-<div class="modal-backdrop" id="modal-time-rule">
-  <div class="modal">
-    <h3>Adicionar Regra de Horário</h3>
-    <div class="field"><label>Horário</label><input type="time" id="tr-time" value="08:00" /></div>
-    <div class="field">
-      <label>Wallpaper</label>
-      <select id="tr-wallpaper"></select>
+<!-- Criar/editar Playlist -->
+<div class="modal-backdrop" id="modal-playlist">
+  <div class="modal modal-wide">
+    <h3 id="pl-modal-title">Nova Playlist</h3>
+    <input type="hidden" id="pl-edit-id" />
+    <div class="field"><label>Nome</label><input type="text" id="pl-name" placeholder="ex: Anime Night" /></div>
+    <div class="field"><label>Descrição</label><input type="text" id="pl-description" placeholder="opcional" /></div>
+    <div class="field pl-color-icon-row">
+      <div class="pl-color-field">
+        <label>Cor</label>
+        <input type="color" id="pl-color" value="#7c3aed" />
+      </div>
+      <div class="pl-icon-field">
+        <label>Ícone</label>
+        <div class="pl-icon-grid" id="pl-icon-grid">
+          <div class="pl-icon-option selected" data-icon="🎵">🎵</div>
+          <div class="pl-icon-option" data-icon="🌙">🌙</div>
+          <div class="pl-icon-option" data-icon="☀️">☀️</div>
+          <div class="pl-icon-option" data-icon="🎮">🎮</div>
+          <div class="pl-icon-option" data-icon="🎨">🎨</div>
+          <div class="pl-icon-option" data-icon="🌆">🌆</div>
+          <div class="pl-icon-option" data-icon="🍃">🍃</div>
+          <div class="pl-icon-option" data-icon="⭐">⭐</div>
+          <div class="pl-icon-option" data-icon="🔀">🔀</div>
+          <div class="pl-icon-option" data-icon="❤️">❤️</div>
+        </div>
+      </div>
     </div>
+
+    <div class="field">
+      <label>Wallpapers desta playlist (<span id="pl-wallpaper-count">0</span> selecionados)</label>
+      <input type="text" id="pl-wallpaper-search" placeholder="Buscar na biblioteca..." />
+      <div class="pl-wallpaper-picker" id="pl-wallpaper-picker"></div>
+    </div>
+
+    <div class="field">
+      <label>Rotinas desta playlist</label>
+      <div id="pl-routines-list" class="pl-routines-list"></div>
+      <button class="btn btn-secondary" id="btn-add-routine" style="margin-top:8px">+ Adicionar rotina</button>
+    </div>
+
     <div class="modal-actions">
-      <button class="btn btn-secondary" onclick="closeModal('modal-time-rule')">Cancelar</button>
-      <button class="btn btn-primary" id="btn-tr-add">Adicionar</button>
+      <button class="btn btn-secondary" onclick="closeModal('modal-playlist')">Cancelar</button>
+      <button class="btn btn-primary" id="btn-pl-save">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Picker rápido: adicionar o wallpaper do modal de detalhes a uma playlist existente -->
+<div class="modal-backdrop" id="modal-add-to-playlist">
+  <div class="modal">
+    <h3>Adicionar à Playlist</h3>
+    <div id="atp-list" class="pl-routines-list"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-add-to-playlist')">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Criar/editar Rotina (aberto de dentro do modal de Playlist) -->
+<div class="modal-backdrop" id="modal-routine-edit">
+  <div class="modal">
+    <h3>Rotina</h3>
+    <input type="hidden" id="rt-edit-id" />
+    <input type="hidden" id="rt-playlist-id" />
+    <div class="field">
+      <label>Tipo de gatilho</label>
+      <select id="rt-type">
+        <option value="time">Horário fixo</option>
+        <option value="weekly">Dia da semana</option>
+        <option value="monthly">Mês do ano</option>
+        <option value="interval">Intervalo</option>
+        <option value="game">Jogo em execução</option>
+        <option value="application">Aplicativo em execução</option>
+      </select>
+    </div>
+    <div id="rt-config-fields"></div>
+    <div class="field">
+      <label>Prioridade (maior número = vence em caso de empate)</label>
+      <input type="number" id="rt-priority" value="50" min="0" max="200" />
+    </div>
+    <div id="rt-error-msg" class="rt-error-msg" style="display:none"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-routine-edit')">Cancelar</button>
+      <button class="btn btn-primary" id="btn-rt-save">Salvar rotina</button>
     </div>
   </div>
 </div>
@@ -428,7 +796,7 @@
       <img id="sl-preview-img" style="width:100%; border-radius:6px; aspect-ratio:16/9; object-fit:cover; background:var(--bg3);" />
     </div>
     <p id="sl-desc" style="font-size:13px;color:var(--text2);margin-bottom:14px">
-      Para baixar este wallpaper, faça login na sua conta Steam. Uma janela oficial da Steam será aberta. Você pode usar o aplicativo do celular para escanear o QR Code rapidamente.
+      Para baixar este wallpaper, faça login na sua conta Steam. Uma janela oficial da Steam será aberta.
     </p>
     <div class="modal-actions" style="justify-content:center; flex-wrap: wrap; gap: 8px;">
       <button class="btn btn-primary" id="btn-steam-web-login" style="width: 100%; padding: 12px; font-size: 14px;">
@@ -437,6 +805,10 @@
       </button>
       <button class="btn btn-secondary" id="btn-sl-use-preview" style="flex: 1;">🖼️ Usar preview</button>
       <button class="btn btn-secondary" onclick="closeModal('modal-steam-login')" style="flex: 1;">Cancelar</button>
+    </div>
+    <div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border); display:flex; justify-content:center; gap:16px;">
+      <button class="btn-link" id="btn-sl-export-session" style="background:none;border:none;color:var(--text2);font-size:12px;cursor:pointer;">📤 Exportar sessão p/ outro PC</button>
+      <button class="btn-link" id="btn-sl-import-session" style="background:none;border:none;color:var(--text2);font-size:12px;cursor:pointer;">📥 Importar sessão</button>
     </div>
   </div>
 </div>
@@ -473,6 +845,10 @@
     <p style="font-size:13px;color:var(--text2);margin-bottom:16px;line-height:1.6">
       Em alguns casos raros (cenas muito complexas, ou marcadas como incompatíveis pela própria Steam), o wallpaper pode cair de volta para uma imagem estática.
     </p>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text2);margin-bottom:16px;cursor:pointer;">
+      <input type="checkbox" id="chk-first-run-notice-optout" />
+      Não quero receber mais esse aviso
+    </label>
     <div class="modal-actions">
       <button class="btn btn-primary" id="btn-first-run-notice-close" disabled>Entendi (3)</button>
     </div>
@@ -480,5 +856,107 @@
 </div>
 
 <script src="app.js?v=3"></script>
+<script src="editor.js?v=1"></script>
+  <!-- Modal Premium de Detalhes do Wallpaper -->
+  <div class="wallpaper-modal-overlay" id="wallpaper-modal-overlay">
+    <div class="wallpaper-modal">
+      <div class="modal-close" id="modal-close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+      </div>
+
+      <div class="modal-hero">
+        <img id="modal-hero-img" src="" alt="Wallpaper Preview">
+      </div>
+
+      <div class="modal-body">
+        <div class="modal-title-row">
+          <div style="flex:1">
+            <h2 id="modal-title">Título do Wallpaper</h2>
+            <div class="modal-type-badge" id="modal-type-badge">Wallpaper Animado</div>
+          </div>
+          <div class="modal-actions-top">
+            <button class="modal-icon-btn" id="modal-icon-btn-favorite"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg></button>
+            <button class="modal-icon-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg></button>
+          </div>
+        </div>
+
+        <div class="modal-meta-row">
+          <span><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg> Paisagem</span>
+          <span><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="15" rx="2" ry="2"></rect><polyline points="17 2 12 7 7 2"></polyline></svg> 1920 x 1080</span>
+          <span><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg> 60 FPS</span>
+          <span id="modal-file-size"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg> - MB</span>
+        </div>
+
+        <div class="modal-creator-row">
+          <div class="creator-left">
+            <div class="creator-avatar">
+               <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+            </div>
+            <div>
+              <div class="creator-name" id="modal-author-name">Usuário Steam <svg viewBox="0 0 24 24" width="14" height="14" fill="#8E24AA"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg></div>
+              <div class="creator-followers">Membro da Comunidade</div>
+            </div>
+          </div>
+          <button class="btn btn-secondary">Seguir</button>
+        </div>
+
+        <div class="modal-stats-grid">
+          <div class="stat-box">
+            <div class="stat-val" id="modal-stat-dl">0</div>
+            <div class="stat-lbl"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg> Downloads</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-val" id="modal-stat-fav">0</div>
+            <div class="stat-lbl"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg> Favoritos</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-val" id="modal-stat-view">0</div>
+            <div class="stat-lbl"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg> Views</div>
+          </div>
+        </div>
+
+        <div class="modal-section">
+          <div class="modal-section-title">Tags</div>
+          <div class="modal-tags" id="modal-tags">
+            <!-- tags dynamically populated -->
+          </div>
+        </div>
+
+        <div class="modal-section">
+          <div class="modal-section-title">Recursos</div>
+          <div class="modal-resources">
+            <div class="res-badge"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5v14M22 10v4M7 5v14M2 10v4"></path></svg> Áudio Reativo</div>
+            <div class="res-badge"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg> 4K Nativo</div>
+          </div>
+        </div>
+
+        <button class="modal-btn-apply" id="modal-btn-apply">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+          Aplicar Wallpaper
+        </button>
+
+        <div class="modal-btn-row">
+          <button class="btn btn-secondary" id="modal-btn-favorite" style="flex:1;"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg> Favoritar</button>
+          <button class="btn btn-secondary" id="modal-btn-add-to-playlist" style="flex:1;"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"></path><polyline points="16 6 12 2 8 6"></polyline><line x1="12" y1="2" x2="12" y2="15"></line></svg> Adicionar à Playlist</button>
+          <button class="btn btn-secondary" style="flex:1;"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg> Compartilhar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tela de Carregamento de Download -->
+  <div class="dl-loading-screen" id="dl-loading-screen">
+    <div class="dl-loading-content">
+      <img src="logo-loading.png" alt="Carregando..." class="dl-loading-logo" />
+      <h2 id="dl-loading-title">Aplicando wallpaper</h2>
+      <h3 id="dl-loading-subtitle">Carregando...</h3>
+      <p id="dl-loading-info">Isso pode levar alguns instantes</p>
+      <div class="dl-progress-bar">
+        <div class="dl-progress-fill" id="dl-progress-fill"></div>
+      </div>
+      <div class="dl-progress-text" id="dl-progress-text">0%</div>
+    </div>
+  </div>
+
 </body>
 </html>

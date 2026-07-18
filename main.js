@@ -10,6 +10,18 @@ app.commandLine.appendSwitch('disable-metrics');
 app.commandLine.appendSwitch('disable-logging');
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256');
 
+// The wallpaper window is *always* occluded from the OS's point of view — it
+// permanently sits behind the desktop icons layer by design. Chromium's
+// native-window-occlusion feature uses that exact signal to throttle/suspend
+// work (including video decode, not just JS timers — `backgroundThrottling:
+// false` on the BrowserWindow only covers the latter) for windows it thinks
+// are hidden, to save power. Suspected cause of large/high-bitrate video
+// wallpapers (4K60 50Mbps+) never producing a visible frame while lighter
+// ones play fine — same root cause class as the equivalent WebView2 fix
+// found during the (rolled-back) migration attempt, see
+// project_webview2_migration memory.
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+
 const args = process.argv.map(a => a.toLowerCase());
 const _isScreensaver = args.includes('/s') || args.includes('-s');
 const _isConfigMode = args.includes('/c') || args.includes('-c');
@@ -19,27 +31,71 @@ if (args.find(a => a.startsWith('/p') || a.startsWith('-p'))) {
 try { require('electron-reload')(__dirname); } catch (_) {}
 const path       = require('path');
 const fs         = require('fs');
-const { execSync } = require('child_process');
+const os         = require('os');
+const { execSync, exec, execFile } = require('child_process');
 const Store      = require('./src/store');
-const Playlist   = require('./src/playlist');
+const License    = require('./src/license');
+const RoutineEngine = require('./src/routines/engine');
+const routinesMigrate = require('./src/routines/migrate');
+const TRIGGERS = require('./src/routines');
+const { getRunningProcesses } = require('./src/routines/_processMatch');
+const { reconcilePlaybackControls, appRulesNeedProcesses, setAppStatePause } = require('./src/playback-rules');
+let ffmpegPath = null;
+try { ffmpegPath = require('ffmpeg-static'); } catch (_) { /* boomerang loop just stays disabled */ }
+
+// Nudge the OS scheduler to favor this process over other startup apps
+// competing for CPU/disk right after login — part of "start fast like
+// Discord" (see project_packaging_requirements memory). Fired here, as early
+// as the process exists, and asynchronously so it never blocks our own boot
+// (a synchronous PowerShell spawn would defeat the purpose).
+if (process.platform === 'win32') {
+  exec(`powershell -NoProfile -WindowStyle Hidden -Command "(Get-Process -Id ${process.pid}).PriorityClass = 'AboveNormal'"`, () => {});
+}
 
 let controlWin = null;
 let tray       = null;
 const store    = new Store();
-const playlist = new Playlist(store);
 let _pendingWorkshopId = null;
 
-function appLog(msg, level = 'info') {
-  const ts = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  console.log(`[${ts}] [${level.toUpperCase()}] ${msg}`);
+
+// Mirror ALL console output (from main.js and every required module, e.g.
+// src/workerw.js's diagnostic logs) into the app's own "Terminal Logs" panel
+// — `console` is a shared global, so overriding it here catches everything,
+// not just calls made directly in this file. Lets the user read logs from
+// inside the app itself instead of needing a separate terminal window open.
+const _origConsoleLog   = console.log.bind(console);
+const _origConsoleError = console.error.bind(console);
+const _origConsoleWarn  = console.warn.bind(console);
+
+function _nowTs() {
+  return new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function _sendToUiLog(ts, msg, level) {
   if (controlWin && !controlWin.isDestroyed()) {
     controlWin.webContents.send('app-log', { ts, msg, level });
   }
+}
+
+function _fmtArgs(args) {
+  return args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+}
+
+console.log = (...args) => { _origConsoleLog(...args); _sendToUiLog(_nowTs(), _fmtArgs(args), 'info'); };
+console.error = (...args) => { _origConsoleError(...args); _sendToUiLog(_nowTs(), _fmtArgs(args), 'error'); };
+console.warn = (...args) => { _origConsoleWarn(...args); _sendToUiLog(_nowTs(), _fmtArgs(args), 'warn'); };
+
+function appLog(msg, level = 'info') {
+  const ts = _nowTs();
+  _origConsoleLog(`[${ts}] [${level.toUpperCase()}] ${msg}`);
+  _sendToUiLog(ts, msg, level);
 }
 appLog.ok    = (msg) => appLog(msg, 'success');
 appLog.warn  = (msg) => appLog(msg, 'warn');
 appLog.err   = (msg) => appLog(msg, 'error');
 appLog.debug = (msg) => appLog(msg, 'debug');
+
+const routineEngine = new RoutineEngine(store, (...args) => sendToAllWallpapers(...args), () => controlWin, appLog);
 
 
 // Map of displayId -> BrowserWindow (wallpaper windows)
@@ -74,6 +130,13 @@ function spawnWallpaperWindow(display) {
     webPreferences: {
       nodeIntegration: true, contextIsolation: false,
       webviewTag: true, webSecurity: false,
+      // This window is never focused and is always "covered" (behind icons,
+      // behind every other app) from Chromium's point of view — without this,
+      // it throttles/pauses timers and rendering in what it thinks is a
+      // backgrounded page, which is exactly what a wallpaper window always
+      // looks like to it. That's why the clock/live text can appear frozen
+      // until switching windows briefly "wakes" it back up.
+      backgroundThrottling: false,
     },
   });
 
@@ -102,6 +165,20 @@ function spawnWallpaperWindow(display) {
     if (current) win.webContents.send('set-wallpaper', current);
   });
 
+  // If the renderer actually crashes/gets killed (vs. just failing to load a
+  // video, which fires a normal 'error' event instead), the log simply goes
+  // silent otherwise — no more heartbeats, no exception, nothing. Since the
+  // window stays `transparent: true` and embedded behind the desktop icons,
+  // a dead renderer paints nothing, which visually looks exactly like "it
+  // fell back to the plain Windows wallpaper" (you're just seeing through to
+  // the real desktop background underneath our now-blank window).
+  win.webContents.on('render-process-gone', (_event, details) => {
+    console.error(`[main] wallpaper renderer for display ${display.id} is gone: reason=${details.reason} exitCode=${details.exitCode}`);
+  });
+  win.webContents.on('unresponsive', () => {
+    console.error(`[main] wallpaper renderer for display ${display.id} became unresponsive`);
+  });
+
   wallpaperWindows.set(display.id, win);
 }
 
@@ -112,11 +189,44 @@ function sendToAllWallpapers(channel, ...args) {
 }
 
 // ---- Control panel ----
+// Blocks boot until a valid license key is entered. Resolves true once
+// activation succeeds, false if the user closes the window without activating.
+function showActivationWindow() {
+  return new Promise((resolve) => {
+    const iconPath = path.join(__dirname, 'assets', 'icon.png');
+    const win = new BrowserWindow({
+      width: 380, height: 320,
+      resizable: false, frame: false,
+      backgroundColor: '#0b0d14',
+      icon: fs.existsSync(iconPath) ? iconPath : undefined,
+      webPreferences: { nodeIntegration: true, contextIsolation: false },
+    });
+    win.loadFile(path.join(__dirname, 'ui', 'activation.html'));
+
+    let settled = false;
+    ipcMain.handle('license-activate', async (_event, key) => {
+      const result = await License.activate(store, key);
+      if (result.ok) {
+        settled = true;
+        ipcMain.removeHandler('license-activate');
+        if (!win.isDestroyed()) win.close();
+        resolve(true);
+      }
+      return result;
+    });
+
+    win.on('closed', () => {
+      ipcMain.removeHandler('license-activate');
+      if (!settled) resolve(false);
+    });
+  });
+}
+
 function createControlWindow() {
-  const iconPath = path.join(__dirname, 'assets', 'icon.png');
+  const iconPath = path.join(__dirname, 'ui', 'logo-app-max.png');
   controlWin = new BrowserWindow({
     width: 980, height: 680,
-    minWidth: 800, minHeight: 500,
+    resizable: false, maximizable: false, fullscreenable: false,
     frame: false, titleBarStyle: 'hidden',
     backgroundColor: '#0d0d0d',
     icon: fs.existsSync(iconPath) ? iconPath : undefined,
@@ -188,15 +298,112 @@ function embedWallpaperBehindDesktop(win) {
   try {
     const { embedBehindDesktop } = require('./src/workerw');
     const hwnd = win.getNativeWindowHandle();
-    if (!embedBehindDesktop(hwnd)) console.warn('[main] WorkerW embedding failed');
+    // getBounds() still reflects this window's intended screen position/size
+    // even after native reparenting (Electron's own model doesn't know we
+    // called SetParent behind its back) — pass it through so workerw.js can
+    // re-assert the correct position relative to WorkerW's coordinate space.
+    if (!embedBehindDesktop(hwnd, win.getBounds())) console.warn('[main] WorkerW embedding failed');
   } catch (err) {
     console.error('[main] WorkerW error:', err.message);
   }
 }
 
+// Win+D ("show desktop") minimizes every top-level window it can find —
+// our wallpaper window is still technically top-level to Windows even after
+// SetParent-ing it under WorkerW, so it gets minimized too. Re-embedding
+// alone doesn't fix that: a minimized window stays invisible regardless of
+// who its parent is. Also covers the related case where Explorer recreates
+// WorkerW itself and orphans the SetParent relationship.
+//
+// isEmbeddedCorrectly() is checked first every tick so we only actually call
+// SetParent/SetWindowPos when something is really wrong — running those
+// unconditionally every second (previous behavior) was itself causing
+// periodic visible flicker, since reparenting forces a repaint even when the
+// window was already exactly where it needed to be.
+function startWorkerWWatchdog() {
+  const { isEmbeddedCorrectly } = require('./src/workerw');
+  setInterval(() => {
+    for (const win of wallpaperWindows.values()) {
+      if (win.isDestroyed()) continue;
+      const hwnd = win.getNativeWindowHandle();
+
+      if (win.isMinimized()) { win.restore(); console.log('[watchdog] wallpaper window was minimized — restored'); }
+      if (!win.isVisible())  { win.showInactive(); console.log('[watchdog] wallpaper window was hidden — shown'); }
+
+      if (isEmbeddedCorrectly(hwnd)) continue; // already correct, skip to avoid flicker
+
+      console.log('[watchdog] wallpaper window not correctly embedded — re-attaching');
+      embedWallpaperBehindDesktop(win);
+    }
+  }, 1000);
+}
+
+// Tried two nudge strategies here (resize +1px, then hide()+showInactive())
+// to work around the wallpaper going visually stale when embedded as a
+// WS_CHILD under Progman. Neither actually fixed it, and hide()+show caused
+// a visible flicker of its own — worse than the problem. Removed pending a
+// real fix; see project_workerw_fragility.md memory for the current theory
+// (Electron's Chromium top-level window may not tolerate being forced into
+// a foreign process's window tree the way a plain native window hosting a
+// WebView2 *child control* — what Lively actually does — would).
+function startRepaintNudge() {
+  // intentionally a no-op for now
+}
+
+// ---- Autostart (Startup-folder .lnk, not the Registry Run key) ----
+// The Registry Run-key mechanism (Electron's own `setLoginItemSettings`) has
+// no "start in" concept — it launches bin\electron.exe with no working
+// directory, and this build's Electron only registers its built-ins when
+// launched from the packed ASAR relative to the repo root (see
+// project_electron_binary memory), which is why a real reboot showed
+// Electron's own default demo screen instead of the app. A .lnk shortcut in
+// the Startup folder has an explicit WorkingDirectory field, matching what
+// `scripts/dev.js` already does via `spawn(electronExe, [], { cwd: root })`.
+// See project_autostart_bug memory for the full investigation history.
+function setAutostart(enabled) {
+  if (process.platform !== 'win32') return;
+
+  const exePath = process.execPath;
+  const workDir = path.dirname(path.dirname(exePath)); // .../bin/electron.exe -> repo root
+  const startupDir = path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+  const lnkPath = path.join(startupDir, 'EngineWallpaper.lnk');
+
+  const exists = fs.existsSync(lnkPath);
+  if (enabled === exists) return; // already in the desired state — skip the slow PowerShell spawn
+
+  // Always clear the old Run-key entry (harmless if it was never set) so the
+  // two mechanisms can never coexist and double-launch the app.
+  try { app.setLoginItemSettings({ openAtLogin: false, path: exePath }); } catch {}
+
+  if (!enabled) {
+    try { fs.unlinkSync(lnkPath); } catch {}
+    return;
+  }
+
+  const psPath = path.join(os.tmpdir(), 'ew-mkshortcut.ps1');
+  const ps = [
+    '$s = New-Object -ComObject WScript.Shell',
+    `$sc = $s.CreateShortcut("${lnkPath}")`,
+    `$sc.TargetPath = "${exePath}"`,
+    `$sc.WorkingDirectory = "${workDir}"`,
+    '$sc.Save()',
+  ].join('\r\n');
+
+  try {
+    fs.mkdirSync(startupDir, { recursive: true });
+    fs.writeFileSync(psPath, ps, 'utf8');
+    execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psPath}"`);
+    appLog.ok('Atalho de inicialização criado em ' + lnkPath);
+  } catch (err) {
+    appLog.err('Erro criando atalho de inicialização: ' + err.message);
+  } finally {
+    try { fs.unlinkSync(psPath); } catch {}
+  }
+}
+
 // ---- System tray ----
 function createTray() {
-  const iconPath = path.join(__dirname, 'assets', 'tray.png');
+  const iconPath = path.join(__dirname, 'ui', 'logo-tray.png');
   const icon = fs.existsSync(iconPath)
     ? nativeImage.createFromPath(iconPath)
     : nativeImage.createEmpty();
@@ -211,7 +418,16 @@ function createTray() {
       } 
     },
     { type: 'separator' },
-    { label: 'Próximo wallpaper',  click: () => playlist.next() },
+    { label: 'Próximo wallpaper',  click: () => {
+        const library = store.get('library') || [];
+        if (!library.length) return;
+        const current = store.get('current');
+        const idx = current ? library.findIndex(w => w.id === current.id) : -1;
+        const next = library[(idx + 1) % library.length];
+        store.set('current', next);
+        sendToAllWallpapers('set-wallpaper', next);
+        if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('wallpaper-changed', next);
+      } },
     { label: 'Pausar',             click: () => sendToAllWallpapers('pause') },
     { type: 'separator' },
     { label: 'Sair',               click: () => app.exit(0) },
@@ -227,121 +443,53 @@ function createTray() {
   });
 }
 
-// ---- Fullscreen monitor ----
-let _appState = { pause: false, mute: false, stop: false };
+// ---- Motor de automação (Playlists + Rotinas + pausa/muta/stop) ----
+// Um único setInterval substitui os antigos startFullscreenMonitor (3s),
+// startTimeRulesMonitor (60s) e o timer interno do extinto src/playlist.js.
+// _manualPause continua aqui (é o botão de play/pause do painel, não uma
+// rotina) — o resto (App Rules/fullscreen) mora em src/playback-rules.js e
+// a arbitração de playlists em src/routines/engine.js (routineEngine).
 let _manualPause = false;
-let _fsTimer = null;
+let _engineTimer = null;
+let _procCache = null; // { at, list } — evita rodar `tasklist` mais rápido que o antigo intervalo de 3s
 
 ipcMain.handle('toggle-playback', () => {
   _manualPause = !_manualPause;
   sendToAllWallpapers(_manualPause ? 'pause' : 'resume');
-  _appState.pause = _manualPause;
+  setAppStatePause(_manualPause);
   return { paused: _manualPause };
 });
 
-function getRunningProcesses() {
-  return new Promise((resolve) => {
-    const { exec } = require('child_process');
-    exec('tasklist /FO CSV /NH', (err, stdout) => {
-      if (err) return resolve([]);
-      const processes = stdout.split('\\n')
-        .map(line => line.split(',')[0])
-        .map(name => name.replace(/"/g, '').trim().toLowerCase())
-        .filter(name => name.length > 0);
-      resolve(processes);
-    });
-  });
+async function buildEngineContext(restrictedMode) {
+  const now = new Date();
+  const context = {
+    now,
+    hhmm: `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`,
+    dayOfWeek: now.getDay(),
+    month: now.getMonth(),
+    runningProcesses: null,
+    restrictedMode: !!restrictedMode,
+  };
+  if (restrictedMode) return context;
+
+  const routines = store.get('routines') || [];
+  const needsProcesses = appRulesNeedProcesses(store) || routines.some(r => (r.type === 'game' || r.type === 'application') && r.enabled);
+  if (needsProcesses) {
+    if (!_procCache || (now.getTime() - _procCache.at) > 3000) {
+      _procCache = { at: now.getTime(), list: await getRunningProcesses() };
+    }
+    context.runningProcesses = _procCache.list;
+  }
+  return context;
 }
 
-function startFullscreenMonitor() {
-  _fsTimer = setInterval(async () => {
-    const settings = store.get('settings') || {};
-    let rulesActive = { pause: false, mute: false, stop: false };
-    
-    // 1. App Rules
-    if (settings.appRules && settings.appRules.length > 0) {
-      const running = await getRunningProcesses();
-      for (const rule of settings.appRules) {
-        if (running.includes(rule.exe.toLowerCase())) {
-          if (rule.action === 'pause') rulesActive.pause = true;
-          if (rule.action === 'mute') rulesActive.mute = true;
-          if (rule.action === 'stop') rulesActive.stop = true;
-        }
-      }
-    }
-
-    // 2. Fullscreen Rules
-    if (settings.pauseOnFullscreen || settings.muteOnFullscreen) {
-      try {
-        const { isFullscreenAppRunning } = require('./src/fullscreen');
-        const isFs = isFullscreenAppRunning(screen.getAllDisplays());
-        if (isFs) {
-          if (settings.pauseOnFullscreen) rulesActive.pause = true;
-          if (settings.muteOnFullscreen) rulesActive.mute = true;
-        }
-      } catch {}
-    }
-
-    // Manual pause from the control panel's play/pause button always wins,
-    // regardless of what the automation rules computed this tick.
-    if (_manualPause) rulesActive.pause = true;
-
-    const vol = settings.volume ?? 50;
-
-    // Apply Stop/Unstop
-    if (rulesActive.stop !== _appState.stop) {
-      sendToAllWallpapers(rulesActive.stop ? 'stop' : 'unstop');
-    }
-    
-    // Apply Pause/Resume (only if not stopped)
-    if (!rulesActive.stop) {
-      if (rulesActive.pause !== _appState.pause) {
-        sendToAllWallpapers(rulesActive.pause ? 'pause' : 'resume');
-      }
-    }
-
-    // Apply Mute/Unmute
-    if (rulesActive.mute !== _appState.mute) {
-      sendToAllWallpapers(rulesActive.mute ? 'mute' : 'unmute', vol);
-    }
-
-    _appState = rulesActive;
-  }, 3000);
-}
-
-// ---- Time-based switching ----
-let _timeTimer = null;
-let _lastAppliedTimeRule = null;
-
-function startTimeRulesMonitor() {
-  _timeTimer = setInterval(() => {
-    const rules = store.get('timeRules') || [];
-    if (!rules.length) return;
-
-    const now = new Date();
-    const hhmm = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-    const library = store.get('library') || [];
-
-    // Find the most recent rule that has passed
-    const sorted = [...rules].sort((a, b) => a.time.localeCompare(b.time));
-    let match = null;
-    for (const r of sorted) {
-      if (r.time <= hhmm) match = r;
-    }
-    if (!match) match = sorted[sorted.length - 1]; // wrap to last rule of previous day
-
-    if (!match || match.id === _lastAppliedTimeRule) return;
-    _lastAppliedTimeRule = match.id;
-
-    const wallpaper = library.find(w => w.id === match.wallpaperId);
-    if (!wallpaper) return;
-
-    store.set('current', wallpaper);
-    sendToAllWallpapers('set-wallpaper', wallpaper);
-    if (controlWin && !controlWin.isDestroyed()) {
-      controlWin.webContents.send('wallpaper-changed', wallpaper);
-    }
-  }, 60000);
+function startAutomationEngine() {
+  _engineTimer = setInterval(async () => {
+    const restrictedMode = _isScreensaver || _isConfigMode;
+    const context = await buildEngineContext(restrictedMode);
+    if (!restrictedMode) reconcilePlaybackControls(store, sendToAllWallpapers, context, _manualPause);
+    routineEngine.tick(context);
+  }, 2000);
 }
 
 // ---- IPC Handlers ----
@@ -360,13 +508,200 @@ ipcMain.handle('get-library', () => {
   if (updated) store.set('library', library);
   return library;
 });
+ipcMain.handle('get-favorites',        () => store.get('favorites') || []);
+ipcMain.handle('toggle-favorite', (_, item) => {
+  const favorites = store.get('favorites') || [];
+  const idx = favorites.findIndex(f => f.workshopId === item.workshopId);
+  let added;
+  if (idx >= 0) {
+    favorites.splice(idx, 1);
+    added = false;
+  } else {
+    favorites.push(item);
+    added = true;
+  }
+  store.set('favorites', favorites);
+  return { added, favorites };
+});
 ipcMain.handle('get-current',          () => store.get('current') || null);
-ipcMain.handle('get-playlist-config',  () => store.get('playlistConfig') || { enabled: false, interval: 30, shuffle: false });
 const DEFAULT_CLOCK_OVERLAY = { enabled: false, position: 'top-left', format24h: true, showSeconds: false, showDate: true, showDayName: true, color: '#ffffff', fontSize: 48 };
 ipcMain.handle('get-settings',         () => store.get('settings') || { volume: 50, pauseOnFullscreen: true, muteOnFullscreen: false, startWithWindows: true, audioReactive: false, clockOverlay: DEFAULT_CLOCK_OVERLAY });
 ipcMain.handle('get-displays',         () => screen.getAllDisplays().map(d => ({ id: d.id, bounds: d.bounds, label: d.label || null })));
 ipcMain.handle('get-display-wallpapers', () => store.get('displayWallpapers') || {});
-ipcMain.handle('get-time-rules',       () => store.get('timeRules') || []);
+
+// ---- Playlists + Rotinas ----
+ipcMain.handle('get-playlists', () => store.get('smartPlaylists') || []);
+ipcMain.handle('get-routines',  () => store.get('routines') || []);
+
+ipcMain.handle('save-playlist', (_, playlist) => {
+  const playlists = store.get('smartPlaylists') || [];
+  if (playlist.id) {
+    const idx = playlists.findIndex(p => p.id === playlist.id);
+    if (idx !== -1) { playlists[idx] = { ...playlists[idx], ...playlist }; store.set('smartPlaylists', playlists); return playlists[idx]; }
+  }
+  const created = {
+    id: Date.now().toString(),
+    name: playlist.name || 'Nova Playlist',
+    description: playlist.description || '',
+    color: playlist.color || '#7c3aed',
+    icon: playlist.icon || '🎵',
+    wallpaperIds: playlist.wallpaperIds || [],
+    createdAt: Date.now(),
+    stats: { lastWallpaperId: null, lastAppliedAt: null, lastRotationAt: null, switchCount: 0, activeSinceMs: null },
+  };
+  playlists.push(created);
+  store.set('smartPlaylists', playlists);
+  return created;
+});
+
+ipcMain.handle('delete-playlist', (_, playlistId) => {
+  const playlists = (store.get('smartPlaylists') || []).filter(p => p.id !== playlistId);
+  const routines = (store.get('routines') || []).filter(r => r.playlistId !== playlistId);
+  store.set('smartPlaylists', playlists);
+  store.set('routines', routines);
+  return true;
+});
+
+ipcMain.handle('duplicate-playlist', (_, playlistId) => {
+  const playlists = store.get('smartPlaylists') || [];
+  const original = playlists.find(p => p.id === playlistId);
+  if (!original) return null;
+  const copy = {
+    ...original,
+    id: Date.now().toString(),
+    name: `${original.name} (cópia)`,
+    createdAt: Date.now(),
+    stats: { lastWallpaperId: null, lastAppliedAt: null, lastRotationAt: null, switchCount: 0, activeSinceMs: null },
+  };
+  playlists.push(copy);
+  store.set('smartPlaylists', playlists);
+
+  const routines = store.get('routines') || [];
+  const copiedRoutines = routines.filter(r => r.playlistId === playlistId).map(r => ({ ...r, id: `${Date.now()}${Math.random().toString(36).slice(2, 6)}`, playlistId: copy.id }));
+  store.set('routines', routines.concat(copiedRoutines));
+  return copy;
+});
+
+ipcMain.handle('apply-playlist-now', (_, playlistId) => routineEngine.applyPlaylistNow(playlistId));
+
+ipcMain.handle('save-routine', (_, routine) => {
+  const trigger = TRIGGERS[routine.type];
+  if (trigger && trigger.validateConfig) {
+    const result = trigger.validateConfig(routine.config);
+    if (!result.ok) return { ok: false, msg: result.msg };
+  }
+  const routines = store.get('routines') || [];
+  if (routine.id) {
+    const idx = routines.findIndex(r => r.id === routine.id);
+    if (idx !== -1) { routines[idx] = { ...routines[idx], ...routine }; store.set('routines', routines); return { ok: true, routine: routines[idx] }; }
+  }
+  const created = {
+    id: Date.now().toString(),
+    playlistId: routine.playlistId,
+    type: routine.type,
+    enabled: routine.enabled !== false,
+    priority: routine.priority ?? (trigger ? trigger.defaultPriority : 0),
+    config: routine.config || {},
+  };
+  routines.push(created);
+  store.set('routines', routines);
+  return { ok: true, routine: created };
+});
+
+ipcMain.handle('delete-routine', (_, routineId) => {
+  store.set('routines', (store.get('routines') || []).filter(r => r.id !== routineId));
+  return true;
+});
+
+ipcMain.handle('set-routine-enabled', (_, routineId, enabled) => {
+  const routines = store.get('routines') || [];
+  const idx = routines.findIndex(r => r.id === routineId);
+  if (idx !== -1) { routines[idx].enabled = !!enabled; store.set('routines', routines); }
+  return true;
+});
+
+ipcMain.handle('reorder-routines', (_, orderedIds) => {
+  const routines = store.get('routines') || [];
+  orderedIds.forEach((id, i) => {
+    const idx = routines.findIndex(r => r.id === id);
+    if (idx !== -1) routines[idx].priority = (orderedIds.length - i) * 10;
+  });
+  store.set('routines', routines);
+  return true;
+});
+
+// ---- Loop "bumerangue" (toca pra frente, depois ao contrário, repete) ----
+// O Chromium não decodifica vídeo ao contrário de forma fluida (playbackRate
+// negativo não é suportado em <video>, e reverter frame a frame via seek
+// exige redecodificar desde o keyframe anterior a cada passo — trava o tempo
+// todo, não só no fim). A alternativa leve escolhida: gerar UMA VEZ, com
+// FFmpeg, uma cópia do vídeo já invertida (cacheada ao lado do original), e
+// na hora de tocar só alternar entre os dois arquivos — cada um tocando pra
+// frente normalmente, sem decodificação reversa em tempo real nenhuma.
+const _reversedVideoJobs = new Map(); // videoPath -> Promise<string|null>, evita gerar o mesmo arquivo 2x em paralelo
+
+function reversedVideoPathFor(videoPath) {
+  const ext = path.extname(videoPath);
+  return videoPath.slice(0, videoPath.length - ext.length) + '.reversed.mp4';
+}
+
+function ensureReversedVideo(videoPath) {
+  if (_reversedVideoJobs.has(videoPath)) return _reversedVideoJobs.get(videoPath);
+
+  const job = (async () => {
+    if (!ffmpegPath || !fs.existsSync(ffmpegPath)) {
+      appLog.warn('FFmpeg indisponível — loop bumerangue desativado, mantendo loop simples.');
+      return null;
+    }
+    if (!fs.existsSync(videoPath)) return null;
+
+    const outPath = reversedVideoPathFor(videoPath);
+    try {
+      if (fs.existsSync(outPath) && fs.statSync(outPath).size > 0) return outPath;
+    } catch (_) { /* segue e tenta gerar de novo */ }
+
+    appLog(`Gerando versão invertida de "${path.basename(videoPath)}" para o loop bumerangue...`);
+    // -an: sem áudio — o <video> do wallpaper já toca sempre mudo, e reverter
+    // a trilha de áudio (-af areverse) só custaria tempo à toa.
+    const buildArgs = (hwaccel) => [
+      ...(hwaccel ? ['-hwaccel', 'd3d11va'] : []),
+      '-y', '-i', videoPath, '-vf', 'reverse', '-an', outPath,
+    ];
+    const runFfmpeg = (args) => new Promise((resolve, reject) => {
+      execFile(ffmpegPath, args, { maxBuffer: 1024 * 1024 * 8 }, (err, _stdout, stderr) => {
+        if (err) reject(Object.assign(err, { stderr })); else resolve();
+      });
+    });
+    try {
+      // Vídeos AV1/HDR (comuns em capturas de gameplay recentes) travam o
+      // decoder de software padrão do FFmpeg (libaom-av1) com "Bitstream not
+      // supported by this decoder" mesmo sendo arquivos válidos — confirmado
+      // real contra um wallpaper de exemplo do usuário (5120x1440 60fps AV1
+      // HDR10). O decoder via GPU (d3d11va) decodifica esse mesmo arquivo sem
+      // erro, então tenta com aceleração de hardware primeiro; se o próprio
+      // hwaccel falhar por algum motivo (GPU/driver sem suporte), cai pro
+      // decode por software puro, que já cobria os vídeos SDR comuns antes.
+      try {
+        await runFfmpeg(buildArgs(true));
+      } catch (hwErr) {
+        appLog.warn(`FFmpeg com aceleração de hardware falhou para "${path.basename(videoPath)}", tentando por software: ${hwErr.message}`);
+        await runFfmpeg(buildArgs(false));
+      }
+      if (!fs.existsSync(outPath) || fs.statSync(outPath).size === 0) throw new Error('arquivo de saída vazio');
+      appLog.ok(`Versão invertida pronta: ${path.basename(outPath)}`);
+      return outPath;
+    } catch (err) {
+      appLog.err(`Falha ao gerar vídeo invertido de "${path.basename(videoPath)}": ${err.message}`);
+      try { fs.unlinkSync(outPath); } catch (_) {}
+      return null;
+    }
+  })();
+
+  _reversedVideoJobs.set(videoPath, job);
+  return job;
+}
+
+ipcMain.handle('ensure-reversed-video', (_, videoPath) => ensureReversedVideo(videoPath));
 
 ipcMain.handle('set-wallpaper', (_, wallpaper, displayId) => {
   if (displayId) {
@@ -403,6 +738,30 @@ ipcMain.handle('update-wallpaper', (_, wallpaper) => {
   return wallpaper;
 });
 
+// ---- Oficina: Editor Visual de Wallpapers (V1 — imagem estática) ----
+ipcMain.handle('get-editor-projects', () => store.get('editorProjects') || []);
+
+ipcMain.handle('save-editor-project', (_, project) => {
+  const projects = store.get('editorProjects') || [];
+  if (project.id) {
+    const idx = projects.findIndex(p => p.id === project.id);
+    if (idx !== -1) { projects[idx] = { ...projects[idx], ...project }; store.set('editorProjects', projects); return projects[idx]; }
+  }
+  const created = { ...project, id: Date.now().toString(), createdAt: Date.now() };
+  projects.push(created);
+  store.set('editorProjects', projects);
+  return created;
+});
+
+ipcMain.handle('export-editor-image', async (_, { dataUrl }) => {
+  const dir = path.join(app.getPath('userData'), 'editor-exports');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, `${Date.now()}.png`);
+  const base64 = dataUrl.replace(/^data:image\/png;base64,/, '');
+  fs.writeFileSync(filePath, Buffer.from(base64, 'base64'));
+  return filePath;
+});
+
 // ---- We-scene manual layout editing ----
 // Reverse-engineering WE's exact pixel formula for every scene field has no
 // official spec to check against, so instead of chasing it forever the user
@@ -419,8 +778,10 @@ ipcMain.handle('we-scene-enter-edit', () => {
   }
 });
 
-ipcMain.handle('should-show-we-scene-notice', () => !store.get('weSceneNoticeShown'));
-ipcMain.handle('mark-we-scene-notice-shown', () => { store.set('weSceneNoticeShown', true); return true; });
+// Shows every app launch by default (not just once ever) — the user has to
+// explicitly opt out via the modal's checkbox for it to stop appearing.
+ipcMain.handle('should-show-we-scene-notice', () => !store.get('weSceneNoticeOptOut'));
+ipcMain.handle('set-we-scene-notice-optout', () => { store.set('weSceneNoticeOptOut', true); return true; });
 
 ipcMain.handle('we-scene-save-overrides', (_, { wallpaperId, overrides }) => {
   const library = store.get('library') || [];
@@ -438,14 +799,92 @@ ipcMain.handle('we-scene-save-overrides', (_, { wallpaperId, overrides }) => {
   return { ok: true };
 });
 
-ipcMain.handle('set-playlist-config', (_, config) => {
-  store.set('playlistConfig', config);
-  playlist.configure(config);
-  return true;
-});
-
 ipcMain.on('update-native-prop', (_, data) => {
   sendToAllWallpapers('update-native-prop', data);
+});
+
+// Diagnostic: if this stops appearing while the wallpaper looks frozen, the
+// renderer's JS itself has stopped (crash/hang/suspended process). If it
+// keeps appearing on schedule while the screen still looks frozen, the JS is
+// fine and it's specifically the paint/composite step that isn't refreshing
+// — most likely suspect right now: WS_EX_LAYERED (added for "raised desktop"
+// mode) fighting with Electron's own `transparent: true` compositing.
+ipcMain.on('wallpaper-heartbeat', (_event, _info) => {
+  // Silenced — was flooding the terminal every 5s. Uncomment the line below
+  // if chasing the frozen-paint bug described above again.
+  // console.log(`[heartbeat] wallpaper renderer alive — ${_info.display} at ${new Date(_info.ts).toLocaleTimeString('pt-BR')}`);
+});
+
+// Repassa o FPS medido de verdade pelo próprio renderer do wallpaper (ver
+// wallpaper.js) pro painel de controle — nenhum valor inventado aqui, só
+// encaminha o que o requestAnimationFrame de lá já mediu.
+ipcMain.on('wallpaper-fps', (_event, info) => {
+  if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('wallpaper-fps-update', info);
+});
+
+// CPU/RAM reais da máquina (não do processo do app sozinho) — usa só o
+// módulo nativo `os`, sem dependência nova, seguindo a prioridade de
+// footprint leve do projeto. CPU% precisa de duas amostras de os.cpus()
+// com um intervalo entre elas (não dá pra ler "uso atual" de uma vez só).
+function readCpuTimes() {
+  return os.cpus().reduce((acc, core) => {
+    acc.idle += core.times.idle;
+    acc.total += core.times.user + core.times.nice + core.times.sys + core.times.idle + core.times.irq;
+    return acc;
+  }, { idle: 0, total: 0 });
+}
+let _lastCpuTimes = readCpuTimes();
+function sampleSystemStats() {
+  const now = readCpuTimes();
+  const idleDelta = now.idle - _lastCpuTimes.idle;
+  const totalDelta = now.total - _lastCpuTimes.total;
+  _lastCpuTimes = now;
+  const cpuPct = totalDelta > 0 ? Math.round(100 * (1 - idleDelta / totalDelta)) : 0;
+  const ramPct = Math.round(100 * (1 - os.freemem() / os.totalmem()));
+  return { cpu: Math.max(0, Math.min(100, cpuPct)), ram: Math.max(0, Math.min(100, ramPct)) };
+}
+setInterval(() => {
+  if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('system-stats', sampleSystemStats());
+}, 2000);
+
+// Status real da sessão Steam (usada pro badge no cabeçalho) — mesmos
+// campos que já guardamos pra baixar/logar, só expostos pra UI conferir.
+ipcMain.handle('get-steam-status', () => {
+  const cookies = store.get('steamWebCookies');
+  return { connected: !!(cookies && cookies.sessionid) };
+});
+
+// Diagnostic: this should NEVER fire — the wallpaper window is meant to be
+// full click-through. If it does, mouse clicks on the desktop are landing on
+// our window instead of passing through to icons/apps behind it.
+ipcMain.on('wallpaper-click-received', (event, info) => {
+  console.error(`[diag] !! WALLPAPER RECEIVED A REAL CLICK at (${info.x},${info.y}) — click-through is broken`);
+});
+
+// Diagnostic: Chromium's own visible/hidden page state — if this flips to
+// hidden right when the freeze starts, that's the cause (Chromium stops
+// compositing new frames while a page is "hidden", independent of JS/timers).
+ipcMain.on('wallpaper-visibility-change', (event, info) => {
+  console.log(`[diag] visibilitychange: hidden=${info.hidden} state=${info.state} at ${new Date(info.ts).toLocaleTimeString('pt-BR')}`);
+});
+
+ipcMain.on('wallpaper-set-attempt', (event, info) => {
+  console.log(`[wallpaper] applying "${info.name || info.id}" type=${info.type} renderType=${info.renderType} src=${info.src}`);
+});
+
+ipcMain.on('wallpaper-video-error', (event, info) => {
+  console.error(`[wallpaper] video ${info.stage} error (code=${info.code ?? 'n/a'}): ${info.message || 'unknown'} — src=${info.src}`);
+});
+
+ipcMain.on('wallpaper-video-state', (event, info) => {
+  console.log(`[wallpaper] video state: paused=${info.paused} ended=${info.ended} currentTime=${info.currentTime.toFixed(2)} readyState=${info.readyState} networkState=${info.networkState} dims=${info.videoWidth}x${info.videoHeight} src=${info.src}`);
+});
+
+// Cenas WE que usam algo que nosso decodificador/renderer ainda não sabe ler
+// direito hoje falhavam em silêncio (sem devtools aberto, o console da janela
+// de wallpaper é invisível). Isso traz esses avisos pra aba Log do app.
+ipcMain.on('we-scene-issue', (event, info) => {
+  appLog.warn(`[Cena WE] ${info.label || '?'}: ${info.message}`);
 });
 
 ipcMain.handle('get-desktop-audio-source', async () => {
@@ -456,16 +895,7 @@ ipcMain.handle('get-desktop-audio-source', async () => {
 ipcMain.handle('set-settings', (_, settings) => {
   store.set('settings', settings);
   sendToAllWallpapers('update-settings', settings);
-  // Start with Windows
-  try {
-    app.setLoginItemSettings({ openAtLogin: !!settings.startWithWindows, path: process.execPath });
-  } catch {}
-  return true;
-});
-
-ipcMain.handle('set-time-rules', (_, rules) => {
-  store.set('timeRules', rules);
-  _lastAppliedTimeRule = null;
+  setAutostart(!!settings.startWithWindows);
   return true;
 });
 
@@ -515,22 +945,26 @@ function getWorkshopDirs(steamPath) {
 // cache folder so we-scene-render.js can read it like any other scene.
 // Returns null if there's nothing we can read — callers keep the existing
 // frozen-preview-image fallback in that case, so this never breaks import.
+// Returns { dir, reason }. `dir` is null when we can't render this scene
+// live — `reason` explains why, so the UI can tell the user what's going on
+// instead of just silently showing a static image.
 function resolveWeSceneDir(wpDir, workshopId) {
-  if (fs.existsSync(path.join(wpDir, 'scene.json'))) return wpDir;
+  if (fs.existsSync(path.join(wpDir, 'scene.json'))) return { dir: wpDir, reason: null };
 
   const pkgPath = path.join(wpDir, 'scene.pkg');
-  if (!fs.existsSync(pkgPath)) return null;
+  if (!fs.existsSync(pkgPath)) return { dir: null, reason: 'no_scene_data' };
 
   const cacheDir = path.join(app.getPath('userData'), 'we-scene-cache', workshopId);
-  if (fs.existsSync(path.join(cacheDir, 'scene.json'))) return cacheDir;
+  if (fs.existsSync(path.join(cacheDir, 'scene.json'))) return { dir: cacheDir, reason: null };
 
   try {
     const { unpackPkg } = require('./src/we-scene');
     unpackPkg(pkgPath, cacheDir);
-    return fs.existsSync(path.join(cacheDir, 'scene.json')) ? cacheDir : null;
+    if (fs.existsSync(path.join(cacheDir, 'scene.json'))) return { dir: cacheDir, reason: null };
+    return { dir: null, reason: 'unpack_incomplete' };
   } catch (err) {
     appLog.warn(`Não foi possível descompactar scene.pkg de ${workshopId}: ${err.message}`);
-    return null;
+    return { dir: null, reason: 'unsupported_package' };
   }
 }
 
@@ -549,13 +983,15 @@ function parseSingleWorkshopItem(wpDir, id) {
 
   if (type === 'scene') {
     if (!preview) return null;
+    const { dir: weSceneDir, reason: weSceneFallbackReason } = resolveWeSceneDir(wpDir, id);
     return {
       workshopId: id,
       name: project.title || `Workshop ${id}`,
       type: 'scene',
       src: preview,
       preview,
-      weSceneDir: resolveWeSceneDir(wpDir, id),
+      weSceneDir,
+      weSceneFallbackReason,
       tags: Array.isArray(project.tags) ? project.tags : [],
       properties: project.general && project.general.properties ? project.general.properties : null,
     };
@@ -681,6 +1117,37 @@ function inferWaType(tags) {
   return 'unknown';
 }
 
+ipcMain.handle('get-workshop-details', async (_, ids) => {
+  try {
+    if (!ids || ids.length === 0) return { items: [] };
+    const formData = { itemcount: ids.length };
+    ids.forEach((id, i) => { formData[`publishedfileids[${i}]`] = id; });
+    const detailJson = await httpPost('https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/', formData);
+    const details = JSON.parse(detailJson);
+    const items = (details.response?.publishedfiledetails || []).map(d => {
+      const tags = (d.tags || []).map(t => t.tag);
+      const waType = inferWaType(tags);
+      return {
+        workshopId: d.publishedfileid,
+        title: d.title || 'Sem título',
+        preview: d.preview_url || '',
+        file_url: d.file_url || '',
+        description: (d.description || '').substring(0, 200),
+        tags,
+        subscribers: d.subscriptions || 0,
+        views: d.views || 0,
+        favorited: d.favorited || 0,
+        timeCreated: d.time_created || null,
+        waType,
+        compatible: waType === 'video' || waType === 'web' || waType === 'scene',
+      };
+    });
+    return { items };
+  } catch (e) {
+    return { items: [], error: e.message };
+  }
+});
+
 ipcMain.handle('browse-workshop', async (_, { sort, search, page, tag }) => {
   try {
     // Step 1: Scrape the browse page to get workshop item IDs
@@ -695,13 +1162,25 @@ ipcMain.handle('browse-workshop', async (_, { sort, search, page, tag }) => {
     while ((m = idPattern.exec(html)) !== null) ids.add(m[1]);
     const idList = [...ids];
 
-    if (idList.length === 0) return { items: [], total: 0 };
+    if (idList.length === 0) {
+      appLog.warn(`browse-workshop (sort=${sort || 'trend'}, page=${page || 1}): scrape retornou 0 IDs (html length=${html.length}). Steam pode ter bloqueado/mudado a página.`);
+      return { items: [], total: 0 };
+    }
 
     // Step 2: Get full details via Steam public API (no key needed)
     const formData = { itemcount: idList.length };
     idList.forEach((id, i) => { formData[`publishedfileids[${i}]`] = id; });
     const detailJson = await httpPost('https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/', formData);
-    const details = JSON.parse(detailJson);
+    let details;
+    try {
+      details = JSON.parse(detailJson);
+    } catch (parseErr) {
+      appLog.err(`browse-workshop (sort=${sort || 'trend'}): resposta da API de detalhes não é JSON válido (${idList.length} ids). Resposta: ${detailJson.slice(0, 200)}`);
+      return { items: [], total: 0, error: 'Resposta inválida da Steam API' };
+    }
+    if (!details.response || !details.response.publishedfiledetails) {
+      appLog.warn(`browse-workshop (sort=${sort || 'trend'}): API respondeu sem publishedfiledetails (${idList.length} ids enviados). result=${details.response && details.response.result}`);
+    }
 
     const items = (details.response?.publishedfiledetails || []).map(d => {
       const tags = (d.tags || []).map(t => t.tag);
@@ -775,6 +1254,30 @@ ipcMain.handle('steam-web-login', async () => {
   });
 });
 
+// Exporta a sessão Steam atual como um código para colar em outro PC com a
+// mesma conta (ex: mesmo dono, PC secundário), evitando refazer o login lá.
+ipcMain.handle('export-steam-session', async () => {
+  const cookies = store.get('steamWebCookies');
+  if (!cookies || !cookies.sessionid || !cookies.steamLoginSecure) {
+    return { ok: false, msg: 'Nenhuma sessão Steam ativa neste PC ainda. Faça login primeiro.' };
+  }
+  const code = Buffer.from(JSON.stringify(cookies), 'utf-8').toString('base64');
+  return { ok: true, code };
+});
+
+ipcMain.handle('import-steam-session', async (_, code) => {
+  try {
+    const cookies = JSON.parse(Buffer.from(String(code).trim(), 'base64').toString('utf-8'));
+    if (!cookies || !cookies.sessionid || !cookies.steamLoginSecure) {
+      return { ok: false, msg: 'Código inválido.' };
+    }
+    store.set('steamWebCookies', cookies);
+    return { ok: true };
+  } catch (_) {
+    return { ok: false, msg: 'Código inválido.' };
+  }
+});
+
 ipcMain.handle('remove-wallpaper', async (_, id) => {
   try {
     const library = store.get('library') || [];
@@ -837,7 +1340,45 @@ function importFromContentDir(contentDir, workshopId) {
   return null;
 }
 
-ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUrl, fileUrl }) => {
+// SteamCMD REMOVIDO a pedido do usuário 2026-07-17 — já tinha dado problema
+// antes. Download volta a ser: inscrever via sessão web + esperar o Steam
+// Desktop baixar sozinho (mais lento, mas é o caminho pedido).
+
+// Confirma se a conta Steam logada possui um app (ex: Wallpaper Engine, 431960),
+// usando o mesmo cookie de sessão do login web — sem precisar de API key nem
+// de nada hospedado por fora. Retorna null (não bloqueia) se não conseguir
+// checar; só bloqueia quando a resposta confirma que o app NÃO está na conta.
+async function checkOwnsApp(cookies, appId) {
+  try {
+    const res = await fetch('https://steamcommunity.com/dynamicstore/userdata/', {
+      headers: {
+        'Cookie': `sessionid=${cookies.sessionid}; steamLoginSecure=${cookies.steamLoginSecure}`,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!Array.isArray(data.rgOwnedApps)) return null;
+    return data.rgOwnedApps.includes(appId);
+  } catch (_) {
+    return null;
+  }
+}
+
+ipcMain.handle('download-workshop-item', async (_, { workshopId, name }) => {
+  // Um wallpaper de vídeo baixado do Workshop mantém o arquivo aberto o tempo
+  // todo (tocando em loop) dentro de steamapps/workshop/content/431960/... —
+  // a mesma árvore onde a Steam precisa gravar ao baixar um item novo. Isso já
+  // causou "File locked" e pausou a fila de update dela (visto no
+  // content_log.txt real). Solução: soltar esse arquivo antes de baixar, e
+  // recarregar o wallpaper depois, seja qual for o resultado do download.
+  const currentBeforeDownload = store.get('current');
+  const shouldReleaseLock = !!(currentBeforeDownload && currentBeforeDownload.type === 'video' && currentBeforeDownload.workshopId);
+  if (shouldReleaseLock) {
+    appLog(`Pausando o wallpaper de vídeo atual (Workshop) para evitar lock de arquivo durante o download...`);
+    sendToAllWallpapers('stop');
+  }
   try {
     appLog(`Iniciando download web do wallpaper "${name}" (ID: ${workshopId})`);
     if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'preparing', name });
@@ -846,6 +1387,13 @@ ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUr
     if (!cookies || !cookies.sessionid || !cookies.steamLoginSecure) {
       appLog.warn(`Cookies da Steam não encontrados. Redirecionando para login.`);
       return { ok: false, msg: 'needs_login' };
+    }
+
+    const owns = await checkOwnsApp(cookies, 431960);
+    if (owns === false) {
+      appLog.err(`Conta Steam não possui o Wallpaper Engine (appid 431960). Download bloqueado.`);
+      if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'error', msg: 'Sua conta Steam não possui o Wallpaper Engine. É necessário ter o app na biblioteca Steam para baixar itens do Workshop dele.' });
+      return { ok: false, msg: 'not_owned' };
     }
 
     const { sessionid, steamLoginSecure } = cookies;
@@ -857,13 +1405,29 @@ ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUr
         'Cookie': `sessionid=${sessionid}; steamLoginSecure=${steamLoginSecure}`,
         'Content-Type': 'application/x-www-form-urlencoded',
         'Referer': `https://steamcommunity.com/sharedfiles/filedetails/?id=${workshopId}`,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'Origin': 'https://steamcommunity.com',
+        'X-Requested-With': 'XMLHttpRequest',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       },
       body: `id=${workshopId}&appid=431960&sessionid=${sessionid}`
     };
 
-    const response = await fetch('https://steamcommunity.com/sharedfiles/subscribe', reqOptions);
+    let response;
+    try {
+      response = await fetch('https://steamcommunity.com/sharedfiles/subscribe', { ...reqOptions, signal: AbortSignal.timeout(15000) });
+    } catch (err) {
+      appLog.err(`Falha ao inscrever no item (Steam não respondeu): ${err.message}`);
+      if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'error', msg: 'A Steam não respondeu à inscrição. Verifique sua conexão e tente novamente.' });
+      return { ok: false, msg: 'Timeout na inscrição.' };
+    }
+    if (response.status === 401 || response.status === 403) {
+      appLog.warn(`Sessão da Steam expirada (HTTP ${response.status}). Pedindo novo login.`);
+      store.delete('steamWebCookies');
+      return { ok: false, msg: 'needs_login' };
+    }
     if (!response.ok) {
+      appLog.err(`Erro HTTP na inscrição da Steam: ${response.status}`);
+      if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'error', msg: `Erro HTTP na Steam: ${response.status}` });
       return { ok: false, msg: `Erro HTTP na Steam: ${response.status}` };
     }
 
@@ -877,10 +1441,10 @@ ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUr
       if (match) steamPath = match[1].trim();
     } catch(e) {}
     if (!steamPath) steamPath = 'C:\\Program Files (x86)\\Steam';
-    
+
     const contentDir = path.join(steamPath, 'steamapps', 'workshop', 'content', '431960', workshopId);
-    
-    return new Promise((resolve) => {
+
+    return await new Promise((resolve) => {
       let attempts = 0;
       const timer = setInterval(() => {
         attempts++;
@@ -898,7 +1462,7 @@ ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUr
               resolve({ ok: false, msg: 'Formato não reconhecido.' });
             }
           }, 3000);
-        } else if (attempts >= 120) { // 2 minutos de espera
+        } else if (attempts >= 240) { // 4 minutos de espera — a sincronização da Steam às vezes demora bem mais que 2min
           clearInterval(timer);
           appLog.err(`Tempo limite esperando a Steam baixar o item.`);
           if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'error', msg: 'Tempo esgotado. Verifique se a Steam está aberta e baixando.' });
@@ -909,6 +1473,23 @@ ipcMain.handle('download-workshop-item', async (_, { workshopId, name, previewUr
   } catch (err) {
     appLog.err(`Erro na inscrição via web: ${err.message}`);
     if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('download-progress', { state: 'error', msg: err.message });
+    return { ok: false, msg: err.message };
+  } finally {
+    if (shouldReleaseLock) {
+      appLog(`Retomando o wallpaper de vídeo pausado...`);
+      sendToAllWallpapers('unstop');
+    }
+  }
+});
+
+// Pede pra Steam verificar/retomar a atualização do Wallpaper Engine — útil
+// quando ela pausa sozinha por "File locked" (ver content_log.txt da Steam).
+ipcMain.handle('unstick-steam-downloads', async () => {
+  try {
+    const { shell } = require('electron');
+    await shell.openExternal('steam://validate/431960');
+    return { ok: true };
+  } catch (err) {
     return { ok: false, msg: err.message };
   }
 });
@@ -971,30 +1552,35 @@ ipcMain.handle('install-screensaver', async () => {
   }
 });
 
-// ---- Playlist ----
-playlist.on('change', (wallpaper) => {
-  store.set('current', wallpaper);
-  sendToAllWallpapers('set-wallpaper', wallpaper);
-  if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('wallpaper-changed', wallpaper);
-});
-
 // ---- Boot ----
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  const licenseStatus = await License.checkLicense(store);
+  if (!licenseStatus.ok) {
+    const activated = await showActivationWindow();
+    if (!activated) { app.quit(); return; }
+  }
+
   // First boot configuration
   if (!store.get('settings')) {
     const defaultSettings = { volume: 50, pauseOnFullscreen: true, muteOnFullscreen: false, startWithWindows: true, audioReactive: false };
     store.set('settings', defaultSettings);
-    app.setLoginItemSettings({ openAtLogin: true, path: process.execPath });
   }
+  // Runs on every boot (cheap fs.existsSync check when already in sync — see
+  // setAutostart) so existing installs self-migrate off the old Registry
+  // Run-key mechanism without the user needing to re-toggle the setting.
+  setAutostart(!!(store.get('settings') || {}).startWithWindows);
+
+  // Converte timeRules/playlistConfig antigos em Playlists+Rotinas uma única
+  // vez (guardado por store.get('routinesMigrated')) antes do motor iniciar.
+  routinesMigrate.run(store, appLog);
 
   createWallpaperWindows();
-  playlist.start();
-  
+  startAutomationEngine();
+  if (!_isScreensaver) { startWorkerWWatchdog(); startRepaintNudge(); }
+
   if (!_isScreensaver && !_isConfigMode) {
     createControlWindow();
     createTray();
-    startFullscreenMonitor();
-    startTimeRulesMonitor();
   } else if (_isConfigMode) {
     createControlWindow();
   }
@@ -1003,7 +1589,5 @@ app.whenReady().then(() => {
 app.on('window-all-closed', (e) => e.preventDefault());
 app.on('before-quit', () => {
   tray?.destroy();
-  playlist.stop();
-  if (_fsTimer)   clearInterval(_fsTimer);
-  if (_timeTimer) clearInterval(_timeTimer);
+  if (_engineTimer) clearInterval(_engineTimer);
 });

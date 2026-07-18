@@ -1,0 +1,101 @@
+/* =========================================
+   OFICINA — EDITOR VISUAL DE WALLPAPERS
+   Layout fixo: caixa útil é 780x640 (janela 980x680 menos sidebar 200px e
+   titlebar 40px) — cada região abaixo precisa ser enxuta pra caber junto.
+========================================= */
+#panel-downloader { padding: 0; }
+.oficina-editor { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
+
+/* Toolbar superior (36px) */
+.ed-toolbar {
+  height: 36px; flex-shrink: 0; display: flex; align-items: center; gap: 4px;
+  padding: 0 10px; border-bottom: 1px solid var(--border); background: var(--bg2);
+}
+.ed-toolbar-group { display: flex; align-items: center; gap: 2px; padding-right: 8px; border-right: 1px solid var(--border); margin-right: 6px; }
+.ed-toolbar-group:last-of-type { border-right: none; }
+.ed-toolbar-spacer { flex: 1; }
+.ed-tool-btn {
+  width: 26px; height: 26px; border-radius: 6px; background: transparent; border: 1px solid transparent;
+  color: var(--text2); cursor: pointer; display: flex; align-items: center; justify-content: center;
+  font-size: 13px; transition: all .15s;
+}
+.ed-tool-btn:hover { background: var(--bg3); color: var(--text); }
+.ed-tool-btn.active { background: rgba(124, 58, 237, 0.2); border-color: var(--accent); color: var(--accent2); }
+
+/* Corpo: camadas | canvas | propriedades */
+.ed-body { flex: 1; display: flex; overflow: hidden; }
+
+.ed-left-panel { width: 160px; flex-shrink: 0; display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--bg2); overflow: hidden; }
+.ed-section-label { font-size: 10px; font-weight: 700; letter-spacing: .06em; color: var(--text2); opacity: .8; padding: 8px 10px 6px; text-transform: uppercase; }
+.ed-add-section { flex-shrink: 0; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+.ed-add-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 0 8px; }
+.ed-add-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 2px; border-radius: 8px;
+  background: var(--bg3); border: 1px solid var(--border); color: var(--text2); cursor: pointer; font-size: 16px;
+  transition: all .15s;
+}
+.ed-add-btn:hover { border-color: var(--accent); color: var(--text); }
+.ed-add-btn span { font-size: 9px; color: var(--text2); }
+
+.ed-layers-section { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.ed-layers-list { flex: 1; overflow-y: auto; padding: 0 6px 8px; }
+.ed-empty-hint { color: var(--text2); font-size: 11px; padding: 6px 8px; opacity: .8; }
+
+.ed-layer-row {
+  display: flex; align-items: center; gap: 5px; padding: 5px 6px; border-radius: 7px; cursor: pointer;
+  font-size: 11px; color: var(--text2); transition: background .15s; margin-bottom: 2px;
+}
+.ed-layer-row:hover { background: var(--bg3); }
+.ed-layer-row.selected { background: rgba(124, 58, 237, 0.18); color: var(--text); box-shadow: inset 0 0 0 1px var(--accent); }
+.ed-layer-icon { flex-shrink: 0; font-size: 12px; width: 16px; text-align: center; }
+.ed-layer-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ed-layer-btn { flex-shrink: 0; width: 16px; height: 16px; display: flex; align-items: center; justify-content: center; color: var(--text2); background: transparent; border: none; cursor: pointer; font-size: 10px; opacity: .6; }
+.ed-layer-btn:hover { opacity: 1; color: var(--text); }
+.ed-layer-row.dragging { opacity: .4; }
+.ed-layer-row.drag-over { box-shadow: inset 0 2px 0 var(--accent); }
+
+/* Canvas central */
+.ed-canvas-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: #0a0a12; min-width: 0; }
+.ed-canvas-toolbar {
+  height: 26px; flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding: 0 10px;
+  border-bottom: 1px solid var(--border); background: var(--bg2); font-size: 11px; color: var(--text2);
+}
+.ed-mini-btn { width: 18px; height: 18px; border-radius: 4px; background: var(--bg3); border: 1px solid var(--border); color: var(--text2); cursor: pointer; font-size: 12px; display: flex; align-items: center; justify-content: center; }
+.ed-mini-btn:hover { color: var(--text); border-color: var(--accent); }
+.ed-zoom-label { min-width: 34px; text-align: center; font-variant-numeric: tabular-nums; }
+.ed-grid-toggle { display: flex; align-items: center; gap: 4px; margin-left: auto; cursor: pointer; user-select: none; }
+
+.ed-canvas-wrap {
+  flex: 1; display: flex; align-items: center; justify-content: center; overflow: auto; padding: 12px;
+  background-image: linear-gradient(45deg, #14141c 25%, transparent 25%), linear-gradient(-45deg, #14141c 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #14141c 75%), linear-gradient(-45deg, transparent 75%, #14141c 75%);
+  background-size: 16px 16px; background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+}
+#ed-konva-container { box-shadow: 0 8px 32px rgba(0,0,0,0.6); background: #000; }
+#ed-konva-container.ed-grid-on { background-image: linear-gradient(rgba(124,58,237,0.15) 1px, transparent 1px), linear-gradient(90deg, rgba(124,58,237,0.15) 1px, transparent 1px); background-size: 40px 40px; }
+
+/* Painel de propriedades */
+.ed-right-panel { width: 200px; flex-shrink: 0; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--bg2); overflow: hidden; }
+.ed-properties-panel { flex: 1; overflow-y: auto; padding: 0 10px 12px; }
+
+.ed-prop-group { margin-bottom: 4px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.ed-prop-group-header {
+  display: flex; align-items: center; justify-content: space-between; padding: 7px 9px; cursor: pointer;
+  font-size: 11px; font-weight: 600; color: var(--text); background: var(--bg3);
+}
+.ed-prop-group-body { padding: 8px 9px; display: none; }
+.ed-prop-group.open .ed-prop-group-body { display: block; }
+.ed-prop-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 7px; font-size: 11px; color: var(--text2); }
+.ed-prop-row label { flex-shrink: 0; }
+.ed-prop-row input[type="text"], .ed-prop-row input[type="number"], .ed-prop-row select {
+  width: 90px; padding: 3px 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 5px; color: var(--text); font-size: 11px;
+}
+.ed-prop-row input[type="range"] { width: 90px; accent-color: var(--accent); }
+.ed-prop-row input[type="color"] { width: 32px; height: 22px; padding: 1px; border-radius: 5px; cursor: pointer; }
+
+/* Barra inferior */
+.ed-bottom-bar { height: 28px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-top: 1px solid var(--border); background: var(--bg2); font-size: 11px; color: var(--text2); }
+.ed-mini-select { height: 20px; font-size: 10px; padding: 0 4px; background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); }
+.ed-canvas-size-label { font-variant-numeric: tabular-nums; }
+.ed-bottom-spacer { flex: 1; }
+.ed-autosave-label { font-size: 10px; opacity: .7; }
+#ed-btn-export { padding: 3px 12px; font-size: 11px; margin: 0; border-radius: 6px; }

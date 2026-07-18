@@ -16,11 +16,16 @@ function pack() {
   execSync(`node "${packScript}"`, { cwd: root, stdio: 'inherit' });
 }
 
+function killElectron() {
+  return new Promise((resolve) => {
+    if (!electronProc) return resolve();
+    const proc = electronProc;
+    proc.once('exit', () => resolve());
+    try { process.kill(proc.pid); } catch (_) { resolve(); }
+  });
+}
+
 function startElectron() {
-  if (electronProc) {
-    try { process.kill(electronProc.pid); } catch (_) {}
-    electronProc = null;
-  }
   console.log('[dev] Launching...\n');
   electronProc = spawn(electronExe, [], { cwd: root, stdio: 'inherit', detached: false });
   electronProc.on('exit', () => { electronProc = null; });
@@ -33,10 +38,17 @@ let debounce = null;
 function onChange(filePath) {
   if (busy) return;
   if (debounce) clearTimeout(debounce);
-  debounce = setTimeout(() => {
+  debounce = setTimeout(async () => {
     busy = true;
     console.log(`\n[dev] Changed: ${path.relative(root, filePath)}`);
-    try { pack(); startElectron(); } catch (e) { console.error('[dev] Error:', e.message); }
+    try {
+      // Precisa matar o Electron antigo e esperar ele soltar os addons
+      // nativos (.node) ANTES de empacotar — senão o Windows ainda está
+      // com o arquivo travado e o asar falha com EBUSY.
+      await killElectron();
+      pack();
+      startElectron();
+    } catch (e) { console.error('[dev] Error:', e.message); }
     busy = false;
   }, 500);
 }

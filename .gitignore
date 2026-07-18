@@ -3,4 +3,7 @@ dist/
 out/
 *.log
 bin/
+license-server/.env
+license-server/.env.local
+license-server/.vercel
 

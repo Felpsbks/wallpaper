@@ -1,0 +1,12 @@
+{
+  "name": "engine-wallpaper-license-server",
+  "version": "1.0.0",
+  "description": "License key validation service for EngineWallpaper (Vercel Functions + Redis)",
+  "scripts": {
+    "dev": "vercel dev",
+    "generate-key": "node generate-key.js"
+  },
+  "dependencies": {
+    "redis": "^4.7.0"
+  }
+}

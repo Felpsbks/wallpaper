@@ -1,0 +1,10 @@
+﻿Add-Type -AssemblyName System.Drawing
+$img = [System.Drawing.Image]::FromFile("c:\Users\kille\OneDrive\Documentos\Respositorio\EngineWallpaper\ui\logo-app.png")
+$rect = New-Object System.Drawing.Rectangle(256, 0, 1024, 1024)
+$bmp = new-object System.Drawing.Bitmap($rect.Width, $rect.Height)
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.DrawImage($img, (New-Object System.Drawing.Rectangle(0, 0, $bmp.Width, $bmp.Height)), $rect, [System.Drawing.GraphicsUnit]::Pixel)
+$g.Dispose()
+$img.Dispose()
+$bmp.Save("c:\Users\kille\OneDrive\Documentos\Respositorio\EngineWallpaper\ui\logo-app-square.png", [System.Drawing.Imaging.ImageFormat]::Png)
+$bmp.Dispose()

@@ -1,6 +1,24 @@
 const { ipcRenderer } = require('electron');
+const os = require('os');
+const appVersion = require('../package.json').version;
 
 async function ipc(channel, ...args) { return ipcRenderer.invoke(channel, ...args); }
+
+// Manda erros de JS da tela (renderer) para a aba Log do app, não só o console
+// do DevTools — assim dá pra ver o que quebrou sem precisar abrir o DevTools.
+function _logUiError(msg) {
+  const ts = new Date().toTimeString().slice(0, 8);
+  if (typeof appendLogLine === 'function') {
+    appendLogLine({ ts, msg, level: 'error' });
+  }
+}
+window.addEventListener('error', (e) => {
+  _logUiError(`[UI] ${e.message} (${e.filename ? e.filename.split(/[\\/]/).pop() : '?'}:${e.lineno})`);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const reason = e.reason && e.reason.message ? e.reason.message : String(e.reason);
+  _logUiError(`[UI] Promise rejeitada: ${reason}`);
+});
 
 function formatBytes(bytes) {
   if (!bytes || bytes === 0) return '0 B';
@@ -13,24 +31,57 @@ function formatBytes(bytes) {
 let library          = [];
 let current          = null;
 let selectedScene    = 'particles';
-let playlistConfig   = {};
 let settings         = {};
 let allDisplays      = [];
 let displayWallpapers = {};
 let targetDisplayId  = null;   // null = all displays
-let timeRules        = [];
+let favorites        = [];
+let playlists        = [];
+let routines         = [];
 let searchQuery      = '';
 let propsWallpaper   = null;   // wallpaper being edited in props modal
+let libraryTypeFilter = '';    // '' = todos, senão w.type ('video'/'scene'/'application'/'url')
+let librarySort       = 'recent'; // 'recent' (id = timestamp real) ou 'name'
+let libraryViewMode   = 'grid';   // 'grid' ou 'list'
+let favSearchQuery    = '';
+let favTypeFilter     = '';    // '' = todos, senão item.waType
+let favSort           = 'recent'; // 'recent' (ordem real de favoritado) ou 'name'
+let favViewMode       = 'grid';
 
 // ---- Navigation ----
 document.querySelectorAll('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     item.classList.add('active');
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     document.getElementById('panel-' + item.dataset.panel).classList.add('active');
+
+    const modalOverlay = document.getElementById('wallpaper-modal-overlay');
+    if (modalOverlay) modalOverlay.classList.remove('open');
+
+    if (item.dataset.panel === 'discover') {
+      const popGrid = document.getElementById('discover-popular-grid');
+      if (popGrid && popGrid.innerHTML.includes('Carregando')) {
+        loadDiscoverTab();
+      }
+    }
+    if (item.dataset.panel === 'favorites') {
+      renderFavoritesGrid();
+    }
+    if (item.dataset.panel === 'downloader') {
+      window.EngineEditor?.init();
+    }
   });
 });
+
+// Por que uma cena caiu pro fallback de imagem estática em vez de renderizar
+// ao vivo — mostrado no card da biblioteca para não deixar isso sem explicação.
+const SCENE_FALLBACK_MESSAGES = {
+  unsupported_package: 'Essa cena usa um formato de pacote que ainda não suportamos. Estamos trabalhando para dar suporte a mais formatos.',
+  unpack_incomplete: 'Não conseguimos extrair os dados dessa cena corretamente. Estamos trabalhando nisso.',
+  no_scene_data: 'Essa cena não trouxe os dados necessários para renderizar ao vivo. Estamos investigando.',
+  default: 'Essa cena ainda não é totalmente suportada pelo nosso motor — mostrando a imagem estática por enquanto. Estamos trabalhando para melhorar isso.',
+};
 
 // ---- Helpers ----
 function toFileUrl(p) {
@@ -88,10 +139,39 @@ async function generateVideoThumbnail(src) {
 
 // ---- Library rendering ----
 function filteredLibrary() {
-  if (!searchQuery) return library;
-  const q = searchQuery.toLowerCase();
-  return library.filter(w => w.name.toLowerCase().includes(q) || typeName(w.type, w.scene).toLowerCase().includes(q));
+  let items = library;
+  if (libraryTypeFilter) items = items.filter(w => w.type === libraryTypeFilter);
+  if (searchQuery) {
+    const q = searchQuery.toLowerCase();
+    items = items.filter(w => w.name.toLowerCase().includes(q) || typeName(w.type, w.scene).toLowerCase().includes(q));
+  }
+  // w.id é Date.now().toString() no momento em que foi adicionado (ver
+  // 'add-wallpaper' no main.js) — dá pra ordenar por ele como timestamp real.
+  items = items.slice();
+  if (librarySort === 'name') items.sort((a, b) => a.name.localeCompare(b.name));
+  else items.sort((a, b) => Number(b.id) - Number(a.id));
+  return items;
 }
+
+function updateLibraryStatsBar() {
+  const el = document.getElementById('lib-stats-text');
+  if (!el) return;
+  const total = library.length;
+  const videos = library.filter(w => w.type === 'video').length;
+  const scenes = library.filter(w => w.type === 'scene').length;
+  const activeCount = current ? 1 : 0;
+  const parts = [`${total} wallpaper${total === 1 ? '' : 's'}`];
+  if (activeCount) parts.push(`${activeCount} ativo`);
+  if (videos) parts.push(`${videos} vídeo${videos === 1 ? '' : 's'}`);
+  if (scenes) parts.push(`${scenes} cena${scenes === 1 ? '' : 's'}`);
+  el.textContent = parts.join(' • ');
+}
+
+function closeCardMenus() {
+  document.querySelectorAll('.card-menu-dropdown.open').forEach(m => m.classList.remove('open'));
+  document.querySelectorAll('.card-menu-btn.menu-open').forEach(b => b.classList.remove('menu-open'));
+}
+document.addEventListener('click', closeCardMenus);
 
 function renderLibrary() {
   const grid  = document.getElementById('wallpaper-grid');
@@ -119,28 +199,48 @@ function renderLibrary() {
     }
 
     const hasProps = (w.type === 'scene' || w.type === 'video' || w.type === 'url' || !!w.properties);
+    const sceneFallback = w.type === 'scene' && !w.weSceneDir;
+    const sceneFallbackMsg = sceneFallback
+      ? SCENE_FALLBACK_MESSAGES[w.weSceneFallbackReason] || SCENE_FALLBACK_MESSAGES.default
+      : '';
 
     card.innerHTML = `
       <div class="card-active-badge">ATIVO</div>
-      <div class="card-thumb-wrap">${thumbHtml}</div>
+      <div class="card-thumb-wrap">
+        ${thumbHtml}
+        <div class="card-type-badge">${typeIcon(w.type, w.scene)} ${typeName(w.type, w.scene)}</div>
+        ${sceneFallback ? `<div class="card-scene-fallback-badge" title="${sceneFallbackMsg}">🚧 Cena parcial</div>` : ''}
+        <button class="card-menu-btn" title="Mais opções">⋮</button>
+        <div class="card-menu-dropdown">
+          ${hasProps ? '<div class="card-menu-item props">⚙ Propriedades</div>' : ''}
+          <div class="card-menu-item delete">✕ Remover</div>
+        </div>
+      </div>
       <div class="card-info">
         <div class="card-name" title="${w.name}">${w.name}</div>
-        <div class="card-type">${typeName(w.type, w.scene)}</div>
-      </div>
-      <div class="card-actions">
-        ${hasProps ? '<button class="card-btn props" title="Propriedades">⚙</button>' : ''}
-        <button class="card-btn delete" title="Remover">✕</button>
       </div>
     `;
+
+    const menuBtn = card.querySelector('.card-menu-btn');
+    const menuDropdown = card.querySelector('.card-menu-dropdown');
+    menuBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      const wasOpen = menuDropdown.classList.contains('open');
+      closeCardMenus();
+      if (!wasOpen) { menuDropdown.classList.add('open'); menuBtn.classList.add('menu-open'); }
+    });
 
     card.addEventListener('click', e => {
       if (e.target.classList.contains('delete')) { removeWallpaper(w.id); return; }
       if (e.target.classList.contains('props'))  { openProps(w); return; }
+      if (e.target.closest('.card-menu-dropdown') || e.target.closest('.card-menu-btn')) return;
       setWallpaper(w);
     });
 
     grid.appendChild(card);
   }
+
+  updateLibraryStatsBar();
 }
 
 async function setWallpaper(w) {
@@ -157,16 +257,54 @@ async function removeWallpaper(id) {
   await ipc('remove-wallpaper', id);
   library = library.filter(w => w.id !== id);
   if (current && current.id === id) { current = null; updateNowPlaying(); }
-  timeRules = timeRules.filter(r => r.wallpaperId !== id);
-  await ipc('set-time-rules', timeRules);
+
+  // Tira o wallpaper removido de qualquer playlist que o contenha.
+  const affected = playlists.filter(p => p.wallpaperIds.includes(id));
+  for (const p of affected) {
+    p.wallpaperIds = p.wallpaperIds.filter(wid => wid !== id);
+    await ipc('save-playlist', p);
+  }
+  if (affected.length) renderPlaylistsGrid();
+
   renderLibrary();
-  renderTimeRules();
 }
 
 // ---- Search ----
 document.getElementById('search-input').addEventListener('input', e => {
   searchQuery = e.target.value.trim();
   renderLibrary();
+});
+
+// ---- Filtro por tipo (pills), ordenação, modo de visualização e tamanho dos cards ----
+document.querySelectorAll('#lib-type-pills .pill').forEach(pill => {
+  pill.addEventListener('click', () => {
+    document.querySelectorAll('#lib-type-pills .pill').forEach(p => p.classList.remove('active'));
+    pill.classList.add('active');
+    libraryTypeFilter = pill.dataset.libType || '';
+    renderLibrary();
+  });
+});
+
+document.getElementById('lib-sort-select').addEventListener('change', e => {
+  librarySort = e.target.value;
+  renderLibrary();
+});
+
+const libGrid = document.getElementById('wallpaper-grid');
+document.getElementById('lib-view-grid').addEventListener('click', () => {
+  libraryViewMode = 'grid';
+  libGrid.classList.remove('list-view');
+  document.getElementById('lib-view-grid').classList.add('active');
+  document.getElementById('lib-view-list').classList.remove('active');
+});
+document.getElementById('lib-view-list').addEventListener('click', () => {
+  libraryViewMode = 'list';
+  libGrid.classList.add('list-view');
+  document.getElementById('lib-view-list').classList.add('active');
+  document.getElementById('lib-view-grid').classList.remove('active');
+});
+document.getElementById('lib-size-slider').addEventListener('input', e => {
+  libGrid.style.setProperty('--lib-card-min', e.target.value + 'px');
 });
 
 // ---- Add Video ----
@@ -436,29 +574,6 @@ document.getElementById('btn-props-save').addEventListener('click', async () => 
   closeModal('modal-props');
 });
 
-// ---- Playlist ----
-const plEnabled     = document.getElementById('pl-enabled');
-const plInterval    = document.getElementById('pl-interval');
-const plIntervalVal = document.getElementById('pl-interval-val');
-const plShuffle     = document.getElementById('pl-shuffle');
-
-function formatInterval(s) {
-  if (s < 60) return s + 's';
-  if (s < 3600) return Math.floor(s / 60) + 'min';
-  return Math.floor(s / 3600) + 'h';
-}
-plInterval.addEventListener('input', () => { plIntervalVal.textContent = formatInterval(+plInterval.value); });
-
-
-
-async function savePlaylist() {
-  playlistConfig = { enabled: plEnabled.checked, interval: +plInterval.value, shuffle: plShuffle.checked };
-  await ipc('set-playlist-config', playlistConfig);
-}
-plEnabled.addEventListener('change', savePlaylist);
-plInterval.addEventListener('change', savePlaylist);
-plShuffle.addEventListener('change', savePlaylist);
-
 // ---- Settings ----
 const setVolume  = document.getElementById('set-volume');
 const setVolumeV = document.getElementById('set-volume-val');
@@ -607,50 +722,6 @@ document.getElementById('btn-ar-add').addEventListener('click', async () => {
   closeModal('modal-app-rule');
 });
 
-// ---- Time Rules ----
-function renderTimeRules() {
-  const list = document.getElementById('time-rules-list');
-  list.innerHTML = '';
-  if (!timeRules.length) {
-    list.innerHTML = '<p style="color:var(--text2);font-size:12px;padding:8px 0">Nenhuma regra configurada</p>';
-    return;
-  }
-  const sorted = [...timeRules].sort((a, b) => a.time.localeCompare(b.time));
-  for (const rule of sorted) {
-    const wp = library.find(w => w.id === rule.wallpaperId);
-    const row = document.createElement('div');
-    row.className = 'time-rule-row';
-    row.innerHTML = `
-      <span class="tr-time">${rule.time}</span>
-      <span class="tr-arrow">→</span>
-      <span class="tr-name">${wp ? wp.name : '(removido)'}</span>
-      <button class="card-btn delete tr-del" data-id="${rule.id}">✕</button>
-    `;
-    row.querySelector('.tr-del').addEventListener('click', async () => {
-      timeRules = timeRules.filter(r => r.id !== rule.id);
-      await ipc('set-time-rules', timeRules);
-      renderTimeRules();
-    });
-    list.appendChild(row);
-  }
-}
-
-document.getElementById('btn-add-time-rule').addEventListener('click', () => {
-  const sel = document.getElementById('tr-wallpaper');
-  sel.innerHTML = library.map(w => `<option value="${w.id}">${w.name}</option>`).join('');
-  document.getElementById('modal-time-rule').classList.add('open');
-});
-
-document.getElementById('btn-tr-add').addEventListener('click', async () => {
-  const time       = document.getElementById('tr-time').value;
-  const wallpaperId = document.getElementById('tr-wallpaper').value;
-  if (!time || !wallpaperId) return;
-  const rule = { id: Date.now().toString(), time, wallpaperId };
-  timeRules.push(rule);
-  await ipc('set-time-rules', timeRules);
-  renderTimeRules();
-  closeModal('modal-time-rule');
-});
 
 // ---- Steam Workshop ----
 let steamWallpapers = [];
@@ -826,16 +897,15 @@ ipcRenderer.on('wallpaper-changed', (_, w) => {
   updateNowPlaying();
 });
 
-// ---- Workshop Store ----
-const wsGrid   = document.getElementById('ws-grid');
-const wsSearch = document.getElementById('ws-search');
-const wsSort   = document.getElementById('ws-sort');
-const wsRefresh = document.getElementById('ws-refresh');
+// ---- Terminal de Logs + status de download (Descobrir) ----
+// "ws-status-bar" é usado pelo fluxo real de download da aba Descobrir
+// (showWallpaperModal/startWorkshopDownload/download-progress) — não tem
+// mais um painel próprio (a Oficina virou o editor visual), então
+// setWsStatus() abaixo é um no-op seguro caso o elemento não exista.
 const wsStatus      = document.getElementById('ws-status-bar');
 const wsStatusText   = document.getElementById('ws-status-text');
 const wsStatusDetail = document.getElementById('ws-status-detail');
 const wsProgressFill = document.getElementById('ws-progress-fill');
-const wsLogBar       = document.getElementById('ws-log-bar');
 const wsLogLines     = document.getElementById('ws-log-lines');
 const wsLogCount     = document.getElementById('ws-log-count');
 
@@ -899,7 +969,6 @@ function escapeHtml(str) {
 }
 
 ipcRenderer.on('app-log', (_, data) => {
-  wsLogBar.style.display = 'flex';
   appendLogLine(data);
 });
 
@@ -922,12 +991,9 @@ document.getElementById('btn-log-clear').addEventListener('click', () => {
   wsLogCount.textContent = '0 linhas';
 });
 
-document.getElementById('btn-log-close').addEventListener('click', () => {
-  wsLogBar.style.display = 'none';
-});
-
 
 function setWsStatus(text, detail = '', pct = null, color = 'var(--accent)') {
+  if (!wsStatus) return;
   wsStatus.style.display = 'block';
   wsStatus.style.background = color;
   wsStatus.style.color = color === 'var(--accent)' ? '#000' : '#fff';
@@ -936,115 +1002,6 @@ function setWsStatus(text, detail = '', pct = null, color = 'var(--accent)') {
   wsProgressFill.style.width = pct !== null ? Math.min(100, Math.round(pct * 100)) + '%' : '0%';
 }
 
-let wsCurrentPage = 1;
-let wsItems = [];
-let wsCategoryTag = '';
-let wsOnlyCompatible = true;
-
-async function loadWorkshopItems(page = 1) {
-  wsGrid.innerHTML = '<div class="empty-state"><div class="empty-icon">⏳</div><p>Carregando wallpapers...</p></div>';
-  wsItems = [];
-  wsCurrentPage = page;
-
-  const result = await ipc('browse-workshop', {
-    sort: wsSort.value,
-    search: wsSearch.value.trim(),
-    page,
-    tag: wsCategoryTag,
-  });
-
-  if (result.error) {
-    wsGrid.innerHTML = `<div class="empty-state"><div class="empty-icon">❌</div><p>Erro ao carregar</p><small>${result.error}</small></div>`;
-    return;
-  }
-
-  wsItems = result.items;
-  const hasMore = wsItems.length >= 30; // Steam API often limits around 30 per page for search
-  renderWorkshopGrid(hasMore);
-}
-
-function renderWorkshopGrid(hasMore = false) {
-  const visibleItems = wsOnlyCompatible ? wsItems.filter(i => i.compatible) : wsItems;
-
-  if (wsItems.length === 0) {
-    wsGrid.innerHTML = '<div class="empty-state"><div class="empty-icon">🔍</div><p>Nenhum wallpaper encontrado</p><small>Tente outra busca ou filtro</small></div>';
-    return;
-  }
-  if (visibleItems.length === 0) {
-    wsGrid.innerHTML = '<div class="empty-state"><div class="empty-icon">🚫</div><p>Nenhum wallpaper compatível nesta página</p><small>Todos os resultados precisam do motor gráfico proprietário do Wallpaper Engine. Desative "Somente compatíveis" para ver mesmo assim.</small></div>';
-    return;
-  }
-
-  wsGrid.innerHTML = '';
-
-  visibleItems.forEach(item => {
-    const card = document.createElement('div');
-    card.className = 'ws-card-new';
-    card.dataset.wsid = item.workshopId;
-    card.title = `${item.title}\\n${item.tags.join(', ')}\\n${item.subscribers} inscritos`;
-    const staticBadge = item.waType === 'scene' ? '<div class="ws-card-static-badge" title="Este item usa o motor proprietário do Wallpaper Engine e será importado como imagem estática">🖼️ Estático</div>' : '';
-    card.innerHTML = `
-      ${staticBadge}
-      ${item.preview ? `<img class="ws-card-img" src="${item.preview}" loading="lazy" />` : '<div style="width:100%;height:100%;background:var(--bg3);display:flex;align-items:center;justify-content:center;font-size:24px">🌐</div>'}
-      <div class="ws-card-overlay"></div>
-      <div class="ws-card-stats">
-        <div class="ws-dl-count">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-          ${formatSubscribers(item.subscribers)}
-        </div>
-        <div class="ws-heart">
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>
-        </div>
-      </div>
-    `;
-    card.addEventListener('click', () => {
-      document.querySelectorAll('.ws-card-new').forEach(c => c.classList.remove('selected'));
-      card.classList.add('selected');
-      populateDetailsPanel(item);
-    });
-    wsGrid.appendChild(card);
-  });
-
-  // Numbered Pagination
-  const pagWrap = document.createElement('div');
-  pagWrap.id = 'ws-pagination';
-  pagWrap.style.cssText = 'grid-column:1/-1; display:flex; justify-content:center; align-items:center; gap:8px; padding:16px 0 32px 0;';
-  
-  const createBtn = (label, pageNum, isActive = false) => {
-    const btn = document.createElement('button');
-    btn.className = 'btn btn-secondary';
-    btn.style.cssText = 'min-width:40px; padding:8px 12px; font-weight:bold; transition:all 0.2s ease; border-radius:6px;';
-    if (isActive) {
-      btn.style.background = 'var(--accent)';
-      btn.style.color = '#000';
-      btn.style.borderColor = 'var(--accent)';
-    }
-    btn.textContent = label;
-    btn.addEventListener('click', () => {
-      if (pageNum !== wsCurrentPage) loadWorkshopItems(pageNum);
-    });
-    return btn;
-  };
-
-  if (wsCurrentPage > 1) {
-    pagWrap.appendChild(createBtn('← Anterior', wsCurrentPage - 1));
-  }
-  
-  const startPage = Math.max(1, wsCurrentPage - 2);
-  const endPage = startPage + 4;
-  
-  for (let i = startPage; i <= endPage; i++) {
-    // Only show future pages if we are somewhat sure they exist, but Steam always returns 30 unless it's the end.
-    if (i > wsCurrentPage && !hasMore && i !== endPage) continue;
-    pagWrap.appendChild(createBtn(i, i, i === wsCurrentPage));
-  }
-  
-  if (hasMore) {
-    pagWrap.appendChild(createBtn('Próxima →', wsCurrentPage + 1));
-  }
-  
-  wsGrid.appendChild(pagWrap);
-}
 
 const WA_TYPE_LABELS = {
   video: 'Vídeo',
@@ -1054,50 +1011,208 @@ const WA_TYPE_LABELS = {
   unknown: 'Desconhecido',
 };
 
-function populateDetailsPanel(item) {
-  const details = document.getElementById('ws-details');
+let _defaultApplyBtnHtml = null;
+
+function showWallpaperModal(item) {
+  const overlay = document.getElementById('wallpaper-modal-overlay');
+  if (!overlay) return;
+
   const safeTitle = item.title.replace(/'/g, "\\'").replace(/"/g, '&quot;');
   const typeLabel = WA_TYPE_LABELS[item.waType] || WA_TYPE_LABELS.unknown;
-  const createdLabel = item.timeCreated
-    ? new Date(item.timeCreated * 1000).toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' })
-    : 'Desconhecido';
 
-  details.innerHTML = `
-    <div class="det-img-wrap">
-      ${item.preview ? `<img class="det-img" src="${item.preview}" />` : ''}
-    </div>
-    <div class="det-title">${item.title}</div>
+  document.getElementById('modal-hero-img').src = item.preview || '';
+  document.getElementById('modal-title').textContent = item.title;
+  document.getElementById('modal-type-badge').textContent = typeLabel;
+  
+  // Stats
+  document.getElementById('modal-stat-dl').textContent = formatSubscribers(item.subscribers);
+  document.getElementById('modal-stat-fav').textContent = formatSubscribers(item.favorited || Math.floor(item.subscribers * 0.3)); // Estimativa se não tiver
+  document.getElementById('modal-stat-view').textContent = formatSubscribers(item.views);
 
-    <div class="det-stats-row">
-      <div class="det-stat">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-        ${formatSubscribers(item.subscribers)}
-      </div>
-      <div class="det-stat">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
-        ${formatSubscribers(item.views)}
-      </div>
-    </div>
+  // Author info (fallbacks when unavailable from Steam public API)
+  document.getElementById('modal-author-name').innerHTML = `Usuário Steam <svg viewBox="0 0 24 24" width="14" height="14" fill="#8E24AA" style="margin-left:4px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>`;
 
-    ${!item.compatible ? `<div class="det-incompatible-warning">⚠️ Este wallpaper precisa do motor gráfico proprietário do Wallpaper Engine e não vai funcionar aqui.</div>` : ''}
+  // Tags
+  const tagsContainer = document.getElementById('modal-tags');
+  tagsContainer.innerHTML = '';
+  if (item.tags && item.tags.length > 0) {
+    item.tags.forEach(t => {
+      const sp = document.createElement('span');
+      sp.className = 'modal-tag';
+      sp.textContent = t;
+      tagsContainer.appendChild(sp);
+    });
+  } else {
+    tagsContainer.innerHTML = '<span class="modal-tag">Sem tags</span>';
+  }
 
-    <div class="det-btn-row">
-      <button class="btn-apply" ${!item.compatible ? 'disabled title="Incompatível com este app"' : ''} onclick="startWorkshopDownload('${item.workshopId}', '${safeTitle}', '${item.preview || ''}', '${item.file_url || ''}')">
-        📥 Baixar wallpaper
-      </button>
-    </div>
+  // Action Button — bloqueia reinstalação de algo que já está na Biblioteca
+  // em vez de baixar de novo por cima (o servidor da Steam nem precisa ser
+  // consultado pra saber isso, já temos o workshopId localmente).
+  const applyBtn = document.getElementById('modal-btn-apply');
+  if (_defaultApplyBtnHtml === null) _defaultApplyBtnHtml = applyBtn.innerHTML;
 
-    <div class="det-section-title">Informações</div>
-    <div class="det-info-grid">
-      <div class="det-info-lbl">Tipo:</div><div class="det-info-val">${typeLabel}</div>
-      <div class="det-info-lbl">Tags:</div><div class="det-info-val">${(item.tags || []).slice(0, 4).join(', ')}</div>
-    </div>
+  if (isInstalled(item)) {
+    applyBtn.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"></path></svg> Já instalado';
+    applyBtn.classList.add('installed');
+    applyBtn.onclick = () => {
+      setWsStatus('✅ Esse wallpaper já está na sua biblioteca — sem necessidade de baixar de novo.', '', null, '#10b981');
+      setTimeout(() => { document.getElementById('ws-status-bar')?.style && (document.getElementById('ws-status-bar').style.display = 'none'); }, 4000);
+    };
+  } else {
+    applyBtn.innerHTML = _defaultApplyBtnHtml;
+    applyBtn.classList.remove('installed');
+    applyBtn.onclick = () => {
+      overlay.classList.remove('open');
+      if (!item.compatible) {
+        setWsStatus('⚠️ Wallpaper incompatível com o formato livre deste motor.', '', null, '#f44336');
+        setTimeout(() => { document.getElementById('ws-status-bar')?.style && (document.getElementById('ws-status-bar').style.display = 'none'); }, 4000);
+        return;
+      }
+      startWorkshopDownload(item.workshopId, safeTitle, item.preview, item.file_url);
+    };
+  }
 
-    <div class="det-section-title">Criado em</div>
-    <div class="det-info-grid">
-      <div class="det-info-val" style="grid-column:1/-1">${createdLabel}</div>
-    </div>
-  `;
+  // Favorite buttons (o "Favoritar" no rodapé e o coração no topo do modal fazem a mesma coisa)
+  const favBtn = document.getElementById('modal-btn-favorite');
+  const favIconBtn = document.getElementById('modal-icon-btn-favorite');
+  const setFavBtnState = (favorited) => {
+    favBtn.innerHTML = favorited
+      ? '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg> Favoritado'
+      : '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg> Favoritar';
+    if (favIconBtn) {
+      favIconBtn.innerHTML = favorited
+        ? '<svg viewBox="0 0 24 24" fill="#e0245e" stroke="#e0245e" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>'
+        : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>';
+    }
+  };
+  setFavBtnState(isFavorited(item));
+  const onFavClick = async () => {
+    const added = await toggleFavorite(item);
+    setFavBtnState(added);
+  };
+  favBtn.onclick = onFavClick;
+  if (favIconBtn) favIconBtn.onclick = onFavClick;
+
+  const addToPlBtn = document.getElementById('modal-btn-add-to-playlist');
+  if (addToPlBtn) addToPlBtn.onclick = () => openAddToPlaylistPicker(item);
+
+  overlay.classList.add('open');
+}
+
+// Fechamento do Modal
+document.addEventListener('DOMContentLoaded', () => {
+  const overlay = document.getElementById('wallpaper-modal-overlay');
+  const closeBtn = document.getElementById('modal-close');
+  if (overlay && closeBtn) {
+    closeBtn.addEventListener('click', () => overlay.classList.remove('open'));
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) overlay.classList.remove('open');
+    });
+  }
+  initHeaderAndSystemPanel();
+});
+
+// Cabeçalho (saudação real + atalho de busca + status Steam + engrenagem),
+// sidebar (EXPLORAR ligado aos filtros reais, painel SISTEMA com CPU/RAM/FPS
+// de verdade) — tudo aqui usa dado real, nada inventado (ver main.js's
+// 'system-stats'/'get-steam-status' e wallpaper.js's 'wallpaper-fps').
+function initHeaderAndSystemPanel() {
+  // Saudação: nome real da conta do Windows (não temos "nome de exibição"
+  // próprio no app hoje) + período do dia real.
+  const hour = new Date().getHours();
+  const period = hour < 12 ? 'Bom dia' : hour < 18 ? 'Boa tarde' : 'Boa noite';
+  let osName = '';
+  try { osName = os.userInfo().username; } catch (_) { /* segue sem nome se der erro */ }
+  const greetingEl = document.getElementById('discover-greeting');
+  if (greetingEl) greetingEl.textContent = osName ? `${period}, ${osName} 👋` : `${period} 👋`;
+  const sidebarNameEl = document.getElementById('sidebar-user-name');
+  if (sidebarNameEl) sidebarNameEl.textContent = osName || 'Usuário';
+  const avatarFallback = document.getElementById('user-avatar-fallback');
+  if (avatarFallback && osName) avatarFallback.textContent = osName[0].toUpperCase();
+
+  const aboutVersionEl = document.getElementById('about-version');
+  if (aboutVersionEl) aboutVersionEl.textContent = appVersion;
+
+  // Ctrl+K (ou Cmd+K no mac) foca a busca da aba Descobrir, trocando de aba
+  // se precisar — igual ao atalho mostrado no próprio campo.
+  window.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      const discoverNav = document.querySelector('.nav-item[data-panel="discover"]');
+      if (discoverNav && !discoverNav.classList.contains('active')) discoverNav.click();
+      const input = document.getElementById('discover-search-input');
+      if (input) { input.focus(); input.select(); }
+    }
+  });
+
+  // Engrenagem do cabeçalho só ativa a aba Configurações que já existe.
+  const settingsBtn = document.getElementById('btn-header-settings');
+  if (settingsBtn) {
+    settingsBtn.addEventListener('click', () => {
+      const settingsNav = document.querySelector('.nav-item[data-panel="settings"]');
+      if (settingsNav) settingsNav.click();
+    });
+  }
+
+  // Status real da sessão Steam (conectado = tem cookie de sessão salvo).
+  ipc('get-steam-status').then((status) => {
+    const badge = document.getElementById('steam-status-badge');
+    if (!badge) return;
+    badge.classList.toggle('connected', !!(status && status.connected));
+    const label = document.getElementById('steam-status-label');
+    if (label) label.textContent = status && status.connected ? 'Conectado' : 'Desconectado';
+  }).catch(() => {});
+
+  // Painel SISTEMA: CPU/RAM chegam prontos do main a cada 2s, FPS vem do
+  // wallpaper ativo em tempo real — só refletimos o que chega, sem calcular
+  // nada de fake aqui.
+  ipcRenderer.on('system-stats', (_, { cpu, ram }) => {
+    const cpuVal = document.getElementById('stat-cpu-val'), cpuBar = document.getElementById('stat-cpu-bar');
+    const ramVal = document.getElementById('stat-ram-val'), ramBar = document.getElementById('stat-ram-bar');
+    if (cpuVal) cpuVal.textContent = cpu + '%';
+    if (cpuBar) cpuBar.style.width = cpu + '%';
+    if (ramVal) ramVal.textContent = ram + '%';
+    if (ramBar) ramBar.style.width = ram + '%';
+  });
+  ipcRenderer.on('wallpaper-fps-update', (_, { fps }) => {
+    const fpsVal = document.getElementById('stat-fps-val');
+    if (fpsVal) fpsVal.textContent = fps;
+  });
+
+  // Sidebar "EXPLORAR": troca pra aba Descobrir e aplica o mesmo filtro que
+  // os chips/pills já usam (tendência/mais recentes/rolar até Categorias).
+  document.querySelectorAll('.nav-item-sm[data-discover-sort]').forEach((item) => {
+    item.addEventListener('click', () => {
+      const discoverNav = document.querySelector('.nav-item[data-panel="discover"]');
+      if (discoverNav) discoverNav.click();
+      document.querySelectorAll('.nav-item-sm[data-discover-sort]').forEach((i) => i.classList.remove('active'));
+      item.classList.add('active');
+      discoverDefaultSort = item.dataset.discoverSort;
+      applyDiscoverFilter({}); // limpa tag/busca e já recarrega com o novo sort
+    });
+  });
+  document.querySelectorAll('.nav-item-sm[data-discover-action="categories"]').forEach((item) => {
+    item.addEventListener('click', () => {
+      const discoverNav = document.querySelector('.nav-item[data-panel="discover"]');
+      if (discoverNav) discoverNav.click();
+      const target = document.getElementById('filter-pills');
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  });
+
+  // "Ver todos" de Populares/Mais Baixados — aplica o sort real no próprio
+  // feed do Descobrir (a Oficina não é mais um navegador de Workshop).
+  document.getElementById('discover-viewall-popular')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    discoverDefaultSort = 'trend';
+    applyDiscoverFilter({});
+  });
+  document.getElementById('discover-viewall-toprated')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    discoverDefaultSort = 'toprated';
+    applyDiscoverFilter({});
+  });
 }
 
 function formatSubscribers(n) {
@@ -1107,42 +1222,26 @@ function formatSubscribers(n) {
 }
 
 async function startWorkshopDownload(workshopId, title, previewUrl, fileUrl) {
+  // Trava de segurança: mesmo se chamado por outro caminho (retomada de
+  // login pendente, etc.), nunca baixa de novo algo que já está na Biblioteca.
+  if (library.some(w => String(w.workshopId) === String(workshopId))) {
+    setWsStatus('✅ Esse wallpaper já está na sua biblioteca — sem necessidade de baixar de novo.', '', null, '#10b981');
+    setTimeout(() => { document.getElementById('ws-status-bar')?.style && (document.getElementById('ws-status-bar').style.display = 'none'); }, 4000);
+    return;
+  }
   setWsStatus(`⏳ Preparando inscrição invisível: ${title}...`);
   const result = await ipc('download-workshop-item', { workshopId, name: title, previewUrl: previewUrl || null, fileUrl: fileUrl || null });
   
   if (result && result.msg === 'needs_login') {
+    document.getElementById('dl-loading-screen').classList.remove('visible');
     _slPending = { workshopId, name: title, previewUrl };
     document.getElementById('sl-preview-img').src = previewUrl || '';
     document.getElementById('sl-preview-wrap').style.display = previewUrl ? 'block' : 'none';
     document.getElementById('modal-steam-login').classList.add('open');
+  } else if (result && result.ok === false) {
+    document.getElementById('dl-loading-screen').classList.remove('visible');
   }
 }
-
-// Category filter buttons
-document.querySelectorAll('.cat-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.cat-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    wsCategoryTag = btn.dataset.tag || '';
-    loadWorkshopItems(1);
-  });
-});
-
-// "Somente compatíveis" toggle — just re-filters the already-loaded page, no refetch needed
-document.getElementById('ws-only-compatible').addEventListener('change', (e) => {
-  wsOnlyCompatible = e.target.checked;
-  renderWorkshopGrid(wsItems.length >= 30);
-});
-
-// Sort / search events
-wsSort.addEventListener('change', () => loadWorkshopItems(1, false));
-wsRefresh.addEventListener('click', () => loadWorkshopItems(1, false));
-
-let wsSearchTimeout;
-wsSearch.addEventListener('input', () => {
-  clearTimeout(wsSearchTimeout);
-  wsSearchTimeout = setTimeout(() => loadWorkshopItems(1, false), 600);
-});
 
 // Download progress from main process
 let _slPending  = null; // { workshopId, name, previewUrl }
@@ -1163,6 +1262,37 @@ document.getElementById('btn-steam-web-login').addEventListener('click', async (
   } else {
     setWsStatus('❌ ' + (result.msg || 'Login cancelado/falhou.'), '', null, '#c0392b');
     setTimeout(() => { wsStatus.style.display = 'none'; }, 4000);
+  }
+});
+
+document.getElementById('btn-sl-export-session').addEventListener('click', async () => {
+  const result = await ipc('export-steam-session');
+  const btn = document.getElementById('btn-sl-export-session');
+  const original = btn.textContent;
+  if (result.ok) {
+    require('electron').clipboard.writeText(result.code);
+    btn.textContent = '✅ Copiado! Cole no outro PC.';
+  } else {
+    btn.textContent = '❌ ' + result.msg;
+  }
+  setTimeout(() => { btn.textContent = original; }, 4000);
+});
+
+document.getElementById('btn-sl-import-session').addEventListener('click', async () => {
+  const code = prompt('Cole aqui o código exportado do outro PC:');
+  if (!code) return;
+  const result = await ipc('import-steam-session', code.trim());
+  const btn = document.getElementById('btn-sl-import-session');
+  const original = btn.textContent;
+  if (result.ok) {
+    btn.textContent = '✅ Sessão importada!';
+    setTimeout(() => {
+      closeModal('modal-steam-login');
+      if (_slPending) startWorkshopDownload(_slPending.workshopId, _slPending.name, _slPending.previewUrl);
+    }, 1200);
+  } else {
+    btn.textContent = '❌ ' + (result.msg || 'Código inválido.');
+    setTimeout(() => { btn.textContent = original; }, 4000);
   }
 });
 
@@ -1192,19 +1322,55 @@ function openSetupModal() {
   document.getElementById('modal-steam-login').classList.add('open');
 }
 
+document.getElementById('btn-settings-steam-session').addEventListener('click', openSetupModal);
+
+document.getElementById('btn-unstick-steam').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-unstick-steam');
+  const original = btn.textContent;
+  btn.textContent = '⏳ Pedindo...';
+  btn.disabled = true;
+  await ipc('unstick-steam-downloads');
+  btn.textContent = '✅ Steam avisada!';
+  setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 3000);
+});
+
 ipcRenderer.on('download-progress', async (_, data) => {
+  const dlScreen = document.getElementById('dl-loading-screen');
+  const dlTitle = document.getElementById('dl-loading-title');
+  const dlSubtitle = document.getElementById('dl-loading-subtitle');
+  const dlFill = document.getElementById('dl-progress-fill');
+  const dlText = document.getElementById('dl-progress-text');
+
   if (data.state === 'preparing') {
+    dlTitle.textContent = 'Aplicando wallpaper';
+    dlSubtitle.textContent = data.name;
+    dlFill.style.width = '0%';
+    dlText.textContent = 'Iniciando...';
+    dlScreen.classList.add('visible');
     setWsStatus(`⏳ ${data.name}`);
   } else if (data.state === 'start') {
+    dlTitle.textContent = 'Aplicando wallpaper';
+    dlSubtitle.textContent = data.name;
+    dlFill.style.width = '2%';
+    dlText.textContent = '0% (Conectando...)';
+    dlScreen.classList.add('visible');
     setWsStatus(`📥 Baixando: ${data.name}`, '', 0.02);
   } else if (data.state === 'progress') {
     const pct = data.pct || 0;
+    const pctInt = Math.round(pct * 100);
     const size = data.total > 0
       ? `${formatBytes(data.downloaded)} / ${formatBytes(data.total)}`
       : '';
     const spd = data.speed > 1024 ? `${formatBytes(data.speed)}/s` : '';
-    setWsStatus(`📥 ${Math.round(pct * 100)}%  ${size}`, spd, pct);
+    
+    dlFill.style.width = `${pctInt}%`;
+    dlText.textContent = `${pctInt}% - ${spd} (${size})`;
+    setWsStatus(`📥 ${pctInt}%  ${size}`, spd, pct);
   } else if (data.state === 'completed') {
+    dlTitle.textContent = `Concluído!`;
+    dlFill.style.width = '100%';
+    dlText.textContent = 'Instalando wallpaper...';
+    
     setWsStatus('✅ Download concluído!', 'Wallpaper adicionado à biblioteca.', 1, '#4caf50');
     setTimeout(() => { wsStatus.style.display = 'none'; }, 5000);
     _slPending = null;
@@ -1213,7 +1379,17 @@ ipcRenderer.on('download-progress', async (_, data) => {
       library.push(wp);
       renderLibrary();
     }
+    
+    // Auto-aplicar
+    if (wp) {
+      setWallpaper(wp).catch((err) => console.error('[auto-aplicar]', err));
+    }
+    
+    setTimeout(() => {
+      dlScreen.classList.remove('visible');
+    }, 1500);
   } else if (data.state === 'needs-login') {
+    dlScreen.classList.remove('visible');
     wsStatus.style.display = 'none';
     _slPending = { workshopId: data.workshopId, name: data.name, previewUrl: data.previewUrl };
     const previewImg  = document.getElementById('sl-preview-img');
@@ -1224,52 +1400,930 @@ ipcRenderer.on('download-progress', async (_, data) => {
     } else {
       previewWrap.style.display = 'none';
     }
-    const savedAuth = (await ipc('get-steam-auth')) || {};
-    document.getElementById('sl-user').value = savedAuth.accountName || '';
-    document.getElementById('sl-pass').value = savedAuth.password || '';
-    document.getElementById('sl-2fa').value = '';
-    document.getElementById('sl-2fa-wrap').style.display = 'none';
     document.getElementById('modal-steam-login').classList.add('open');
   } else if (data.state === 'needs-2fa') {
     _slPending = { workshopId: data.workshopId, name: data.name, previewUrl: data.previewUrl };
-    document.getElementById('sl-user').value = data.username || '';
-    document.getElementById('sl-pass').value = data.password || '';
     document.getElementById('sl-2fa-wrap').style.display = 'block';
     document.getElementById('sl-2fa').value = '';
     document.getElementById('modal-steam-login').classList.add('open');
   } else if (data.state === 'needs-mobile-auth') {
     setWsStatus('📱 Aprove o login no aplicativo da Steam no celular...', '', null, '#ff9800');
   } else if (data.state === 'error') {
+    document.getElementById('dl-loading-screen').classList.remove('visible');
     setWsStatus('❌ ' + data.msg, '', null, '#f44336');
     setTimeout(() => { wsStatus.style.display = 'none'; }, 8000);
   }
 });
 
+// ---- Aba Descobrir (FYNIX) ----
+let discoverFeedPage = 1;
+let discoverFeedHasMore = false;
+let discoverFeedLoading = false;
+let discoverSearchQuery = '';
+let discoverTagFilter = '';
+let discoverDefaultSort = 'mostrecent'; // trocado pelos atalhos "Em alta"/"Mais recentes" da sidebar
+
+// Compartilhado pela busca por texto (Enter) e pelos chips de Categorias:
+// esconde a Hero/Populares/Mais Baixados/Categorias e faz o feed de baixo
+// mostrar só o filtro ativo. tag e search são mutuamente exclusivos —
+// aplicar um limpa o outro.
+function applyDiscoverFilter({ search = '', tag = '', label = '' } = {}) {
+  discoverSearchQuery = search;
+  discoverTagFilter = tag;
+  const browseSections = document.getElementById('discover-browse-sections');
+  const active = !!(search || tag);
+  if (browseSections) browseSections.style.display = active ? 'none' : '';
+
+  const title = document.getElementById('discover-feed-title');
+  const sortLabel = discoverDefaultSort === 'trend' ? 'Em alta' : discoverDefaultSort === 'toprated' ? 'Mais baixados' : 'Explorar mais';
+  if (title) title.textContent = label || (search ? `Resultados para "${search}"` : sortLabel);
+
+  const searchInput = document.getElementById('discover-search-input');
+  if (searchInput && !search) searchInput.value = '';
+
+  document.querySelectorAll('.filter-pills .pill').forEach((chip) => {
+    const chipTag = chip.dataset.tag || '', chipSearch = chip.dataset.search || '';
+    if (chip.dataset.clear === '1') { chip.classList.toggle('active', !active); return; }
+    chip.classList.toggle('active', (!!tag && chipTag === tag) || (!!search && chipSearch === search));
+  });
+
+  if (active) document.querySelectorAll('.nav-item-sm[data-discover-sort]').forEach((i) => i.classList.remove('active'));
+
+  loadDiscoverFeed(1, false);
+}
+
+function initCategoryChips() {
+  document.querySelectorAll('.filter-pills .pill').forEach((chip) => {
+    if (chip.dataset.wired) return;
+    chip.dataset.wired = '1';
+    chip.addEventListener('click', () => {
+      if (chip.dataset.clear === '1') { applyDiscoverFilter({}); return; }
+      const tag = chip.dataset.tag || '';
+      const search = chip.dataset.search || '';
+      // Clicar de novo no chip/pill já ativo limpa o filtro e volta pro normal.
+      if ((tag && discoverTagFilter === tag) || (search && discoverSearchQuery === search)) {
+        applyDiscoverFilter({});
+        return;
+      }
+      applyDiscoverFilter({ tag, search, label: `Resultados de "${chip.textContent}"` });
+    });
+  });
+}
+
+// Enter "confirma" a busca: some com a Hero/Populares/Mais Baixados/Categorias
+// e o feed de baixo vira só os resultados. Digitando (sem apertar Enter)
+// só mostra uma prévia em caixinha embaixo do campo, sem mexer no resto da
+// página — a prévia usa a mesma busca por texto da Steam, só que limitada
+// a poucos itens pra ficar rápida.
+function initDiscoverSearch() {
+  const input = document.getElementById('discover-search-input');
+  if (!input || input.dataset.wired) return;
+  input.dataset.wired = '1';
+  const dropdown = document.getElementById('discover-search-dropdown');
+
+  let debounceTimer;
+  let previewToken = 0;
+
+  function closeDropdown() {
+    if (dropdown) { dropdown.classList.remove('open'); dropdown.innerHTML = ''; }
+  }
+
+  function commitSearch(query) {
+    closeDropdown();
+    applyDiscoverFilter({ search: query });
+  }
+
+  async function updatePreview(query) {
+    if (!dropdown) return;
+    const myToken = ++previewToken;
+    dropdown.innerHTML = '<div class="discover-search-dropdown-loading">Buscando...</div>';
+    dropdown.classList.add('open');
+    try {
+      const res = await ipc('browse-workshop', { sort: 'textsearch', search: query, page: 1 });
+      if (myToken !== previewToken) return; // usuário já digitou algo mais novo — descarta essa resposta
+      const items = (res.items || []).slice(0, 6);
+      if (!items.length) {
+        dropdown.innerHTML = '<div class="discover-search-dropdown-empty">Nenhum resultado encontrado.</div>';
+        return;
+      }
+      dropdown.innerHTML = '';
+      for (const item of items) {
+        const row = document.createElement('div');
+        row.className = 'discover-search-dropdown-item';
+        row.innerHTML = `
+          <img src="${item.preview || ''}" loading="lazy" />
+          <div style="min-width:0;flex:1;">
+            <div class="discover-search-dropdown-item-title">${item.title}</div>
+            <div class="discover-search-dropdown-item-meta">${WA_TYPE_LABELS[item.waType] || 'Desconhecido'}</div>
+          </div>
+        `;
+        row.addEventListener('mousedown', (e) => e.preventDefault()); // evita o blur do input roubar o clique
+        row.addEventListener('click', () => {
+          closeDropdown();
+          showWallpaperModal(item);
+        });
+        dropdown.appendChild(row);
+      }
+      const seeAll = document.createElement('div');
+      seeAll.className = 'discover-search-dropdown-seeall';
+      seeAll.textContent = 'Ver todos os resultados ↵';
+      seeAll.addEventListener('mousedown', (e) => e.preventDefault());
+      seeAll.addEventListener('click', () => commitSearch(query));
+      dropdown.appendChild(seeAll);
+    } catch (_) {
+      if (myToken !== previewToken) return;
+      dropdown.innerHTML = '<div class="discover-search-dropdown-empty">Erro ao buscar.</div>';
+    }
+  }
+
+  input.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    const query = input.value.trim();
+    if (!query) {
+      // Campo limpo: some com a caixinha e restaura a página normal na hora,
+      // sem esperar Enter.
+      closeDropdown();
+      if (discoverSearchQuery) commitSearch('');
+      return;
+    }
+    debounceTimer = setTimeout(() => updatePreview(query), 300);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      clearTimeout(debounceTimer);
+      commitSearch(input.value.trim());
+    } else if (e.key === 'Escape') {
+      closeDropdown();
+    }
+  });
+
+  input.addEventListener('blur', () => {
+    // Delay curto pra não fechar antes do "mousedown" de um item processar.
+    setTimeout(closeDropdown, 150);
+  });
+  input.addEventListener('focus', () => {
+    if (input.value.trim() && dropdown && dropdown.innerHTML) dropdown.classList.add('open');
+  });
+}
+
+async function loadDiscoverTab() {
+  initDiscoverSearch();
+  initCategoryChips();
+
+  const popGrid = document.getElementById('discover-popular-grid');
+  const topGrid = document.getElementById('discover-toprated-grid');
+  if (!popGrid || !topGrid) return;
+
+  try {
+    const popRes = await ipc('browse-workshop', { sort: 'trend', page: 1 });
+    const topRes = await ipc('browse-workshop', { sort: 'toprated', page: 1 });
+    
+    // Busca o ID exato da arte Aeolian by WLOP para o destaque principal
+    const heroRes = await ipc('get-workshop-details', ['1289832516']);
+    
+    renderDiscoverGrid(popGrid, popRes.items ? popRes.items.slice(0, 5) : []);
+    renderDiscoverGrid(topGrid, topRes.items ? topRes.items.slice(0, 5) : []);
+    
+    if (heroRes.items && heroRes.items.length > 0) {
+      updateHeroSection(heroRes.items[0]);
+    } else if (popRes.items && popRes.items.length > 0) {
+      updateHeroSection(popRes.items[0]);
+    }
+    
+    // Inicia o grid infinito de exploracao
+    loadDiscoverFeed(1, false);
+  } catch (err) {
+    popGrid.innerHTML = '<div style="grid-column:1/-1;color:var(--danger);text-align:center">Erro ao carregar wallpapers da Steam.</div>';
+    topGrid.innerHTML = '<div style="grid-column:1/-1;color:var(--danger);text-align:center">Erro ao carregar wallpapers da Steam.</div>';
+  }
+}
+
+async function loadDiscoverFeed(page = 1, append = false) {
+  const feedGrid = document.getElementById('discover-feed-grid');
+  const feedFooter = document.getElementById('discover-feed-footer');
+  if (!feedGrid || !feedFooter) return;
+
+  if (append) {
+    if (discoverFeedLoading || !discoverFeedHasMore) return;
+    discoverFeedLoading = true;
+    feedFooter.textContent = '⏳ Carregando mais wallpapers...';
+  } else {
+    feedGrid.innerHTML = '';
+    discoverFeedLoading = true;
+    feedFooter.textContent = '⏳ Carregando wallpapers...';
+  }
+  
+  discoverFeedPage = page;
+  
+  try {
+    // Usamos 'mostrecent' (Mais recentes) ao invés de 'trend' para garantir scroll verdadeiramente infinito
+    // — exceto com um filtro ativo: 'textsearch' pra busca por texto (relevância),
+    // 'trend' pra tag de categoria (não há "relevância" pra ordenar tag sozinha).
+    const params = discoverTagFilter
+      ? { sort: 'trend', tag: discoverTagFilter, page: discoverFeedPage }
+      : discoverSearchQuery
+      ? { sort: 'textsearch', search: discoverSearchQuery, page: discoverFeedPage }
+      : { sort: discoverDefaultSort, page: discoverFeedPage };
+    const res = await ipc('browse-workshop', params);
+    discoverFeedLoading = false;
+    
+    if (res.error) {
+       feedFooter.textContent = '❌ Erro ao carregar mais.';
+       return;
+    }
+    
+    // Na primeira página, ignoramos os primeiros que talvez já estejam lá em cima (opcional para mostrecent, mas mantemos por segurança)
+    let itemsToRender = res.items || [];
+    
+    // Steam as vezes retorna 28, 29 ou 30. Se vier menos que 10, consideramos que acabou.
+    discoverFeedHasMore = (res.items && res.items.length >= 10);
+    renderDiscoverGrid(feedGrid, itemsToRender, append);
+    
+    feedFooter.textContent = discoverFeedHasMore ? '' : 'Fim dos resultados.';
+  } catch (err) {
+    discoverFeedLoading = false;
+    feedFooter.textContent = '❌ Erro ao carregar mais.';
+  }
+}
+
+// Scroll Infinito para aba Descobrir
+const discoverMain = document.querySelector('.discover-main');
+if (discoverMain) {
+  discoverMain.addEventListener('scroll', () => {
+    if (discoverFeedLoading || !discoverFeedHasMore) return;
+    const { scrollTop, scrollHeight, clientHeight } = discoverMain;
+    if (scrollTop + clientHeight >= scrollHeight - 400) {
+      loadDiscoverFeed(discoverFeedPage + 1, true);
+    }
+  });
+}
+
+function renderDiscoverGrid(container, items, append = false) {
+  if (!append) container.innerHTML = '';
+  if (items.length === 0 && !append) {
+    container.innerHTML = '<div style="grid-column:1/-1;color:var(--text2);text-align:center">Nenhum resultado encontrado.</div>';
+    return;
+  }
+  items.forEach(item => {
+    const card = document.createElement('div');
+    card.className = 'wp-card';
+    card.title = item.title;
+    const typeLabel = WA_TYPE_LABELS[item.waType] || 'Desconhecido';
+    const installedBadge = isInstalled(item) ? '<div class="wp-card-installed-badge">✓ Instalado</div>' : '';
+    // Vídeo: mesmo waType já calculado a partir da tag real "video" do
+    // próprio item (ver inferWaType em main.js) — não é um chute visual.
+    const videoBadge = item.waType === 'video'
+      ? '<div class="wp-card-video-badge"><svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg></div>'
+      : '';
+    // "4K" só aparece se a própria Steam já marcou o item com uma tag de
+    // resolução real (ex: "4K" ou "3840 x 2160") — nunca inventado aqui.
+    const resTag = (item.tags || []).find(t => /4k/i.test(t) || /^\d{3,4}\s*x\s*\d{3,4}$/i.test(t));
+    const resBadge = resTag ? `<div class="wp-card-res-badge">${/4k/i.test(resTag) ? '4K' : resTag}</div>` : '';
+    card.innerHTML = `
+      <div class="wp-card-img-wrap">${installedBadge}${videoBadge}${resBadge}<img src="${item.preview || ''}" loading="lazy" /></div>
+      <div class="wp-card-info">
+        <div class="wp-card-title">${item.title}</div>
+        <div class="wp-card-meta">
+          ${typeLabel}
+          <span class="wp-card-stats">
+            <span class="wp-card-views" title="Visualizações">👁 ${formatSubscribers(item.views || 0)}</span>
+            <span class="wp-card-likes" title="Inscritos">♡ ${formatSubscribers(item.subscribers)}</span>
+          </span>
+        </div>
+      </div>
+    `;
+    card.addEventListener('click', () => {
+      showWallpaperModal(item);
+    });
+    container.appendChild(card);
+  });
+}
+
+function isFavorited(item) {
+  return favorites.some(f => f.workshopId === item.workshopId);
+}
+
+// Compara por workshopId (string), não por objeto — a mesma cena aparece
+// com objetos diferentes na Biblioteca vs no resultado da busca da Steam.
+function isInstalled(item) {
+  return library.some(w => String(w.workshopId) === String(item.workshopId));
+}
+
+async function toggleFavorite(item) {
+  const result = await ipc('toggle-favorite', item);
+  favorites = result.favorites;
+  renderFavoritesGrid();
+  return result.added;
+}
+
+function updateFavStatsRow() {
+  const total  = favorites.length;
+  const videos = favorites.filter(f => f.waType === 'video').length;
+  const scenes = favorites.filter(f => f.waType === 'scene').length;
+  const totalEl = document.getElementById('fav-stat-total');
+  const videoEl = document.getElementById('fav-stat-video');
+  const sceneEl = document.getElementById('fav-stat-scene');
+  if (totalEl) totalEl.textContent = total;
+  if (videoEl) videoEl.textContent = videos;
+  if (sceneEl) sceneEl.textContent = scenes;
+}
+
+function filteredFavorites() {
+  let items = favorites;
+  if (favTypeFilter) items = items.filter(f => f.waType === favTypeFilter);
+  if (favSearchQuery) {
+    const q = favSearchQuery.toLowerCase();
+    items = items.filter(f => (f.title || '').toLowerCase().includes(q));
+  }
+  items = items.slice();
+  if (favSort === 'name') items.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+  else items.reverse(); // favorites.push() no final = mais recente é o último do array
+  return items;
+}
+
+function renderFavoritesGrid() {
+  const grid = document.getElementById('favorites-grid');
+  if (!grid) return;
+  updateFavStatsRow();
+
+  const items = filteredFavorites();
+  if (favorites.length === 0) {
+    grid.innerHTML = `
+      <div class="empty-state" id="favorites-empty">
+        <div class="empty-icon">🤍</div>
+        <p>Nenhum favorito ainda</p>
+        <small>Clique em "Favoritar" num wallpaper da Oficina para ele aparecer aqui</small>
+      </div>
+    `;
+    return;
+  }
+  if (items.length === 0) {
+    grid.innerHTML = '<div style="grid-column:1/-1;color:var(--text2);text-align:center;padding:40px 0">Nenhum favorito encontrado.</div>';
+    return;
+  }
+  grid.innerHTML = '';
+  items.forEach(item => {
+    const card = document.createElement('div');
+    card.className = 'wp-card';
+    card.title = item.title;
+    const typeLabel = WA_TYPE_LABELS[item.waType] || 'Desconhecido';
+    const resTag = (item.tags || []).find(t => /4k/i.test(t) || /^\d{3,4}\s*x\s*\d{3,4}$/i.test(t));
+    const resBadge = resTag ? `<span class="wp-card-res-inline">${/4k/i.test(resTag) ? '4K' : resTag}</span>` : '';
+    card.innerHTML = `
+      <div class="wp-card-img-wrap">
+        <div class="wp-card-type-badge">${typeLabel}</div>
+        <button class="wp-card-fav-heart" title="Remover dos favoritos">♥</button>
+        <img src="${item.preview || ''}" loading="lazy" />
+      </div>
+      <div class="wp-card-info">
+        <div class="wp-card-title">${item.title}</div>
+        <div class="wp-card-meta">
+          <span class="wp-card-stats">
+            <span class="wp-card-views" title="Visualizações">👁 ${formatSubscribers(item.views || 0)}</span>
+            <span class="wp-card-likes" title="Inscritos">♡ ${formatSubscribers(item.subscribers)}</span>
+          </span>
+          <span class="wp-card-fav-extra">
+            ${resBadge}
+            <button class="card-menu-btn" title="Mais opções">⋮</button>
+            <div class="card-menu-dropdown">
+              <div class="card-menu-item remove-fav">💔 Remover dos favoritos</div>
+            </div>
+          </span>
+        </div>
+      </div>
+    `;
+
+    const heartBtn = card.querySelector('.wp-card-fav-heart');
+    heartBtn.addEventListener('click', async e => {
+      e.stopPropagation();
+      await toggleFavorite(item);
+    });
+
+    const menuBtn = card.querySelector('.card-menu-btn');
+    const menuDropdown = card.querySelector('.card-menu-dropdown');
+    menuBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      const wasOpen = menuDropdown.classList.contains('open');
+      closeCardMenus();
+      if (!wasOpen) { menuDropdown.classList.add('open'); menuBtn.classList.add('menu-open'); }
+    });
+    card.querySelector('.remove-fav').addEventListener('click', async e => {
+      e.stopPropagation();
+      await toggleFavorite(item);
+    });
+
+    card.addEventListener('click', e => {
+      if (e.target.closest('.card-menu-dropdown') || e.target.closest('.card-menu-btn') || e.target.closest('.wp-card-fav-heart')) return;
+      showWallpaperModal(item);
+    });
+    grid.appendChild(card);
+  });
+}
+
+// ---- Favoritos: busca, filtro por tipo (stat cards clicáveis), ordenação e modo de visualização ----
+const favSearchInputEl = document.getElementById('fav-search-input');
+if (favSearchInputEl) {
+  favSearchInputEl.addEventListener('input', e => {
+    favSearchQuery = e.target.value.trim();
+    renderFavoritesGrid();
+  });
+}
+const favSortSelectEl = document.getElementById('fav-sort-select');
+if (favSortSelectEl) {
+  favSortSelectEl.addEventListener('change', e => {
+    favSort = e.target.value;
+    renderFavoritesGrid();
+  });
+}
+document.querySelectorAll('#fav-stats-row .fav-stat-card').forEach(statCard => {
+  statCard.addEventListener('click', () => {
+    document.querySelectorAll('#fav-stats-row .fav-stat-card').forEach(c => c.classList.remove('active'));
+    statCard.classList.add('active');
+    favTypeFilter = statCard.dataset.favType || '';
+    renderFavoritesGrid();
+  });
+});
+const favGridEl = document.getElementById('favorites-grid');
+const favViewGridBtn = document.getElementById('fav-view-grid');
+const favViewListBtn = document.getElementById('fav-view-list');
+if (favViewGridBtn && favViewListBtn && favGridEl) {
+  favViewGridBtn.addEventListener('click', () => {
+    favViewMode = 'grid';
+    favGridEl.classList.remove('list-view');
+    favViewGridBtn.classList.add('active');
+    favViewListBtn.classList.remove('active');
+  });
+  favViewListBtn.addEventListener('click', () => {
+    favViewMode = 'list';
+    favGridEl.classList.add('list-view');
+    favViewListBtn.classList.add('active');
+    favViewGridBtn.classList.remove('active');
+  });
+}
+const btnFavExplore = document.getElementById('btn-fav-explore');
+if (btnFavExplore) {
+  btnFavExplore.addEventListener('click', () => {
+    const discoverNav = document.querySelector('.nav-item[data-panel="discover"]');
+    if (discoverNav) discoverNav.click();
+  });
+}
+
+// ==================================================================
+// ---- Playlists & Rotinas ----
+// ==================================================================
+let plSearchQuery = '';
+let plStatusFilter = '';
+let plSort = 'recent';
+let plActivePlaylistId = null;
+let plEditingId = null;         // id da playlist em edição no modal (null = criando nova)
+let plSelectedIcon = '🎵';
+let plSelectedWallpaperIds = new Set();
+let rtEditingId = null;         // id da rotina em edição no modal de rotina (null = criando nova)
+
+const RT_TYPE_LABELS = {
+  time: 'Horário fixo', weekly: 'Dia da semana', monthly: 'Mês do ano',
+  interval: 'Intervalo', game: 'Jogo em execução', application: 'Aplicativo em execução',
+};
+const WEEKDAY_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+const MONTH_LABELS = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+
+function wallpaperThumbUrl(w) {
+  if (!w) return null;
+  if (w.preview) return toFileUrl(w.preview);
+  if (w.thumbnail) return w.thumbnail;
+  if (w.type === 'image') return toFileUrl(w.src);
+  return null;
+}
+
+function routineSummary(routine) {
+  const c = routine.config || {};
+  if (routine.type === 'time') return `Horário: ${c.start}–${c.end}`;
+  if (routine.type === 'weekly') return `Dias: ${(c.days || []).map(d => WEEKDAY_LABELS[d]).join(', ') || '—'}`;
+  if (routine.type === 'monthly') return `Meses: ${(c.months || []).map(m => MONTH_LABELS[m]).join(', ') || '—'}`;
+  if (routine.type === 'interval') return `A cada ${c.seconds}s (${c.mode === 'random' ? 'aleatório' : 'sequencial'})`;
+  if (routine.type === 'game') return `Jogo: ${c.exe}`;
+  if (routine.type === 'application') return `Aplicativo: ${c.exe}`;
+  return routine.type;
+}
+
+function filteredPlaylists() {
+  let items = playlists;
+  if (plStatusFilter === 'active') items = items.filter(p => p.id === plActivePlaylistId);
+  if (plStatusFilter === 'noroutine') items = items.filter(p => !routines.some(r => r.playlistId === p.id));
+  if (plSearchQuery) {
+    const q = plSearchQuery.toLowerCase();
+    items = items.filter(p => p.name.toLowerCase().includes(q));
+  }
+  items = items.slice();
+  if (plSort === 'name') items.sort((a, b) => a.name.localeCompare(b.name));
+  else if (plSort === 'mostused') items.sort((a, b) => ((b.stats && b.stats.switchCount) || 0) - ((a.stats && a.stats.switchCount) || 0));
+  else if (plSort === 'lastapplied') items.sort((a, b) => ((b.stats && b.stats.lastAppliedAt) || 0) - ((a.stats && a.stats.lastAppliedAt) || 0));
+  else items.sort((a, b) => b.createdAt - a.createdAt);
+  return items;
+}
+
+function updatePlStatsBar() {
+  const el = document.getElementById('pl-stats-text');
+  if (!el) return;
+  const total = playlists.length;
+  const activeCount = playlists.some(p => p.id === plActivePlaylistId) ? 1 : 0;
+  const parts = [`${total} playlist${total === 1 ? '' : 's'}`];
+  if (activeCount) parts.push('1 ativa');
+  el.textContent = parts.join(' • ');
+}
+
+function renderPlaylistsGrid() {
+  const grid = document.getElementById('playlists-grid');
+  const empty = document.getElementById('playlists-empty');
+  if (!grid) return;
+  updatePlStatsBar();
+
+  const items = filteredPlaylists();
+  grid.querySelectorAll('.playlist-card').forEach(c => c.remove());
+  if (empty) empty.style.display = items.length === 0 ? 'block' : 'none';
+
+  for (const p of items) {
+    const isActive = p.id === plActivePlaylistId;
+    const card = document.createElement('div');
+    card.className = 'playlist-card' + (isActive ? ' active' : '');
+    card.dataset.id = p.id;
+
+    const thumbs = p.wallpaperIds.slice(0, 4).map(id => library.find(w => w.id === id)).filter(Boolean);
+    const cells = [0, 1, 2, 3].map(i => {
+      const w = thumbs[i];
+      const url = wallpaperThumbUrl(w);
+      return url
+        ? `<div class="pl-collage-cell" style="background-image:url('${url}')"></div>`
+        : `<div class="pl-collage-cell pl-collage-empty"></div>`;
+    }).join('');
+
+    const routineCount = routines.filter(r => r.playlistId === p.id).length;
+
+    card.innerHTML = `
+      <div class="playlist-cover">
+        <div class="pl-collage">${cells}</div>
+        <div class="card-active-badge">ATIVA</div>
+        <div class="pl-icon-overlay" style="background:${p.color}22;color:${p.color}">${p.icon}</div>
+        <button class="pl-play-btn" title="Aplicar agora">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+        </button>
+        <button class="card-menu-btn" title="Mais opções">⋮</button>
+        <div class="card-menu-dropdown">
+          <div class="card-menu-item duplicate">⧉ Duplicar</div>
+          <div class="card-menu-item delete">✕ Excluir</div>
+        </div>
+      </div>
+      <div class="card-info">
+        <div class="card-name" title="${p.name}">${p.name}</div>
+        <div class="card-type">${p.wallpaperIds.length} wallpaper${p.wallpaperIds.length === 1 ? '' : 's'} • ${routineCount} rotina${routineCount === 1 ? '' : 's'}</div>
+      </div>
+    `;
+
+    card.querySelector('.pl-play-btn').addEventListener('click', async e => {
+      e.stopPropagation();
+      const ok = await ipc('apply-playlist-now', p.id);
+      if (ok) { plActivePlaylistId = p.id; renderPlaylistsGrid(); }
+    });
+
+    const menuBtn = card.querySelector('.card-menu-btn');
+    const menuDropdown = card.querySelector('.card-menu-dropdown');
+    menuBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      const wasOpen = menuDropdown.classList.contains('open');
+      closeCardMenus();
+      if (!wasOpen) { menuDropdown.classList.add('open'); menuBtn.classList.add('menu-open'); }
+    });
+    card.querySelector('.duplicate').addEventListener('click', async e => {
+      e.stopPropagation();
+      const copy = await ipc('duplicate-playlist', p.id);
+      if (copy) { playlists.push(copy); renderPlaylistsGrid(); }
+    });
+    card.querySelector('.delete').addEventListener('click', async e => {
+      e.stopPropagation();
+      if (!confirm(`Excluir a playlist "${p.name}"? As rotinas dela também serão removidas.`)) return;
+      await ipc('delete-playlist', p.id);
+      playlists = playlists.filter(pl => pl.id !== p.id);
+      routines = routines.filter(r => r.playlistId !== p.id);
+      renderPlaylistsGrid();
+    });
+
+    card.addEventListener('click', e => {
+      if (e.target.closest('.card-menu-dropdown') || e.target.closest('.card-menu-btn') || e.target.closest('.pl-play-btn')) return;
+      openPlaylistModal(p);
+    });
+
+    grid.appendChild(card);
+  }
+}
+
+document.getElementById('pl-search-input')?.addEventListener('input', e => {
+  plSearchQuery = e.target.value.trim();
+  renderPlaylistsGrid();
+});
+document.getElementById('pl-sort-select')?.addEventListener('change', e => {
+  plSort = e.target.value;
+  renderPlaylistsGrid();
+});
+document.querySelectorAll('#pl-status-pills .pill').forEach(pill => {
+  pill.addEventListener('click', () => {
+    document.querySelectorAll('#pl-status-pills .pill').forEach(p => p.classList.remove('active'));
+    pill.classList.add('active');
+    plStatusFilter = pill.dataset.plStatus || '';
+    renderPlaylistsGrid();
+  });
+});
+document.getElementById('btn-new-playlist')?.addEventListener('click', () => openPlaylistModal(null));
+
+ipcRenderer.on('playlist-changed', (_, { playlistId }) => {
+  plActivePlaylistId = playlistId;
+  renderPlaylistsGrid();
+});
+
+// ---- Modal de criar/editar playlist ----
+function openPlaylistModal(playlist) {
+  plEditingId = playlist ? playlist.id : null;
+  plSelectedIcon = playlist ? playlist.icon : '🎵';
+  plSelectedWallpaperIds = new Set(playlist ? playlist.wallpaperIds : []);
+
+  document.getElementById('pl-modal-title').textContent = playlist ? 'Editar Playlist' : 'Nova Playlist';
+  document.getElementById('pl-name').value = playlist ? playlist.name : '';
+  document.getElementById('pl-description').value = playlist ? playlist.description : '';
+  document.getElementById('pl-color').value = playlist ? playlist.color : '#7c3aed';
+
+  document.querySelectorAll('#pl-icon-grid .pl-icon-option').forEach(opt => {
+    opt.classList.toggle('selected', opt.dataset.icon === plSelectedIcon);
+  });
+
+  document.getElementById('pl-wallpaper-search').value = '';
+  renderPlWallpaperPicker('');
+  renderPlRoutinesList();
+
+  document.getElementById('modal-playlist').classList.add('open');
+}
+
+document.querySelectorAll('#pl-icon-grid .pl-icon-option').forEach(opt => {
+  opt.addEventListener('click', () => {
+    document.querySelectorAll('#pl-icon-grid .pl-icon-option').forEach(o => o.classList.remove('selected'));
+    opt.classList.add('selected');
+    plSelectedIcon = opt.dataset.icon;
+  });
+});
+
+function renderPlWallpaperPicker(query) {
+  const picker = document.getElementById('pl-wallpaper-picker');
+  const countEl = document.getElementById('pl-wallpaper-count');
+  if (!picker) return;
+  const q = (query || '').toLowerCase();
+  const items = library.filter(w => !q || w.name.toLowerCase().includes(q));
+
+  picker.innerHTML = items.map(w => {
+    const url = wallpaperThumbUrl(w);
+    const checked = plSelectedWallpaperIds.has(w.id);
+    return `
+      <div class="pl-wp-item ${checked ? 'checked' : ''}" data-id="${w.id}">
+        ${url ? `<img src="${url}" />` : `<div class="pl-wp-noimg">${typeIcon(w.type, w.scene)}</div>`}
+        <div class="pl-wp-name" title="${w.name}">${w.name}</div>
+        <div class="pl-wp-check">${checked ? '✓' : ''}</div>
+      </div>`;
+  }).join('') || '<div style="color:var(--text2);font-size:12px;padding:8px 0">Nenhum wallpaper na biblioteca ainda.</div>';
+
+  picker.querySelectorAll('.pl-wp-item').forEach(el => {
+    el.addEventListener('click', () => {
+      const id = el.dataset.id;
+      if (plSelectedWallpaperIds.has(id)) plSelectedWallpaperIds.delete(id);
+      else plSelectedWallpaperIds.add(id);
+      el.classList.toggle('checked');
+      el.querySelector('.pl-wp-check').textContent = plSelectedWallpaperIds.has(id) ? '✓' : '';
+      if (countEl) countEl.textContent = plSelectedWallpaperIds.size;
+    });
+  });
+  if (countEl) countEl.textContent = plSelectedWallpaperIds.size;
+}
+document.getElementById('pl-wallpaper-search')?.addEventListener('input', e => renderPlWallpaperPicker(e.target.value));
+
+function renderPlRoutinesList() {
+  const list = document.getElementById('pl-routines-list');
+  if (!list) return;
+  const items = routines.filter(r => r.playlistId === plEditingId);
+  if (!plEditingId || items.length === 0) {
+    list.innerHTML = '<p style="color:var(--text2);font-size:12px;padding:8px 0">' +
+      (plEditingId ? 'Nenhuma rotina ainda — sem rotina, a playlist só aplica manualmente.' : 'Salve a playlist primeiro pra poder adicionar rotinas.') +
+      '</p>';
+    return;
+  }
+  list.innerHTML = '';
+  items.sort((a, b) => b.priority - a.priority).forEach(r => {
+    const row = document.createElement('div');
+    row.className = 'time-rule-row pl-routine-row';
+    row.innerHTML = `
+      <label class="toggle" style="margin-right:10px"><input type="checkbox" ${r.enabled ? 'checked' : ''} class="rt-enabled-toggle" /><div class="toggle-slider"></div></label>
+      <span class="tr-name" style="flex:1">${RT_TYPE_LABELS[r.type] || r.type} <span style="color:var(--text2)">— ${routineSummary(r)}</span></span>
+      <span style="color:var(--text2);font-size:11px;margin-right:8px">prio ${r.priority}</span>
+      <button class="card-btn rt-edit-btn" title="Editar">✎</button>
+      <button class="card-btn delete rt-del-btn" title="Excluir">✕</button>
+    `;
+    row.querySelector('.rt-enabled-toggle').addEventListener('change', async e => {
+      await ipc('set-routine-enabled', r.id, e.target.checked);
+      r.enabled = e.target.checked;
+    });
+    row.querySelector('.rt-edit-btn').addEventListener('click', () => openRoutineModal(r));
+    row.querySelector('.rt-del-btn').addEventListener('click', async () => {
+      if (!confirm('Excluir esta rotina?')) return;
+      await ipc('delete-routine', r.id);
+      routines = routines.filter(x => x.id !== r.id);
+      renderPlRoutinesList();
+      renderPlaylistsGrid();
+    });
+    list.appendChild(row);
+  });
+}
+
+document.getElementById('btn-add-routine')?.addEventListener('click', () => {
+  if (!plEditingId) { alert('Salve a playlist primeiro pra poder adicionar rotinas.'); return; }
+  openRoutineModal(null);
+});
+
+document.getElementById('btn-pl-save')?.addEventListener('click', async () => {
+  const name = document.getElementById('pl-name').value.trim();
+  if (!name) { alert('Dê um nome pra playlist.'); return; }
+  const payload = {
+    id: plEditingId || undefined,
+    name,
+    description: document.getElementById('pl-description').value.trim(),
+    color: document.getElementById('pl-color').value,
+    icon: plSelectedIcon,
+    wallpaperIds: Array.from(plSelectedWallpaperIds),
+  };
+  const saved = await ipc('save-playlist', payload);
+  const idx = playlists.findIndex(p => p.id === saved.id);
+  if (idx !== -1) playlists[idx] = saved; else playlists.push(saved);
+  plEditingId = saved.id;
+  renderPlaylistsGrid();
+  renderPlRoutinesList();
+  closeModal('modal-playlist');
+});
+
+// ---- Modal de criar/editar rotina ----
+function renderRoutineConfigFields(type, config) {
+  const wrap = document.getElementById('rt-config-fields');
+  config = config || {};
+  if (type === 'time') {
+    wrap.innerHTML = `
+      <div class="field"><label>Início</label><input type="time" id="rt-start" value="${config.start || '08:00'}" /></div>
+      <div class="field"><label>Fim</label><input type="time" id="rt-end" value="${config.end || '18:00'}" /></div>`;
+  } else if (type === 'weekly') {
+    const days = config.days || [];
+    wrap.innerHTML = `<div class="field"><label>Dias da semana</label><div class="rt-day-grid">${
+      WEEKDAY_LABELS.map((label, i) => `<div class="rt-day-option ${days.includes(i) ? 'selected' : ''}" data-day="${i}">${label}</div>`).join('')
+    }</div></div>`;
+    wrap.querySelectorAll('.rt-day-option').forEach(el => el.addEventListener('click', () => el.classList.toggle('selected')));
+  } else if (type === 'monthly') {
+    const months = config.months || [];
+    wrap.innerHTML = `<div class="field"><label>Meses</label><div class="rt-day-grid">${
+      MONTH_LABELS.map((label, i) => `<div class="rt-day-option ${months.includes(i) ? 'selected' : ''}" data-month="${i}">${label}</div>`).join('')
+    }</div></div>`;
+    wrap.querySelectorAll('.rt-day-option').forEach(el => el.addEventListener('click', () => el.classList.toggle('selected')));
+  } else if (type === 'interval') {
+    wrap.innerHTML = `
+      <div class="field"><label>Intervalo (segundos)</label><input type="number" id="rt-seconds" min="5" value="${config.seconds || 30}" /></div>
+      <div class="field"><label>Modo</label>
+        <select id="rt-mode">
+          <option value="sequential" ${config.mode !== 'random' ? 'selected' : ''}>Sequencial</option>
+          <option value="random" ${config.mode === 'random' ? 'selected' : ''}>Aleatório</option>
+        </select>
+      </div>`;
+  } else if (type === 'game' || type === 'application') {
+    wrap.innerHTML = `<div class="field"><label>Nome do executável</label><input type="text" id="rt-exe" placeholder="ex: valorant.exe" value="${config.exe || ''}" /></div>`;
+  }
+}
+
+function readRoutineConfigFromFields(type) {
+  if (type === 'time') return { start: document.getElementById('rt-start').value, end: document.getElementById('rt-end').value };
+  if (type === 'weekly') return { days: Array.from(document.querySelectorAll('.rt-day-option.selected')).map(el => +el.dataset.day) };
+  if (type === 'monthly') return { months: Array.from(document.querySelectorAll('.rt-day-option.selected')).map(el => +el.dataset.month) };
+  if (type === 'interval') return { seconds: +document.getElementById('rt-seconds').value, mode: document.getElementById('rt-mode').value };
+  if (type === 'game' || type === 'application') return { exe: document.getElementById('rt-exe').value.trim() };
+  return {};
+}
+
+const DEFAULT_ROUTINE_PRIORITY = { time: 60, weekly: 50, monthly: 45, interval: 30, game: 90, application: 100 };
+
+function openRoutineModal(routine) {
+  rtEditingId = routine ? routine.id : null;
+  document.getElementById('rt-playlist-id').value = plEditingId;
+  document.getElementById('rt-type').value = routine ? routine.type : 'time';
+  document.getElementById('rt-priority').value = routine ? routine.priority : DEFAULT_ROUTINE_PRIORITY.time;
+  document.getElementById('rt-error-msg').style.display = 'none';
+  renderRoutineConfigFields(routine ? routine.type : 'time', routine ? routine.config : {});
+  document.getElementById('modal-routine-edit').classList.add('open');
+}
+
+document.getElementById('rt-type')?.addEventListener('change', e => {
+  renderRoutineConfigFields(e.target.value, {});
+  document.getElementById('rt-priority').value = DEFAULT_ROUTINE_PRIORITY[e.target.value] || 50;
+});
+
+document.getElementById('btn-rt-save')?.addEventListener('click', async () => {
+  const type = document.getElementById('rt-type').value;
+  const payload = {
+    id: rtEditingId || undefined,
+    playlistId: document.getElementById('rt-playlist-id').value,
+    type,
+    enabled: true,
+    priority: +document.getElementById('rt-priority').value,
+    config: readRoutineConfigFromFields(type),
+  };
+  const result = await ipc('save-routine', payload);
+  const errEl = document.getElementById('rt-error-msg');
+  if (!result.ok) { errEl.textContent = result.msg; errEl.style.display = 'block'; return; }
+  const idx = routines.findIndex(r => r.id === result.routine.id);
+  if (idx !== -1) routines[idx] = result.routine; else routines.push(result.routine);
+  renderPlRoutinesList();
+  renderPlaylistsGrid();
+  closeModal('modal-routine-edit');
+});
+
+// ---- Picker rápido "Adicionar à Playlist" (a partir do modal de detalhes do Workshop) ----
+function openAddToPlaylistPicker(item) {
+  const libraryMatch = library.find(w => w.workshopId && String(w.workshopId) === String(item.workshopId));
+  const list = document.getElementById('atp-list');
+  if (!libraryMatch) {
+    list.innerHTML = '<p style="color:var(--text2);font-size:12px;padding:8px 0">Baixe/aplique este wallpaper primeiro — ele precisa estar na sua Biblioteca pra entrar numa playlist.</p>';
+  } else if (playlists.length === 0) {
+    list.innerHTML = '<p style="color:var(--text2);font-size:12px;padding:8px 0">Você ainda não tem nenhuma playlist. Crie uma na aba Playlists.</p>';
+  } else {
+    list.innerHTML = playlists.map(p => {
+      const already = p.wallpaperIds.includes(libraryMatch.id);
+      return `<div class="time-rule-row pl-routine-row" data-id="${p.id}">
+        <span class="tr-name" style="flex:1">${p.icon} ${p.name}</span>
+        <button class="btn btn-secondary btn-xs atp-add-btn" ${already ? 'disabled' : ''}>${already ? 'Já incluída' : '+ Adicionar'}</button>
+      </div>`;
+    }).join('');
+    list.querySelectorAll('.atp-add-btn:not([disabled])').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const row = btn.closest('[data-id]');
+        const p = playlists.find(pl => pl.id === row.dataset.id);
+        if (!p) return;
+        p.wallpaperIds = p.wallpaperIds.concat(libraryMatch.id);
+        await ipc('save-playlist', p);
+        closeModal('modal-add-to-playlist');
+        renderPlaylistsGrid();
+      });
+    });
+  }
+  document.getElementById('modal-add-to-playlist').classList.add('open');
+}
+
+function updateHeroSection(item) {
+   const heroTitle = document.querySelector('.hero-title');
+   const heroMeta = document.querySelector('.hero-meta');
+   const heroDesc = document.querySelector('.hero-desc');
+   const heroImg = document.querySelector('.hero-image');
+   
+   if (heroTitle) heroTitle.textContent = item.title;
+   if (heroMeta) heroMeta.innerHTML = `${WA_TYPE_LABELS[item.waType] || 'Desconhecido'} &bull; ${formatSubscribers(item.subscribers)} inscritos`;
+   let desc = item.description || '';
+   
+   if (item.workshopId === '1289832516') {
+     desc = 'Uma belíssima obra de arte animada que traz paz e elegância para sua área de trabalho. Criação original por WLOP.';
+   } else {
+     // Remove tags BBCode tipo [b], [u], [url] da descrição original da Steam
+     desc = desc.replace(/\[\/?.*?\]/g, '').replace(/https?:\/\/[^\s]+/g, '').trim();
+     desc = desc.substring(0, 150) + (desc.length > 150 ? '...' : '');
+   }
+   
+   if (heroDesc) heroDesc.textContent = desc;
+   if (heroImg) heroImg.src = item.preview || '';
+   
+   const btn = document.querySelector('.hero-btn');
+   if (btn) {
+      btn.onclick = () => {
+       showWallpaperModal(item);
+      };
+   }
+}
+
 // ---- Init ----
 async function init() {
   try {
-    [library, current, playlistConfig, settings, allDisplays, displayWallpapers, timeRules] = await Promise.all([
+    [library, current, settings, allDisplays, displayWallpapers, favorites, playlists, routines] = await Promise.all([
       ipc('get-library'),
       ipc('get-current'),
-      ipc('get-playlist-config'),
       ipc('get-settings'),
       ipc('get-displays'),
       ipc('get-display-wallpapers'),
-      ipc('get-time-rules'),
+      ipc('get-favorites'),
+      ipc('get-playlists'),
+      ipc('get-routines'),
     ]);
-
-    // Playlist UI
-    plEnabled.checked = playlistConfig.enabled || false;
-    plInterval.value  = playlistConfig.interval || 30;
-    plIntervalVal.textContent = formatInterval(playlistConfig.interval || 30);
-    plShuffle.checked = playlistConfig.shuffle || false;
 
     // Settings UI
     setVolume.value = settings.volume ?? 50;
     setVolumeV.textContent = (settings.volume ?? 50) + '%';
     setPauseFs.checked = settings.pauseOnFullscreen ?? true;
     setMuteFs.checked  = settings.muteOnFullscreen  ?? false;
-    setStartup.checked = settings.startWithWindows  ?? false;
+    setStartup.checked = settings.startWithWindows  ?? true;
     setAudioRe.checked = settings.audioReactive     ?? false;
     appRules = settings.appRules || [];
 
@@ -1289,8 +2343,7 @@ async function init() {
     updateNowPlaying();
     renderMonitors();
     renderAppRules();
-    renderTimeRules();
-    loadWorkshopItems(1);
+    renderPlaylistsGrid();
     checkFirstRunNotice();
   } catch (e) {
     alert('Erro crítico no init: ' + e.stack);
@@ -1320,7 +2373,8 @@ async function checkFirstRunNotice() {
 
   btn.addEventListener('click', async () => {
     closeModal('modal-first-run-notice');
-    await ipc('mark-we-scene-notice-shown');
+    const optOut = document.getElementById('chk-first-run-notice-optout')?.checked;
+    if (optOut) await ipc('set-we-scene-notice-optout');
   }, { once: true });
 }
 
@@ -1348,4 +2402,26 @@ document.getElementById('btn-sync-steam')?.addEventListener('click', async () =>
   }
 });
 
-init();
+// Tela de carregamento cheia na abertura do app — fica visível até a
+// biblioteca local (rápida) e a vitrine da Steam (mais lenta, depende de
+// rede) estarem prontas, em vez de mostrar a UI "pronta" com pedaços ainda
+// carregando por baixo. Nunca trava pra sempre: se a Steam demorar ou
+// estiver fora do ar, libera a UI mesmo assim depois de um tempo razoável —
+// as seções específicas continuam com seu próprio aviso local até resolverem.
+async function boot() {
+  const overlay = document.getElementById('app-loading-overlay');
+  const message = document.getElementById('app-loading-message');
+  const hideOverlay = () => { if (overlay) overlay.classList.add('hidden'); };
+  const safetyTimeout = setTimeout(hideOverlay, 10000);
+
+  await init();
+  if (message) message.textContent = 'Carregando vitrine da Steam...';
+  try {
+    await loadDiscoverTab();
+  } catch (_) { /* loadDiscoverTab já trata seus próprios erros internamente */ }
+
+  clearTimeout(safetyTimeout);
+  hideOverlay();
+}
+
+boot();
