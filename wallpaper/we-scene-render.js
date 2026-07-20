@@ -1,12 +1,13 @@
 // Renders an unpacked Wallpaper Engine scene folder (background image +
-// live text objects + particle effects) using plain DOM/CSS/Canvas instead
-// of their proprietary engine. Custom shader effects and 3D models are still
-// silently skipped — those would need real GPU shader emulation, not
-// attempted here.
+// live text objects + particle effects + real WebGL post-processing
+// effects) instead of their proprietary engine. 3D model/PBR shaders
+// (skinning, morph targets) are still silently skipped — those would need
+// a much bigger vertical (real bone/morph animation), not attempted here.
 const fs   = require('fs');
 const path = require('path');
 const { ipcRenderer } = require('electron');
 const { decodeTexToPng, decodePuppetMdl } = require('../src/we-scene.js');
+const { compileGenericEffectSource, coerceUniformValue } = require('./we-shader-compiler.js');
 
 // Formatos/recursos que a cena usa mas ainda não sabemos desenhar direito
 // hoje falham em silêncio (nada no console de uma janela de wallpaper é
@@ -6833,7 +6834,112 @@ class WeScene {
         });
       };
     }
+
+    // Fallback genérico: qualquer efeito que não bateu com nenhuma das
+    // checagens acima (os efeitos oficiais já portados à mão) é
+    // provavelmente um shader PRÓPRIO de um item da Workshop — tenta
+    // compilar o .frag/.vert real dele na hora (ver we-shader-compiler.js)
+    // em vez de simplesmente ignorar. Nunca substitui o caminho hardcoded
+    // acima, só cobre o que sobrou (zero risco de regressão nos ~48 já
+    // validados).
+    const KNOWN_EFFECT_NAMES = [
+      'foliagesway', 'chromaticaberration', 'vhs', 'motionblur', 'filmgrain', 'edgedetection',
+      ...STATIC_EFFECTS.map(([label]) => label),
+      ...ANIMATED_EFFECTS.map(([label]) => label),
+    ];
+    const weAssetsRootForGeneric = getWEAssetsRoot();
+    for (const eff of visibleEffects) {
+      if (!eff.file) continue;
+      if (KNOWN_EFFECT_NAMES.some((name) => eff.file.endsWith(`${name}/effect.json`))) continue;
+      const pass = (eff.passes || [])[0];
+      if (!pass) continue;
+      img.onload = () => {
+        let source;
+        try {
+          source = compileGenericEffectSource(this.sceneDir, weAssetsRootForGeneric, eff.file, pass.combos || {});
+        } catch (err) {
+          this._reportIssue(`efeito custom "${eff.file}" em "${obj.name}" falhou: ${err.message}`);
+          return;
+        }
+        if (!source) return; // sem shader em lugar nenhum (nem cache da cena, nem instalação real) — nada a fazer
+        this._applyGenericShaderEffect(img, {
+          ...source,
+          textures: pass.textures || [],
+          constantShaderValues: pass.constantshadervalues || {},
+          objName: obj.name,
+        }, w, h).catch((err) => {
+          this._reportIssue(`efeito custom "${eff.file}" em "${obj.name}" falhou: ${err.message}`);
+        });
+      };
+    }
     return true;
+  }
+
+  // Aplica um efeito custom compilado genericamente (ver
+  // we-shader-compiler.js) — reaproveita _setupSimplePass (mesma base usada
+  // por TODOS os ~48 efeitos hardcoded) pra canvas/programa/textura-base, só
+  // muda a origem do GLSL (lido+resolvido na hora em vez de escrito à mão) e
+  // o bind de uniforms/texturas extras, que aqui é genérico em vez de
+  // hardcoded por efeito.
+  async _applyGenericShaderEffect(img, config, w, h) {
+    const { canvas, gl, program } = this._setupSimplePass(img, config.vertSrc, config.fragSrc, w, h, false);
+
+    // Texturas extras (g_Texture1, g_Texture2...) — o índice vem do próprio
+    // nome do uniform (convenção real da WE), não da ordem de declaração,
+    // pra casar direto com pass.textures[N] sem ambiguidade.
+    for (const def of config.uniformDefs) {
+      if (def.glslType !== 'sampler2D') continue;
+      const m = /^g_Texture(\d+)$/.exec(def.name);
+      if (!m) continue;
+      const texUnit = Number(m[1]);
+      if (texUnit === 0) continue; // g_Texture0 já é a própria imagem do objeto, feito em _setupSimplePass
+      const texId = config.textures[texUnit];
+      let texImg = null;
+      try {
+        if (texId) texImg = await this._loadSceneTexAsImage(texId);
+        else if (typeof def.annotation.default === 'string') texImg = await this._loadStockTexAsImage(def.annotation.default);
+      } catch (err) {
+        this._reportIssue(`efeito custom "${config.shaderName}": textura "${def.name}" não carregou (${err.message}), usando branco sólido`);
+      }
+      gl.activeTexture(gl.TEXTURE0 + texUnit);
+      gl.bindTexture(gl.TEXTURE_2D, texImg ? FoliageSwayEffect.uploadTexture(gl, texImg) : this._createSolidWhiteTexture(gl));
+      const loc = gl.getUniformLocation(program, def.name);
+      if (loc) gl.uniform1i(loc, texUnit);
+    }
+
+    // Parâmetros numéricos/vetoriais reais (constantshadervalues do
+    // objeto), coeridos do mesmo jeito que csvNum/csvVec já fazem pros
+    // efeitos hardcoded (ver coerceUniformValue em we-shader-compiler.js).
+    for (const def of config.uniformDefs) {
+      if (def.glslType === 'sampler2D' || !def.annotation.material) continue;
+      const raw = config.constantShaderValues[def.annotation.material];
+      const value = coerceUniformValue(raw, def.glslType, def.annotation.default);
+      if (value == null) continue;
+      const loc = gl.getUniformLocation(program, def.name);
+      if (!loc) continue;
+      if (def.glslType === 'float') gl.uniform1f(loc, value);
+      else if (def.glslType === 'vec2') gl.uniform2fv(loc, value);
+      else if (def.glslType === 'vec3') gl.uniform3fv(loc, value);
+      else if (def.glslType === 'vec4') gl.uniform4fv(loc, value);
+    }
+
+    const resLoc = gl.getUniformLocation(program, 'g_Texture0Resolution');
+    if (resLoc) gl.uniform4f(resLoc, 1 / w, 1 / h, w, h);
+
+    if (img.parentNode) img.parentNode.replaceChild(canvas, img);
+    const timeLoc = gl.getUniformLocation(program, 'g_Time');
+    const rafHolder = { id: null };
+    this._foliageRafHolders.push(rafHolder);
+    const startTime = performance.now();
+    const loop = () => {
+      if (timeLoc) gl.uniform1f(timeLoc, (performance.now() - startTime) / 1000);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      rafHolder.id = requestAnimationFrame(loop);
+    };
+    loop();
+    this._reportIssue(`efeito custom "${config.shaderName}" compilado e aplicado em "${config.objName}" (compilador genérico)`);
   }
 
   // Substitui a <img> plana por um canvas WebGL rodando o shader real de
