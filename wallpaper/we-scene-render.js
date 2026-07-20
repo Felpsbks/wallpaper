@@ -6688,81 +6688,58 @@ class WeScene {
     }
     this._wireObjectInteractivity(obj, tintWrap || img, w, h, left, top);
 
+    // Efeitos aplicam em CADEIA — a saída de um vira a entrada do próximo.
+    // Um objeto pode empilhar vários TIPOS diferentes ao mesmo tempo
+    // (confirmado real 2026-07-20: um wallpaper da Hatsune Miku tem 6 tipos
+    // no mesmo objeto — bloom custom + waterwaves + pulse + shake +
+    // foliagesway + shimmer). Antes, cada efeito fazia `img.onload = ...`
+    // de forma independente — como só um onload existe por vez, só o
+    // ÚLTIMO atribuído de fato rodava; os outros eram descartados em
+    // silêncio (bug real, não introduzido pelo compilador genérico, mas
+    // agravado por ele já que o fallback sempre roda por último). Agora
+    // monta uma lista ordenada pela posição real no scene.json e executa
+    // um por um, cada um recebendo o canvas de saída do anterior como
+    // entrada — `_setupSimplePass` já aceita qualquer TexImageSource
+    // (confirmado: usa texImage2D), e o `replaceChild` que cada _apply*
+    // já faz sozinho encadeia certo sem precisar mudar nenhum dos ~48
+    // métodos (o canvas do estágio anterior já está no DOM, vira âncora
+    // válida pro replaceChild do próximo).
+    //
+    // Limitação aceita e documentada (ver memoria/compilador-shaders-
+    // genericos.md): como cada efeito faz upload da textura de entrada uma
+    // vez só (não a cada frame), só o ÚLTIMO estágio da cadeia anima de
+    // verdade em tempo real — os anteriores contribuem com o que já
+    // tinham renderizado até serem sucedidos. Também não cancela
+    // automaticamente o loop de RAF dos estágios intermediários: como
+    // `_foliageRafHolders` é um array plano compartilhado pela CENA
+    // INTEIRA (não por objeto), tentar identificar "quais holders são
+    // deste estágio" via posição/timing não é seguro quando objetos
+    // diferentes carregam imagens em paralelo (poderia cancelar a
+    // animação de um objeto errado) — prefere manter alguns loops extras
+    // rodando (custo pequeno, e limitado ao número de efeitos empilhados,
+    // não cresce sem limite) a arriscar um bug cruzado entre objetos.
+    const effectStages = [];
+    const addStage = (label, config, methodName) => {
+      if (config.unsupported) { this._reportIssue(`objeto "${obj.name}" usa ${label} em modo não suportado: ${config.unsupported}`); return; }
+      const sortIndex = visibleEffects.findIndex((eff) => eff.file && eff.file.endsWith(`${label}/effect.json`));
+      effectStages.push({ label, config, methodName, sortIndex: sortIndex === -1 ? Infinity : sortIndex });
+    };
+
     const foliagePasses = extractFoliageSwayPasses(visibleEffects);
     if (foliagePasses.length) {
-      img.onload = () => {
-        this._applyFoliageSway(img, foliagePasses, w, h).catch((err) => {
-          this._reportIssue(`efeito foliagesway em "${obj.name}" falhou, mantendo imagem parada: ${err.message}`);
-        });
-      };
+      const sortIndex = visibleEffects.findIndex((eff) => eff.file && eff.file.endsWith('foliagesway/effect.json'));
+      effectStages.push({ label: 'foliagesway', config: foliagePasses, methodName: '_applyFoliageSway', sortIndex: sortIndex === -1 ? Infinity : sortIndex });
     }
-
     const chromaticConfig = extractChromaticAberrationConfig(visibleEffects);
-    if (chromaticConfig) {
-      img.onload = () => {
-        try {
-          this._applyChromaticAberration(img, chromaticConfig, w, h);
-        } catch (err) {
-          this._reportIssue(`efeito chromatic aberration em "${obj.name}" falhou, mantendo imagem original: ${err.message}`);
-        }
-      };
-    }
-
+    if (chromaticConfig) addStage('chromaticaberration', chromaticConfig, '_applyChromaticAberration');
     const vhsConfig = extractVHSConfig(visibleEffects);
-    if (vhsConfig) {
-      if (vhsConfig.unsupported) {
-        this._reportIssue(`objeto "${obj.name}" usa VHS em modo não suportado: ${vhsConfig.unsupported}`);
-      } else {
-        img.onload = () => {
-          this._applyVHS(img, vhsConfig, w, h).catch((err) => {
-            this._reportIssue(`efeito VHS em "${obj.name}" falhou, mantendo imagem parada: ${err.message}`);
-          });
-        };
-      }
-    }
-
+    if (vhsConfig) addStage('vhs', vhsConfig, '_applyVHS');
     const motionBlurConfig = extractMotionBlurConfig(visibleEffects);
-    if (motionBlurConfig) {
-      if (motionBlurConfig.unsupported) {
-        this._reportIssue(`objeto "${obj.name}" usa motion blur em modo não suportado: ${motionBlurConfig.unsupported}`);
-      } else {
-        img.onload = () => {
-          try {
-            this._applyMotionBlur(img, motionBlurConfig, w, h);
-          } catch (err) {
-            this._reportIssue(`efeito motion blur em "${obj.name}" falhou, mantendo imagem parada: ${err.message}`);
-          }
-        };
-      }
-    }
-
+    if (motionBlurConfig) addStage('motionblur', motionBlurConfig, '_applyMotionBlur');
     const filmGrainConfig = extractFilmGrainConfig(visibleEffects);
-    if (filmGrainConfig) {
-      if (filmGrainConfig.unsupported) {
-        this._reportIssue(`objeto "${obj.name}" usa film grain em modo não suportado: ${filmGrainConfig.unsupported}`);
-      } else {
-        img.onload = () => {
-          this._applyFilmGrain(img, filmGrainConfig, w, h).catch((err) => {
-            this._reportIssue(`efeito film grain em "${obj.name}" falhou, mantendo imagem parada: ${err.message}`);
-          });
-        };
-      }
-    }
-
+    if (filmGrainConfig) addStage('filmgrain', filmGrainConfig, '_applyFilmGrain');
     const edgeDetectionConfig = extractEdgeDetectionConfig(visibleEffects);
-    if (edgeDetectionConfig) {
-      if (edgeDetectionConfig.unsupported) {
-        this._reportIssue(`objeto "${obj.name}" usa edge detection em modo não suportado: ${edgeDetectionConfig.unsupported}`);
-      } else {
-        img.onload = () => {
-          try {
-            this._applyEdgeDetection(img, edgeDetectionConfig, w, h);
-          } catch (err) {
-            this._reportIssue(`efeito edge detection em "${obj.name}" falhou, mantendo imagem original: ${err.message}`);
-          }
-        };
-      }
-    }
+    if (edgeDetectionConfig) addStage('edgedetection', edgeDetectionConfig, '_applyEdgeDetection');
 
     // Leva de efeitos simples (estáticos: aplicam uma vez / animados: têm seu
     // próprio RAF loop dentro do método _apply*) — todos seguem o mesmo
@@ -6817,22 +6794,12 @@ class WeScene {
       if (!methodName) continue;
       const config = extractFn(visibleEffects);
       if (!config) continue;
-      if (config.unsupported) { this._reportIssue(`objeto "${obj.name}" usa ${label} em modo não suportado: ${config.unsupported}`); continue; }
-      img.onload = () => {
-        try { this[methodName](img, config, w, h); } catch (err) {
-          this._reportIssue(`efeito ${label} em "${obj.name}" falhou, mantendo imagem original: ${err.message}`);
-        }
-      };
+      addStage(label, config, methodName);
     }
     for (const [label, extractFn, methodName] of ANIMATED_EFFECTS) {
       const config = extractFn(visibleEffects);
       if (!config) continue;
-      if (config.unsupported) { this._reportIssue(`objeto "${obj.name}" usa ${label} em modo não suportado: ${config.unsupported}`); continue; }
-      img.onload = () => {
-        this[methodName](img, config, w, h).catch((err) => {
-          this._reportIssue(`efeito ${label} em "${obj.name}" falhou, mantendo imagem parada: ${err.message}`);
-        });
-      };
+      addStage(label, config, methodName);
     }
 
     // Fallback genérico: qualquer efeito que não bateu com nenhuma das
@@ -6853,25 +6820,44 @@ class WeScene {
       if (KNOWN_EFFECT_NAMES.some((name) => eff.file.endsWith(`${name}/effect.json`))) continue;
       const pass = (eff.passes || [])[0];
       if (!pass) continue;
-      img.onload = () => {
-        let source;
-        try {
-          source = compileGenericEffectSource(this.sceneDir, weAssetsRootForGeneric, eff.file, pass.combos || {});
-        } catch (err) {
-          this._reportIssue(`efeito custom "${eff.file}" em "${obj.name}" falhou: ${err.message}`);
-          return;
-        }
-        if (!source) return; // sem shader em lugar nenhum (nem cache da cena, nem instalação real) — nada a fazer
-        this._applyGenericShaderEffect(img, {
-          ...source,
-          textures: pass.textures || [],
-          constantShaderValues: pass.constantshadervalues || {},
-          objName: obj.name,
-        }, w, h).catch((err) => {
-          this._reportIssue(`efeito custom "${eff.file}" em "${obj.name}" falhou: ${err.message}`);
-        });
-      };
+      effectStages.push({
+        label: `custom:${eff.file}`,
+        config: { eff, pass },
+        methodName: '__generic__',
+        sortIndex: visibleEffects.indexOf(eff),
+      });
     }
+
+    if (!effectStages.length) return true;
+    effectStages.sort((a, b) => a.sortIndex - b.sortIndex);
+
+    // Um único onload roda a cadeia inteira, na ordem montada acima —
+    // substitui os antigos N blocos independentes de `img.onload = ...`
+    // que se atropelavam (ver comentário grande logo acima).
+    img.onload = async () => {
+      let current = img;
+      for (const stage of effectStages) {
+        try {
+          let result;
+          if (stage.methodName === '__generic__') {
+            const { eff, pass } = stage.config;
+            const source = compileGenericEffectSource(this.sceneDir, weAssetsRootForGeneric, eff.file, pass.combos || {});
+            if (!source) continue; // sem shader em lugar nenhum (nem cache da cena, nem instalação real) — mantém o estágio anterior
+            result = await this._applyGenericShaderEffect(current, {
+              ...source,
+              textures: pass.textures || [],
+              constantShaderValues: pass.constantshadervalues || {},
+              objName: obj.name,
+            }, w, h);
+          } else {
+            result = await Promise.resolve(this[stage.methodName](current, stage.config, w, h));
+          }
+          if (result) current = result;
+        } catch (err) {
+          this._reportIssue(`efeito ${stage.label} em "${obj.name}" falhou, mantendo estágio anterior: ${err.message}`);
+        }
+      }
+    };
     return true;
   }
 
@@ -6940,6 +6926,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`efeito custom "${config.shaderName}" compilado e aplicado em "${config.objName}" (compilador genérico)`);
+    return canvas;
   }
 
   // Substitui a <img> plana por um canvas WebGL rodando o shader real de
@@ -6994,6 +6981,7 @@ class WeScene {
 
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     this._reportIssue(`chromatic aberration aplicado em imagem (modo ${config.mode}, variação ${config.variation})`);
+    return canvas;
   }
 
   // Substitui a <img> plana por um canvas WebGL rodando o shader real de VHS
@@ -7080,6 +7068,7 @@ class WeScene {
     loop();
 
     this._reportIssue(`VHS aplicado em imagem (glitch/distorção animados)`);
+    return canvas;
   }
 
   // Motion blur real: acumulação frame-a-frame via ping-pong de 2 render
@@ -7185,6 +7174,7 @@ class WeScene {
     loop();
 
     this._reportIssue(`motion blur aplicado em imagem (acumulação real, rate=${config.rate}) — sem efeito visível em conteúdo estático até existir uma fonte que mude quadro a quadro (vídeo/partícula) usando esse mesmo mecanismo`);
+    return canvas;
   }
 
   // Substitui a <img> plana por um canvas WebGL rodando o shader real de
@@ -7265,6 +7255,7 @@ class WeScene {
     loop();
 
     this._reportIssue(`film grain aplicado em imagem (ruído animado)`);
+    return canvas;
   }
 
   // Substitui a <img> plana por um canvas WebGL rodando o shader real de
@@ -7319,6 +7310,7 @@ class WeScene {
 
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     this._reportIssue(`edge detection aplicado em imagem`);
+    return canvas;
   }
 
   // Helper compartilhado pelos efeitos simples de passe único abaixo — monta
@@ -7442,6 +7434,7 @@ class WeScene {
     } else {
       this._reportIssue(`opacity aplicado em imagem (alpha=${config.alpha})`);
     }
+    return canvas;
   }
 
   _applySkew(img, config, w, h) {
@@ -7456,6 +7449,7 @@ class WeScene {
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     if (config.repeat && !usedRepeat) this._reportIssue(`skew: imagem não é potência-de-2, repetição de borda desativada (WebGL1 exige POT pra REPEAT)`);
     this._reportIssue(`skew aplicado em imagem`);
+    return canvas;
   }
 
   _applyTransform(img, config, w, h) {
@@ -7469,6 +7463,7 @@ class WeScene {
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     if (config.repeat && !usedRepeat) this._reportIssue(`transform: imagem não é potência-de-2, repetição de borda desativada (WebGL1 exige POT pra REPEAT)`);
     this._reportIssue(`transform aplicado em imagem`);
+    return canvas;
   }
 
   async _applyScroll(img, config, w, h) {
@@ -7491,6 +7486,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`scroll aplicado em imagem`);
+    return canvas;
   }
 
   async _applySpin(img, config, w, h) {
@@ -7518,6 +7514,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`spin aplicado em imagem`);
+    return canvas;
   }
 
   async _applySwing(img, config, w, h) {
@@ -7545,6 +7542,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`swing aplicado em imagem`);
+    return canvas;
   }
 
   async _applyShake(img, config, w, h) {
@@ -7585,6 +7583,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`shake aplicado em imagem`);
+    return canvas;
   }
 
   async _applyPulse(img, config, w, h) {
@@ -7630,6 +7629,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`pulse aplicado em imagem`);
+    return canvas;
   }
 
   _applyFisheye(img, config, w, h) {
@@ -7642,6 +7642,7 @@ class WeScene {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     this._reportIssue(`fisheye aplicado em imagem`);
+    return canvas;
   }
 
   _applyPerspective(img, config, w, h) {
@@ -7656,6 +7657,7 @@ class WeScene {
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     if (config.repeat && !usedRepeat) this._reportIssue(`perspective: imagem não é potência-de-2, repetição de borda desativada (WebGL1 exige POT pra REPEAT)`);
     this._reportIssue(`perspective aplicado em imagem`);
+    return canvas;
   }
 
   async _applyTwirl(img, config, w, h) {
@@ -7684,6 +7686,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`twirl aplicado em imagem`);
+    return canvas;
   }
 
   // Suporta alpha/color estáticos (de sempre) OU script real rodando de
@@ -7731,6 +7734,7 @@ class WeScene {
     } else {
       this._reportIssue(`tint aplicado em imagem`);
     }
+    return canvas;
   }
 
   _applyColorKey(img, config, w, h) {
@@ -7744,6 +7748,7 @@ class WeScene {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     this._reportIssue(`colorkey aplicado em imagem`);
+    return canvas;
   }
 
   async _applyBlend(img, config, w, h) {
@@ -7760,6 +7765,7 @@ class WeScene {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     this._reportIssue(`blend aplicado em imagem`);
+    return canvas;
   }
 
   async _applyBlendGradient(img, config, w, h) {
@@ -7800,6 +7806,7 @@ class WeScene {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     this._reportIssue(`blendgradient aplicado em imagem`);
+    return canvas;
   }
 
   // Pipeline real de 4 passes (ver comentário grande em extractLocalContrastConfig)
@@ -7894,6 +7901,7 @@ class WeScene {
 
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     this._reportIssue(`localcontrast aplicado em imagem (pipeline real de 4 passes: downsample 1/4 + blur gaussiano separável + unsharp mask)`);
+    return canvas;
   }
 
   // Pipeline real de 5 passes (ver comentário grande em extractShineConfig)
@@ -8028,6 +8036,7 @@ class WeScene {
     const rafLoop = () => { render(); rafHolder.id = requestAnimationFrame(rafLoop); };
     rafLoop();
     this._reportIssue(`shine aplicado em imagem (pipeline real de 5 passes: corte de brilho + raios direcionais + blur gaussiano + combine aditivo)`);
+    return canvas;
   }
 
   async _applyShimmer(img, config, w, h) {
@@ -8061,6 +8070,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`shimmer aplicado em imagem`);
+    return canvas;
   }
 
   _applyReflection(img, config, w, h) {
@@ -8073,6 +8083,7 @@ class WeScene {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     this._reportIssue(`reflection aplicado em imagem`);
+    return canvas;
   }
 
   async _applyRefraction(img, config, w, h) {
@@ -8089,6 +8100,7 @@ class WeScene {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     this._reportIssue(`refraction aplicado em imagem`);
+    return canvas;
   }
 
   async _applyNitro(img, config, w, h) {
@@ -8119,6 +8131,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`nitro aplicado em imagem`);
+    return canvas;
   }
 
   async _applyIris(img, config, w, h) {
@@ -8142,6 +8155,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`iris aplicado em imagem (jitter procedural, sem globo ocular real)`);
+    return canvas;
   }
 
   async _applyGlitter(img, config, w, h) {
@@ -8235,6 +8249,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`glitter aplicado em imagem (pipeline real de 2 passes: ruído perlin tileável + combine)`);
+    return canvas;
   }
 
   // Pipeline de 4 passes idêntico ao _applyLocalContrast (reaproveita os
@@ -8323,6 +8338,7 @@ class WeScene {
 
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     this._reportIssue(`blur aplicado em imagem (pipeline real de 4 passes: downsample 1/4 + blur gaussiano separável)`);
+    return canvas;
   }
 
   // 2 passes em resolução cheia (sem downsample) — mais caro, mais fiel.
@@ -8389,6 +8405,7 @@ class WeScene {
 
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     this._reportIssue(`blurprecise aplicado em imagem (gaussiano separável em resolução cheia, 2 passes)`);
+    return canvas;
   }
 
   // Pipeline de 5 passes igual ao _applyShine, mas com o passe "cast"
@@ -8528,6 +8545,7 @@ class WeScene {
       render();
     }
     this._reportIssue(`godrays aplicado em imagem (pipeline real de 5 passes: corte de brilho + raio ${config.caster === 0 ? 'radial' : 'direcional'} + blur gaussiano + combine aditivo)`);
+    return canvas;
   }
 
   async _applyCaustics(img, config, w, h) {
@@ -8573,6 +8591,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`watercaustics aplicado em imagem`);
+    return canvas;
   }
 
   async _applyWaterFlow(img, config, w, h) {
@@ -8605,6 +8624,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`waterflow aplicado em imagem`);
+    return canvas;
   }
 
   async _applyWaterRipple(img, config, w, h) {
@@ -8640,9 +8660,10 @@ class WeScene {
     };
     loop();
     this._reportIssue(`waterripple aplicado em imagem`);
+    return canvas;
   }
 
-  _applyWaterWaves(img, config, w, h) {
+  async _applyWaterWaves(img, config, w, h) {
     const { canvas, gl, program } = this._setupSimplePass(img, buildWaterWavesVert({ dualWaves: config.dualWaves }), buildWaterWavesFragSource({ dualWaves: config.dualWaves }), w, h, false);
     gl.uniform1f(gl.getUniformLocation(program, 'g_Direction'), config.direction);
     gl.uniform1f(gl.getUniformLocation(program, 'g_Speed'), config.speed);
@@ -8670,6 +8691,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`waterwaves aplicado em imagem`);
+    return canvas;
   }
 
   async _applyClouds(img, config, w, h) {
@@ -8701,6 +8723,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`clouds aplicado em imagem`);
+    return canvas;
   }
 
   async _applyCloudMotion(img, config, w, h) {
@@ -8730,6 +8753,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`cloudmotion aplicado em imagem`);
+    return canvas;
   }
 
   async _applyFire(img, config, w, h) {
@@ -8768,6 +8792,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`fire aplicado em imagem`);
+    return canvas;
   }
 
   async _applyDepthParallax(img, config, w, h) {
@@ -8798,6 +8823,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`depthparallax aplicado em imagem (modo básico; occlusion mapping de QUALITY 1/2 não suportado)`);
+    return canvas;
   }
 
   async _applyXray(img, config, w, h) {
@@ -8836,6 +8862,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`xray aplicado em imagem (projeção da câmera 3D aproximada como identidade)`);
+    return canvas;
   }
 
   async _applyCursorRipple(img, config, w, h) {
@@ -8955,6 +8982,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`cursorripple aplicado em imagem (buffer de força persistente 512px, projeção da câmera 3D aproximada como identidade)`);
+    return canvas;
   }
 
   async _applyFluidSimulation(img, config, w, h) {
@@ -9225,6 +9253,7 @@ class WeScene {
     };
     loop();
     this._reportIssue(`fluidsimulation aplicado em imagem (solver real de fluidos, 15 passes/frame, buffers half-float ${simW}x${simH} + dye ${dyeW}x${dyeH}, projeção da câmera 3D aproximada como identidade)`);
+    return canvas;
   }
 
   _applyBlurRadial(img, config, w, h) {
@@ -9236,6 +9265,7 @@ class WeScene {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     this._reportIssue(`blurradial aplicado em imagem`);
+    return canvas;
   }
 
   // Desenha a malha do puppet (bind pose, sem física/IK — ver decodePuppetMdl)
@@ -9280,8 +9310,9 @@ class WeScene {
     const img = new Image();
     img.onload = () => {
       try {
-        this._drawPuppetMesh(gl, img, mesh, w, h);
-        this._reportIssue(`puppet "${obj.name}" (${model.puppet}) desenhado em pose de repouso, sem articulação/física — ${mesh.vertices.length} vértices, ${Math.round(mesh.indices.length / 3)} triângulos`);
+        const { usedRealUV } = this._drawPuppetMesh(gl, img, mesh, w, h);
+        const boneInfo = mesh.skeleton ? `, esqueleto com ${mesh.skeleton.bones.length} ossos decodificado (ainda sem animação — MDLA0003 não decodificado)` : ', sem esqueleto reconhecido';
+        this._reportIssue(`puppet "${obj.name}" (${model.puppet}) desenhado na pose de bind (${usedRealUV ? 'UV real do atlas' : 'UV aproximado por posição'})${boneInfo} — ${mesh.vertices.length} vértices, ${Math.round(mesh.indices.length / 3)} triângulos`);
       } catch (err) {
         this._reportIssue(`puppet "${obj.name}": falha ao desenhar malha: ${err.message}`);
       }
@@ -9317,6 +9348,43 @@ class WeScene {
     // "pra cima" (cabeça), y negativo é "pra baixo" (pés) — por isso a
     // malha aparecia cortada/pendurada do topo: a primeira versão assumia
     // x/y∈[0,tex] e jogava metade dos vértices pra fora da tela.
+    //
+    // A POSIÇÃO em si já está correta na pose de bind — confirmado ao vivo
+    // 2026-07-20 comparando o bbox de cada osso dominante (ossos pequenos
+    // tipo dedo formam clusters pequenos e localizados, ossos grandes tipo
+    // corpo/cabelo formam clusters grandes, exatamente como um personagem
+    // já montado deveria parecer) e testando aplicar a matriz de mundo do
+    // esqueleto por cima: a caixa delimitadora final ficava ~2x maior que
+    // o esperado — sinal claro de estar transformando duas vezes algo que
+    // já estava no espaço certo. Isso bate com a matemática padrão de
+    // skinning (`atual × inversa_da_bind`, que se reduz à identidade
+    // exatamente na pose de bind) — não precisa aplicar NENHUMA
+    // transformação de osso pra desenhar a pose de bind corretamente.
+    //
+    // O bug real que fazia o personagem aparecer espalhado era outro: o
+    // campo u/v REAL de cada vértice (decodePuppetMdl já extrai, mas até
+    // agora nunca era usado aqui) era descartado em favor de um UV
+    // fabricado a partir da própria posição x/y — um workaround válido só
+    // pra puppets com textura PRÓPRIA pequena por parte (confirmado real:
+    // 眉毛/眼睛/睫毛_puppet.mdl têm UV real concentrado numa fatia pequena
+    // tipo u∈[0.61,0.72], porque endereça um atlas compartilhado maior que
+    // esses arquivos não têm acesso — nesse caso o UV fabricado por
+    // posição continua sendo a escolha certa, mantida abaixo). Mas pra
+    // puppets com um atlas ÚNICO e grande como material (confirmado real:
+    // "miku bod testinhg" e "lituoliao_5_rw", ambos com UV real cobrindo
+    // quase [0,1] inteiro), o UV real É o mapeamento certo pro atlas que
+    // JÁ TEMOS como material — descartá-lo fazia cada triângulo amostrar o
+    // pedaço errado da textura, essa sim a causa real do "pedaços
+    // espalhados" (não geometria errada, mapeamento de textura errado).
+    // Critério pra escolher: se o UV real cobre a faixa quase inteira
+    // (span > 0.5 nos dois eixos), é o atlas que já temos — usa direto.
+    let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+    for (const v of mesh.vertices) {
+      if (v.u < uMin) uMin = v.u; if (v.u > uMax) uMax = v.u;
+      if (v.v < vMin) vMin = v.v; if (v.v > vMax) vMax = v.v;
+    }
+    const useRealUV = (uMax - uMin) > 0.5 && (vMax - vMin) > 0.5;
+
     const n = mesh.vertices.length;
     const positions = new Float32Array(n * 2);
     const uvs = new Float32Array(n * 2);
@@ -9324,12 +9392,17 @@ class WeScene {
       const v = mesh.vertices[i];
       positions[i * 2]     = v.x / (texPixelW / 2);
       positions[i * 2 + 1] = v.y / (texPixelH / 2);
-      // +0.5 recentraliza pro padrão UV [0,1]; sem inverter o eixo Y aqui
-      // porque o upload da textura (uploadTexture, UNPACK_FLIP_Y_WEBGL) já
-      // faz esse flip por conta própria — os dois juntos que dão a
-      // orientação certa.
-      uvs[i * 2]     = 0.5 + v.x / texPixelW;
-      uvs[i * 2 + 1] = 0.5 + v.y / texPixelH;
+      if (useRealUV) {
+        uvs[i * 2] = v.u;
+        uvs[i * 2 + 1] = v.v;
+      } else {
+        // +0.5 recentraliza pro padrão UV [0,1]; sem inverter o eixo Y aqui
+        // porque o upload da textura (uploadTexture, UNPACK_FLIP_Y_WEBGL) já
+        // faz esse flip por conta própria — os dois juntos que dão a
+        // orientação certa.
+        uvs[i * 2]     = 0.5 + v.x / texPixelW;
+        uvs[i * 2 + 1] = 0.5 + v.y / texPixelH;
+      }
     }
 
     const posBuf = gl.createBuffer();
@@ -9361,6 +9434,7 @@ class WeScene {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.drawElements(gl.TRIANGLES, mesh.indices.length, gl.UNSIGNED_SHORT, 0);
+    return { usedRealUV };
   }
 
   // Objeto "shape":"quad" sem image/text/particle — hoje o único conteúdo
@@ -9574,6 +9648,7 @@ class WeScene {
       rafHolder.id = requestAnimationFrame(loop);
     };
     loop();
+    return canvas;
   }
 
   _loadFont(fontRelPath) {

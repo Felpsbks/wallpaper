@@ -1504,11 +1504,22 @@ ipcMain.handle('apply-update', async () => {
     if (fs.existsSync(updateDir)) fs.rmSync(updateDir, { recursive: true, force: true });
     fs.mkdirSync(updateDir, { recursive: true });
 
-    const newAsarPath = path.join(updateDir, 'app.asar');
+    // NUNCA nomear o destino do download como "app.asar" (nem com esse
+    // literal em nenhum trecho do caminho) — o Electron faz patch global
+    // do módulo `fs` pra interceptar qualquer path contendo ".asar" e
+    // tentar interpretar como um pacote ASAR de verdade. Isso quebra
+    // `fs.createWriteStream`/`fs.statSync` num arquivo que ainda nem
+    // terminou de ser escrito (ainda não é um ASAR válido), lançando
+    // "Invalid package" — confirmado ao vivo 2026-07-20, travava o
+    // processo principal inteiro (crash visível, sem stack útil pro
+    // usuário). Baixa com um nome neutro; só vira literalmente "app.asar"
+    // no `copy` do .bat abaixo, que roda via cmd.exe — fora do Node do
+    // Electron, então esse patch nunca entra em ação ali.
+    const downloadTmpPath = path.join(updateDir, 'app-update.download');
     sendProgress({ status: 'downloading' });
-    await httpDownload(_pendingUpdateInfo.assetUrl, newAsarPath);
+    await httpDownload(_pendingUpdateInfo.assetUrl, downloadTmpPath);
 
-    const downloadedSize = fs.statSync(newAsarPath).size;
+    const downloadedSize = fs.statSync(downloadTmpPath).size;
     if (!downloadedSize || (_pendingUpdateInfo.assetSize && downloadedSize !== _pendingUpdateInfo.assetSize)) {
       throw new Error('Download incompleto ou corrompido.');
     }
@@ -1525,7 +1536,7 @@ ipcMain.handle('apply-update', async () => {
       '  timeout /t 1 /nobreak >nul',
       '  goto wait',
       ')',
-      `copy /Y "${newAsarPath}" "${targetAsarPath}" >nul`,
+      `copy /Y "${downloadTmpPath}" "${targetAsarPath}" >nul`,
       `start "" "${exePath}"`,
       'del "%~f0"',
     ].join('\r\n');

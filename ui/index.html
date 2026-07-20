@@ -32,7 +32,8 @@
       <!-- Coloque a imagem da logo na pasta 'ui' com o nome 'logo.png' -->
       <img src="logo21.png" alt="FYNIX Wallpaper Engine" class="logo-img" />
     </div>
-    
+    <div class="sidebar-version">v<span id="sidebar-version-text">--</span></div>
+
     <div class="nav-list">
       <div class="nav-item active" data-panel="discover">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
@@ -893,6 +894,20 @@
   </div>
 </div>
 
+<!-- Modal genérico de confirmação — substitui o confirm() nativo do Chromium
+     (que aparece feio, sem estilo nenhum, com "engine-wallpaper" como
+     título). Reaproveitado por qualquer ação que precise de "tem certeza?"
+     (ver window.showConfirm em app.js). -->
+<div class="modal-backdrop" id="modal-confirm">
+  <div class="modal" style="width:400px;">
+    <h3 id="modal-confirm-title">Confirmar</h3>
+    <p id="modal-confirm-message" style="font-size:13px;color:var(--text2);margin-bottom:20px;line-height:1.6"></p>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="btn-confirm-cancel">Cancelar</button>
+      <button class="btn btn-primary" id="btn-confirm-ok">OK</button>
+    </div>
+  </div>
+</div>
 
   <!-- Modal Premium de Detalhes do Wallpaper -->
   <div class="wallpaper-modal-overlay" id="wallpaper-modal-overlay">

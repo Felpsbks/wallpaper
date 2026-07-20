@@ -86,6 +86,22 @@ function resolveShaderName(sceneDir, weAssetsRoot, effectFile) {
 // fornecidas por nós. Mesma tradução mecânica já usada nos 48 efeitos
 // portados à mão (mul, texSample2D, CAST*, frac, saturate), só que aplicada
 // via #define em vez de reescrita manual do corpo do shader.
+//
+// GLSL/HLSL/HLSL_SM30/PLATFORM_ANDROID/DIRECTDRAW/SHADERVERSION/TEXnFORMAT/
+// FORMAT_* (achados ao vivo 2026-07-20, testando contra lightshafts real e
+// varrendo os 478 arquivos reais da instalação da WE atrás de todo
+// identificador usado em `#if`/`#elif` que nunca é um combo anotado — ver
+// memoria/compilador-shaders-genericos.md) são flags de ALVO DE COMPILAÇÃO
+// que a própria WE sempre define antes de compilar, nunca combos de
+// material — o compilador GLSL-ES do ANGLE dá erro de sintaxe (não trata
+// como 0 em silêncio) pra `#if IDENTIFICADOR_NUNCA_DEFINIDO`. Valores
+// escolhidos: sempre GLSL (nunca HLSL/DirectDraw), versão de shader alta o
+// bastante pra nunca cair em branch de compatibilidade antiga
+// (`#if SHADERVERSION < 62`), e todo TEXnFORMAT=0 com os FORMAT_* reais
+// todos != 0 e distintos entre si — reflete a realidade real do nosso
+// pipeline (decodeTexToPng sempre converte pra RGBA8888 comum antes de
+// subir a textura, nunca um formato comprimido/especial), então nenhuma das
+// comparações `TEXnFORMAT == FORMAT_XXX` deve bater.
 const MACRO_PRELUDE = `precision highp float;
 #define texSample2D texture2D
 #define texSample2DLod(tex, uv, lod) texture2D(tex, uv)
@@ -98,7 +114,53 @@ const MACRO_PRELUDE = `precision highp float;
 #define CAST4X4(x) mat4(x)
 #define CASTU(x) (x)
 #define mul(a, b) ((b) * (a))
+#define GLSL 1
+#define HLSL 0
+#define HLSL_SM30 0
+#define PLATFORM_ANDROID 0
+#define DIRECTDRAW 0
+#define SHADERVERSION 9999
+#define TEX0FORMAT 0
+#define TEX1FORMAT 0
+#define TEX2FORMAT 0
+#define TEX3FORMAT 0
+#define TEX4FORMAT 0
+#define FORMAT_RGBA8888 1
+#define FORMAT_RGB888 2
+#define FORMAT_RGB565 3
+#define FORMAT_R8 4
+#define FORMAT_RG88 5
+#define FORMAT_R16F 6
+#define FORMAT_RG1616F 7
+#define FORMAT_DXT1 8
+#define FORMAT_DXT3 9
+#define FORMAT_DXT5 10
+#define FORMAT_ETC1_RGB8 11
+#define FORMAT_ETC2_RGBA8 12
+#define FORMAT_BC7 13
+mat3 inverse(mat3 m) {
+	float a00 = m[0][0], a01 = m[0][1], a02 = m[0][2];
+	float a10 = m[1][0], a11 = m[1][1], a12 = m[1][2];
+	float a20 = m[2][0], a21 = m[2][1], a22 = m[2][2];
+	float b01 = a22 * a11 - a12 * a21;
+	float b11 = -a22 * a10 + a12 * a20;
+	float b21 = a21 * a10 - a11 * a20;
+	float det = a00 * b01 + a01 * b11 + a02 * b21;
+	return mat3(b01, (-a22 * a01 + a02 * a21), (a12 * a01 - a02 * a11),
+			  b11, (a22 * a00 - a02 * a20), (-a12 * a00 + a02 * a10),
+			  b21, (-a21 * a00 + a01 * a20), (a11 * a00 - a01 * a10)) / det;
+}
 `;
+// mat3 inverse() acima: GLSL ES 1.00 (WebGL1, o único alvo deste projeto)
+// não tem "inverse()" nativo — só chegou como builtin no GLSL ES 3.00
+// (WebGL2). Shaders reais da WE assumem que ISSO JÁ EXISTE no alvo (desktop
+// GLSL tem builtin; só o branch `#if HLSL` — nunca definido aqui, ver
+// parseComboDefaults acima — precisaria de um polyfill próprio). Sem isso,
+// qualquer efeito custom que use inverse() de matriz (confirmado real:
+// lightshafts.vert linha 23, `inverse(squareToQuad(...))`) falha com
+// "undefined function". Mesma implementação exata do polyfill HLSL real de
+// common_perspective.h — não inventada, só promovida de condicional pra
+// sempre-disponível (função sem uso nunca causa erro de compilação).
 
 const MAX_INCLUDES = 16;
 
@@ -120,12 +182,33 @@ function resolveIncludes(source, weAssetsRoot, seen) {
   });
 }
 
-// Acha todo combo referenciado no shader e seu default — tanto pela
-// anotação isolada `// [COMBO...] {...}` quanto pela anotação colada num
-// uniform (`"combo":"MASK"`, confirmado real em tint.frag pro g_Texture1,
-// que não tem [COMBO] próprio) — e também qualquer nome usado direto num
-// `#if`/`#ifdef` que nunca foi anotado (default 0, mesmo comportamento da
-// própria WE pra combo desabilitado).
+// Acha todo combo de VERDADE referenciado no shader e seu default — tanto
+// pela anotação isolada `// [COMBO...] {...}` quanto pela anotação colada
+// num uniform (`"combo":"MASK"`, confirmado real em tint.frag pro
+// g_Texture1, que não tem [COMBO] próprio).
+//
+// Dois bugs reais encontrados ao vivo 2026-07-20 testando contra
+// "anime-girl-saint-4K" (efeito lightshafts num objeto de imagem):
+//
+// 1) Esta função tentava "adivinhar" combos varrendo QUALQUER nome usado em
+//    `#if`/`#ifdef` no texto do PRÓPRIO shader (antes de resolver
+//    #include), dando default 0 pra tudo que não fosse anotado. Isso nunca
+//    via `#if HLSL` de verdade, porque esse `#if` vive dentro de
+//    common_perspective.h — um #include, só resolvido DEPOIS desta função
+//    rodar. Então a varredura não tinha como ajudar aqui mesmo, e além
+//    disso arriscava tratar flags de ALVO DE COMPILAÇÃO (não-combos, tipo
+//    HLSL/GLSL/PLATFORM_ANDROID, que a própria WE sempre define antes de
+//    compilar) como se fossem parâmetros de material. Removida — só resta
+//    a detecção via anotação real (`[COMBO]`/`"combo":"X"`), a única fonte
+//    confiável.
+// 2) `HLSL` (e as outras flags de alvo acima) continuavam sem NENHUM
+//    `#define`, e o pré-processador GLSL-ES do ANGLE (motor do WebGL no
+//    Chromium/Electron) — diferente do C tradicional — dá ERRO DE SINTAXE
+//    pra `#if IDENTIFICADOR_NUNCA_DEFINIDO` (não trata como 0/falso em
+//    silêncio). Corrigido definindo essas flags de alvo permanentemente no
+//    MACRO_PRELUDE (sempre GLSL=1/HLSL=0, independente de qualquer scan) —
+//    já resolve o `#if HLSL` de dentro do include, porque o prelúdio vem
+//    antes de tudo no texto final, includes já resolvidos ou não.
 function parseComboDefaults(source) {
   const defaults = {};
   const standaloneRe = /\/\/\s*\[COMBO(?:_OFF)?\]\s*(\{[^\n]*\})/g;
@@ -143,20 +226,20 @@ function parseComboDefaults(source) {
       if (json.combo && !(json.combo in defaults)) defaults[json.combo] = 0;
     } catch { /* ignora */ }
   }
-  const conditionalRe = /#(?:if|ifdef)\s+(\w+)/g;
-  while ((m = conditionalRe.exec(source))) {
-    if (!(m[1] in defaults)) defaults[m[1]] = 0;
-  }
   return defaults;
 }
 
-// Gera as linhas "#define NOME valor" a partir dos defaults descobertos +
+// Gera as linhas "#define NOME valor" a partir dos defaults anotados +
 // os valores reais (scene.json objects[].effects[].passes[].combos, já lido
-// genericamente hoje pelo resto do arquivo).
+// genericamente hoje pelo resto do arquivo) — une as duas fontes (um combo
+// pode vir só do scene.json real sem nunca ter sido "visto" na anotação, se
+// a regex de anotação não bater por algum motivo).
 function buildComboDefines(comboDefaults, realCombos) {
+  const names = new Set([...Object.keys(comboDefaults), ...(realCombos ? Object.keys(realCombos) : [])]);
   let out = '';
-  for (const name of Object.keys(comboDefaults)) {
+  for (const name of names) {
     let value = realCombos && realCombos[name] != null ? realCombos[name] : comboDefaults[name];
+    if (value == null) continue; // nunca anotado nem presente no scene.json real -> deixa indefinido, o pré-processador GLSL já trata como 0/falso
     if (typeof value === 'boolean') value = value ? 1 : 0;
     out += `#define ${name} ${value}\n`;
   }

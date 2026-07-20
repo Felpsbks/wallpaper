@@ -126,6 +126,24 @@ function typeName(type, scene) {
 }
 
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+// Substitui o confirm() nativo do Chromium (sem estilo, título genérico
+// "engine-wallpaper") por um modal no mesmo visual do resto do app.
+// Resolve true/false conforme o botão clicado — mesma assinatura de uso que
+// confirm(), só que assíncrona: `if (await showConfirm('...')) { ... }`.
+function showConfirm(message, title) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('modal-confirm');
+    document.getElementById('modal-confirm-title').textContent = title || 'Confirmar';
+    document.getElementById('modal-confirm-message').textContent = message;
+    const okBtn = document.getElementById('btn-confirm-ok');
+    const cancelBtn = document.getElementById('btn-confirm-cancel');
+    const finish = (result) => { closeModal('modal-confirm'); resolve(result); };
+    okBtn.onclick = () => finish(true);
+    cancelBtn.onclick = () => finish(false);
+    modal.classList.add('open');
+  });
+}
 document.querySelectorAll('.modal-backdrop').forEach(bd => {
   bd.addEventListener('click', e => { if (e.target === bd) bd.classList.remove('open'); });
 });
@@ -272,7 +290,7 @@ async function setWallpaper(w) {
 }
 
 async function removeWallpaper(id) {
-  if (!confirm('Tem certeza que deseja remover este wallpaper da sua biblioteca?')) return;
+  if (!await showConfirm('Tem certeza que deseja remover este wallpaper da sua biblioteca?')) return;
   await ipc('remove-wallpaper', id);
   library = library.filter(w => w.id !== id);
   if (current && current.id === id) { current = null; updateNowPlaying(); }
@@ -1164,6 +1182,8 @@ function initHeaderAndSystemPanel() {
 
   const aboutVersionEl = document.getElementById('about-version');
   if (aboutVersionEl) aboutVersionEl.textContent = appVersion;
+  const sidebarVersionEl = document.getElementById('sidebar-version-text');
+  if (sidebarVersionEl) sidebarVersionEl.textContent = appVersion;
 
   // Ctrl+K (ou Cmd+K no mac) foca a busca da aba Descobrir, trocando de aba
   // se precisar — igual ao atalho mostrado no próprio campo.
@@ -2079,7 +2099,7 @@ function renderPlaylistsGrid() {
     });
     card.querySelector('.delete').addEventListener('click', async e => {
       e.stopPropagation();
-      if (!confirm(`Excluir a playlist "${p.name}"? As rotinas dela também serão removidas.`)) return;
+      if (!await showConfirm(`Excluir a playlist "${p.name}"? As rotinas dela também serão removidas.`)) return;
       await ipc('delete-playlist', p.id);
       playlists = playlists.filter(pl => pl.id !== p.id);
       routines = routines.filter(r => r.playlistId !== p.id);
@@ -2207,7 +2227,7 @@ function renderPlRoutinesList() {
     });
     row.querySelector('.rt-edit-btn').addEventListener('click', () => openRoutineModal(r));
     row.querySelector('.rt-del-btn').addEventListener('click', async () => {
-      if (!confirm('Excluir esta rotina?')) return;
+      if (!await showConfirm('Excluir esta rotina?')) return;
       await ipc('delete-routine', r.id);
       routines = routines.filter(x => x.id !== r.id);
       renderPlRoutinesList();

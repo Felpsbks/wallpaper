@@ -314,9 +314,15 @@ function unpackPkg(pkgPath, outDir) {
 // referenced by a model.json's "puppet" field alongside its usual
 // "material". Shares the "MDLV" magic family with the rigid 3D .mdl format
 // (confirmed MDLV0017 there vs MDLV0016 here) but this is a separate,
-// simpler layout. Only the static bind-pose mesh is decoded — a second
-// "MDLSxxxx"-tagged trailer (skeleton/physics) follows the index block and
-// is NOT decoded yet, so this draws the puppet at rest with no articulation.
+// simpler layout. Mesh (bind-pose vertices/indices) + skeleton (bone
+// hierarchy + bind matrices, see decodePuppetSkeleton below) are both
+// decoded now (2026-07-20) — enough to assemble the puppet correctly in
+// its bind pose (each body part transformed to its real bone position,
+// not the scattered raw-mesh look from before). A THIRD block
+// ("MDLA0003", a named/looping keyframe animation clip) still follows the
+// skeleton and is NOT decoded — its field layout (frame count, per-bone
+// keyframe stride, interpolation) hasn't been reverse-engineered yet, so
+// the puppet renders articulated but static (no time-based animation).
 //
 // Layout, validated byte-exact against 4 real MDLV0016 files (2998757800's
 // 眉毛/眼睛/睫毛/lituoliao_5_rw_puppet.mdl — 70/480/597/4077 vertices): for
@@ -380,6 +386,18 @@ function decodePuppetMdl(buf) {
     const base = offset + i * VERTEX_STRIDE;
     vertices[i] = {
       x: buf.readFloatLE(base), y: buf.readFloatLE(base + 4),
+      // boneIndices/boneWeights: documentado no layout acima (offsets
+      // 12-43) desde a decodificação original, mas nunca extraído até
+      // 2026-07-20 — precisava do bloco de esqueleto (ver
+      // decodePuppetSkeleton) decodificado antes de fazer sentido usar.
+      // boneIndices são inteiros de verdade armazenados como uint32 (NÃO
+      // float32, apesar do slot ter 4 bytes como os outros campos —
+      // confirmado real: lido como float dava valores desnormalizados
+      // minúsculos tipo 5.6e-45, que são exatamente o padrão de bits de
+      // inteiros pequenos tipo 4; lido como uint32 bate com índices de
+      // osso válidos (0-28) o tempo todo).
+      boneIndices: [buf.readUInt32LE(base + 12), buf.readUInt32LE(base + 16), buf.readUInt32LE(base + 20), buf.readUInt32LE(base + 24)],
+      boneWeights: [buf.readFloatLE(base + 28), buf.readFloatLE(base + 32), buf.readFloatLE(base + 36), buf.readFloatLE(base + 40)],
       u: buf.readFloatLE(base + 44), v: buf.readFloatLE(base + 48),
     };
   }
@@ -397,12 +415,76 @@ function decodePuppetMdl(buf) {
     indices[i] = v;
     if (v > maxIndex) maxIndex = v;
   }
+  offset += ilen;
 
   if (maxIndex !== vertexCount - 1) {
     throw new Error(`Puppet mesh failed self-consistency check (maxIndex=${maxIndex}, vertexCount=${vertexCount}, magic ${magic}) — unrecognized layout variant, refusing to guess`);
   }
 
-  return { materialPath: mat.str, vertices, indices };
+  // Esqueleto (bloco "MDLSxxxx", ver decodePuppetSkeleton) — sem ele o
+  // puppet só pode ser desenhado na malha crua, sem articulação nenhuma
+  // (cada vértice fica perto da origem do PRÓPRIO osso, não montado no
+  // lugar certo do personagem). Nunca lança: puppet sem esqueleto
+  // reconhecido cai pro mesmo desenho estático de antes, não quebra nada.
+  let skeleton = null;
+  try {
+    skeleton = decodePuppetSkeleton(buf, offset);
+  } catch { /* sem esqueleto reconhecido — segue sem articulação */ }
+
+  return { materialPath: mat.str, vertices, indices, skeleton };
+}
+
+// Bloco "MDLS0002" — esqueleto do puppet (hierarquia de ossos + pose de
+// bind), começa logo após o bloco de índices. Validado byte-exato contra
+// "miku bod testinhg_puppet.mdl" (29 ossos reais, cadeia de pais
+// confirmada sem ciclos). Formato:
+//   "MDLS0002" (8 bytes) + cabeçalho de 9 bytes (contagem de ossos no byte
+//   de offset 5 — os outros 8 bytes do cabeçalho não foram decodificados,
+//   não são necessários pra montar a pose de bind) + N registros de osso
+//   em sequência (tamanho VARIÁVEL cada um por causa da string no final,
+//   não dá pra indexar por stride fixo):
+//     byte flag (sempre 0 nas amostras vistas) +
+//     u32 tag (sempre 1) +
+//     i32 índice do osso-pai (-1 = raiz; sempre menor que o índice do
+//       próprio osso nas amostras vistas — permite acumular a matriz de
+//       mundo numa única passada 0..N-1, sem precisar de ordenação
+//       topológica de verdade) +
+//     byte tag (0x40) + 3 bytes de padding +
+//     64 bytes = matriz 4x4 row-major LOCAL de bind (relativa ao pai) —
+//       nas amostras vistas sempre rotação/escala identidade, só a
+//       translação (linha 3, offsets 12/13/14 dos 16 floats) varia +
+//     string JSON terminada em \0 (metadados por osso, ex:
+//       {"a":null,"s":null,"tp":"x y z"} — não usada pra montar a pose,
+//       só consumida aqui pra saber onde o próximo registro começa).
+//   Um osso pode ter essa string VAZIA (confirmado real: o osso de índice
+//   28 desse arquivo) — o parser tem que aceitar isso, não assumir que
+//   toda string tem conteúdo.
+function decodePuppetSkeleton(buf, offset) {
+  const magic = buf.toString('ascii', offset, offset + 8);
+  if (magic !== 'MDLS0002') throw new Error(`Unrecognized skeleton block magic: ${magic}`);
+  offset += 8;
+
+  const boneCount = buf[offset + 5];
+  offset += 9;
+  if (!(boneCount > 0 && boneCount < 512)) throw new Error(`Implausible bone count: ${boneCount}`);
+
+  const bones = new Array(boneCount);
+  for (let i = 0; i < boneCount; i++) {
+    offset += 1; // flag byte
+    offset += 4; // tag u32 (sempre 1)
+    const parentIndex = buf.readInt32LE(offset); offset += 4;
+    offset += 4; // tag byte (0x40) + 3 bytes de padding
+
+    const localMatrix = new Array(16);
+    for (let m = 0; m < 16; m++) { localMatrix[m] = buf.readFloatLE(offset); offset += 4; }
+
+    const { str: meta, next } = readCString(buf, offset);
+    offset = next;
+
+    bones[i] = { parentIndex, localMatrix, meta };
+  }
+
+  return { bones };
 }
 
 function readCString(buf, offset) {
@@ -411,4 +493,4 @@ function readCString(buf, offset) {
   return { str: buf.toString('utf-8', offset, end), next: end + 1 };
 }
 
-module.exports = { unpackPkg, decodeTexToPng, decodePuppetMdl };
+module.exports = { unpackPkg, decodeTexToPng, decodePuppetMdl, decodePuppetSkeleton };

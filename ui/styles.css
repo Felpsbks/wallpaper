@@ -163,6 +163,7 @@ body::after {
 }
 .sidebar-logo { display:flex; align-items:center; gap: 12px; margin-bottom: 6px; padding: 0 8px; justify-content: center; margin-top: 0; }
 .logo-img { width: 104px; height: auto; object-fit: contain; }
+.sidebar-version { text-align:center; font-size:11px; color:var(--text2); opacity:0.6; margin-bottom:14px; margin-top:-4px; }
 
 .nav-list { display:flex; flex-direction:column; gap: 2px; flex:1; }
 .nav-item { display:flex; align-items:center; gap:12px; padding:6px 12px; cursor:pointer; font-size:13px; font-weight: 500; color:var(--text2); border-radius: 10px; transition:all .3s ease; }
@@ -332,7 +333,7 @@ body::after {
 .ws-btn-steam { background:rgba(92,107,192,.95); color:#fff; }
 
 /* Modals */
-.modal-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.75); z-index:100; align-items:center; justify-content:center; }
+.modal-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px); z-index:100; align-items:center; justify-content:center; }
 .modal-backdrop.open { display:flex; }
 .modal { background:var(--bg2); border:1px solid var(--border); border-radius:12px; width:480px; padding:24px; max-height:88vh; overflow-y:auto; }
 .modal h3 { font-size:15px; margin-bottom:16px; }
