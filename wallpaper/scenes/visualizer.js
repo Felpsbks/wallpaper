@@ -1,4 +1,11 @@
-// Audio visualizer — reacts to microphone / system audio via Web Audio API
+// Audio visualizer — reacts to the desktop's own audio output (whatever is
+// playing system-wide, via Electron's desktopCapturer loopback trick — same
+// mechanism already proven in wallpaper.js's initAudioVisualizer for
+// audio-reactive "web" wallpapers), falling back to the microphone if no
+// desktop audio source is available, and to a fake animated pattern as a
+// last resort so the scene never just sits still.
+const { ipcRenderer } = require('electron');
+
 class VisualizerScene {
   constructor(canvas, options = {}) {
     this.canvas = canvas;
@@ -17,21 +24,50 @@ class VisualizerScene {
   }
 
   async start() {
+    let stream = null;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      const actx = new AudioContext();
-      const src = actx.createMediaStreamSource(stream);
-      this._analyser = actx.createAnalyser();
-      this._analyser.fftSize = 128;
-      this._analyser.smoothingTimeConstant = 0.82;
-      src.connect(this._analyser);
-      this._dataArray = new Uint8Array(this._analyser.frequencyBinCount);
-      this._actx = actx;
-      this._stream = stream;
-    } catch {
-      this._demoMode = true;
+      stream = await this._captureDesktopAudio();
+    } catch (err) {
+      console.warn('[visualizer] captura de áudio do sistema falhou, tentando microfone:', err.message);
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      } catch {
+        this._demoMode = true;
+      }
     }
+    if (stream) this._wireStream(stream);
     this._loop();
+  }
+
+  // Electron loopback trick: pedir um vídeo de "desktop" junto com o áudio é
+  // o que destrava a captura do áudio de SAÍDA do sistema (o que está
+  // tocando), em vez do microfone — Chromium exige o vídeo como condição pra
+  // liberar esse áudio, mas a gente para a track de vídeo na hora, sem nunca
+  // desenhar nada com ela. `get-desktop-audio-source` já existe em main.js
+  // (usado pelo mesmo mecanismo em wallpaper.js) — sem tela pra capturar
+  // (raro, mas possível) ele retorna vazio e a chamada abaixo falha, caindo
+  // pro microfone.
+  async _captureDesktopAudio() {
+    const sourceId = await ipcRenderer.invoke('get-desktop-audio-source');
+    if (!sourceId) throw new Error('nenhuma fonte de áudio de desktop disponível');
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { mandatory: { chromeMediaSource: 'desktop' } },
+      video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId } },
+    });
+    stream.getVideoTracks().forEach(t => t.stop());
+    return stream;
+  }
+
+  _wireStream(stream) {
+    const actx = new AudioContext();
+    const src = actx.createMediaStreamSource(stream);
+    this._analyser = actx.createAnalyser();
+    this._analyser.fftSize = 128;
+    this._analyser.smoothingTimeConstant = 0.82;
+    src.connect(this._analyser);
+    this._dataArray = new Uint8Array(this._analyser.frequencyBinCount);
+    this._actx = actx;
+    this._stream = stream;
   }
 
   _getData() {

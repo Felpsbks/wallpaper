@@ -5,7 +5,34 @@
 // `renderLibrary`, `toFileUrl` etc. (definidos em app.js) são acessíveis
 // direto aqui, sem precisar de bridge/export.
 // ==================================================================
-const Konva = require('konva').default || require('konva');
+// require('konva/konva.js') NÃO funciona (testado: o package.json do konva
+// bloqueia esse subpath via "exports", dá ERR_PACKAGE_PATH_NOT_EXPORTED).
+// Tentativa de corrigir com require('konva').default (achando que seria só
+// interop ESM/CJS) TAMBÉM não resolve — confirmado real 2026-07-20, travamento
+// real reportado pelo usuário logo após o boot: rodando exatamente o Node
+// empacotado deste Electron (`ELECTRON_RUN_AS_NODE=1 bin/electron.exe`, não o
+// Node do sistema — o teste anterior com `node` puro tinha enganado, porque
+// aquele SIM faz o interop automático), `require('konva')` lança
+// synchronously "require() of ES Module .../konva/lib/index.js ... not
+// supported" — o `.default ||` nunca chega a rodar, o require() em si já
+// quebra. Isso acontecia no TOPO do arquivo, ou seja, toda vez que a janela
+// de controle carregava (mesmo sem abrir a aba Oficina), não só quando
+// usada — exatamente o oposto do que o plano original pedia (Konva só
+// dentro de init(), carregado sob demanda). Corrigido: require adiado pra
+// dentro de loadKonva(), chamado no início de init() (só quando a aba
+// Oficina é aberta de verdade), protegido por try/catch.
+let Konva = null;
+function loadKonva() {
+  if (Konva) return true;
+  try {
+    const mod = require('konva');
+    Konva = mod.default || mod;
+    return true;
+  } catch (err) {
+    console.error('[editor] Konva indisponível:', err.message);
+    return false;
+  }
+}
 
 (function () {
   let stage = null, bgLayer = null, mainLayer = null, transformer = null;
@@ -29,6 +56,11 @@ const Konva = require('konva').default || require('konva');
   // ---- Inicialização ----
   function init() {
     if (edInitialized) { fitToScreen(); return; }
+    if (!loadKonva()) {
+      const container = document.getElementById('ed-konva-container');
+      if (container) container.textContent = 'Editor indisponível nesta instalação (Konva não carregou).';
+      return;
+    }
     edInitialized = true;
     setupStage();
     wireToolbar();

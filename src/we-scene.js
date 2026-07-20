@@ -236,18 +236,40 @@ function decodeTexToPng(texBuffer) {
 //   then, immediately after the entry table: every entry's raw bytes,
 //   concatenated back-to-back in table order — no offset field, no padding.
 //
+// "PKGV0023" confirmed byte-exact the same way 2026-07-18 (real download,
+// workshop id 3280146735, "Music Visualizer | iOS Style"): total entry
+// dataLength sums to exactly the remaining file length, and scene.json
+// decodes as valid JSON with the expected top-level keys. Bonus find: the
+// per-entry "unknown" u32 turns out to be a running cumulative offset into
+// the concatenated data blob (each entry's value == previous entry's
+// unknown + previous entry's dataLength) — not needed for extraction since
+// we just walk sequentially, but it's a nice internal-consistency check that
+// the layout reading is aligned correctly.
+//
+// "PKGV0013" ALSO confirmed byte-exact the same way, same day (real
+// download, workshop id 2149068390, "Music Cat") — a much older upload,
+// yet identical layout. Four different version numbers (13, 18, 23, 24)
+// all sharing the exact same binary container now, zero exceptions —
+// clearly one stable format across the version string, not something to
+// keep allowlisting one number at a time forever. Switched from a
+// hardcoded Set of known-good version strings to a structural check: any
+// magic matching /^PKGV\d+$/ is attempted, and the real validation is that
+// the entry table's summed dataLength lands exactly on the end of the file
+// (the same invariant manually checked by hand for every version confirmed
+// above). A genuinely incompatible future format reusing the "PKGV" prefix
+// would fail that check and still throw here — this only removes the need
+// to add version numbers by hand.
+//
 // Any `.tex` entry additionally gets a sibling `<name>.tex.png` written next
 // to it (decoded from its embedded PNG mip), so callers never touch the
 // container format directly.
-const SUPPORTED_PKG_VERSIONS = new Set(['PKGV0018', 'PKGV0024']);
-
 function unpackPkg(pkgPath, outDir) {
   const buf = fs.readFileSync(pkgPath);
   let offset = 0;
 
   const magic = readLPString(buf, offset);
   offset = magic.next;
-  if (!SUPPORTED_PKG_VERSIONS.has(magic.str)) {
+  if (!/^PKGV\d+$/.test(magic.str)) {
     throw new Error(`Unsupported .pkg version: ${magic.str}`);
   }
 
@@ -262,6 +284,11 @@ function unpackPkg(pkgPath, outDir) {
     const dataLength = buf.readUInt32LE(offset);
     offset += 4;
     entries.push({ name: nameRes.str, dataLength });
+  }
+
+  const totalDataLength = entries.reduce((sum, e) => sum + e.dataLength, 0);
+  if (offset + totalDataLength !== buf.length) {
+    throw new Error(`Unsupported .pkg layout (magic "${magic.str}" doesn't match the known container structure)`);
   }
 
   let dataOffset = offset;

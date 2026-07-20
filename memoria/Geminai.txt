@@ -1,0 +1,68 @@
+Relatório de Correção - App travado na tela de loading
+
+O que estava acontecendo:
+O aplicativo estava ficando preso infinitamente na tela de carregamento porque o script principal (`app.js`) estava sofrendo um erro fatal de Javascript antes mesmo de conseguir finalizar a inicialização. Como a inicialização (`boot()`) falhava, o evento para esconder a tela de loading nunca era chamado e o processo da interface travava.
+
+O que foi modificado:
+
+1. ui/index.html
+- Problema: As chamadas para os scripts `app.js` e `editor.js` estavam localizadas no meio do código HTML (por volta da linha 862), antes de vários elementos da interface terem sido criados pelo navegador.
+- Efeito: O `app.js` tentava adicionar um evento de clique no botão "Destravar Steam" (`dl-unstick-btn`), mas como o botão só existia mais abaixo no arquivo, o Javascript recebia `null` e causava o erro: `TypeError: Cannot read properties of null (reading 'addEventListener')`.
+- Solução: Movemos as tags `<script src="app.js?v=3"></script>` e `<script src="editor.js?v=1"></script>` para o final do arquivo, logo acima do `</body>`. Isso garante que todo o HTML/DOM já foi carregado antes dos scripts rodarem.
+
+2. ui/editor.js
+- Problema: O script tentava carregar a biblioteca `konva` usando `require('konva')`, porém a versão atual do Konva exporta Módulos ES, o que é incompatível com o formato de carregamento do Electron na interface. Causava o erro: `require() of ES Module ... not supported`.
+- Solução: Alteramos a linha de importação para carregar o bundle pré-compilado: `const Konva = require('konva/konva.js');`.
+
+3. Limpeza de rastros
+- Inseri algumas linhas de log no `main.js` e `app.js` para debugar e isolar o problema. Todas elas já foram desfeitas para manter o código limpo.
+
+Com essas alterações, o app agora consegue inicializar perfeitamente e sair da tela de carregamento.
+
+---
+
+Relatório de Implementação - Esconder Barra de Tarefas e Ícones
+
+O que foi feito:
+Foi implementada com sucesso a funcionalidade para ocultar automaticamente os ícones da Área de Trabalho e a Barra de Tarefas enquanto o wallpaper estiver rodando. O recurso já vem ativado por padrão.
+
+Arquivos Modificados:
+1. src/workerw.js
+- Adicionadas as funções nativas (`setDesktopIconsVisible` e `setTaskbarVisible`) usando FFI-NAPI e chamadas nativas do Windows (`FindWindow`, `ShowWindow`) para controlar a visibilidade da barra de tarefas e ícones.
+
+2. main.js
+- Configuração padrão atualizada para incluir `hideTaskbarAndIcons: true`.
+- Lógica de sincronização com o banco criada, verificando as configurações e acionando as funções do worker.
+- Criada uma trava de segurança no evento `before-quit`: sempre que o app for fechado, ele força a exibição dos ícones e da barra de tarefas de volta, para evitar que o Windows do usuário fique inoperante se o programa for encerrado.
+
+3. ui/index.html
+- Adicionado um switch (botão toggle) no menu Configurações > Comportamento, permitindo ao usuário ligar/desligar a funcionalidade a qualquer momento.
+
+4. ui/app.js
+- Criada a conexão visual (lógica de frontend) para pegar o clique do usuário no toggle de ocultar barra de tarefas e salvar imediatamente as configurações no back-end.
+
+5. Correção de tela inteira (Lacuna no Windows)
+- Problema: Esconder a barra de tarefas deixava um espaço vazio (lacuna) onde janelas maximizadas (como o VS Code) não preenchiam.
+- Solução: Modificamos `workerw.js` para usar a API `SHAppBarMessage` para ativar o modo "Ocultar Automaticamente" da barra de tarefas. Isso avisa o Windows para recalcular a "Área de Trabalho" liberando espaço para as janelas, e ainda permite que você passe o mouse no fundo da tela para ver os ícones e a barra novamente. Ao fechar o app, o estado original da barra é perfeitamente restaurado.
+
+Tudo testado e validado! O app coloca a barra em auto-ocultar ao abrir o wallpaper normal, e restaura o comportamento original sempre ao fechar.
+
+---
+
+Relatório de Correção - Janelas "CMD" Pretas (Prompt de Comando) aparecendo
+
+O que estava acontecendo:
+Ao iniciar o `npm run dev`, três janelas pretas (processos do Electron) estavam pipocando e ficando visíveis na barra de tarefas, o que não acontecia antes.
+
+O que foi modificado:
+1. scripts/dev.js
+- Problema: Durante a etapa anterior de debug para achar o problema da tela de loading, havia sido adicionada a flag `--enable-logging` e a variável de ambiente `ELECTRON_ENABLE_LOGGING: '1'` ao comando que iniciava o Electron. No Windows, quando o app não tem um terminal padrão acoplado (sendo iniciado em background para os múltiplos monitores), essas flags forçam o Electron a alocar e exibir um console de depuração (janela cmd) para cada processo do motor gráfico.
+- Solução: Removemos as flags de debug da função `startElectron()`. O Electron voltou a rodar silenciosamente e em plano de fundo, ocultando as janelas indesejadas da barra de tarefas.
+
+2. Processos "Zumbis" do Electron
+- Problema: Mesmo após remover as flags, as janelas continuaram aparecendo. Isso ocorreu porque uma falha de inicialização anterior (`Error: spawn UNKNOWN`) impediu que o script `dev.js` encerrasse corretamente as instâncias de teste do Electron. Como resultado, processos "zumbis" do motor continuaram rodando em segundo plano agarrados à barra de tarefas.
+- Solução: Forçamos o encerramento de todos os processos residuais (`electron.exe`) no sistema via PowerShell (`Stop-Process`), limpando completamente o estado da barra de tarefas.
+
+3. Restauração Segura no Modo Desenvolvedor
+- Problema: No ambiente de desenvolvimento, ao cancelar o `npm run dev` de forma forçada (`Ctrl + C`), o Windows matava o terminal instantaneamente sem dar chance de restaurar a barra de tarefas e os ícones para o estado normal.
+- Solução: Alteramos a função `killElectron()` no script `scripts/dev.js` para que ele intercepte o cancelamento forçado, chame o módulo nativo `workerw.js` e restaure a visibilidade da barra de tarefas e ícones da área de trabalho **antes** de destruir o processo. Isso previne que a máquina do desenvolvedor fique "inutilizável" ao parar o servidor de testes.

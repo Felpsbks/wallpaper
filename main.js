@@ -1,5 +1,17 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, dialog, screen, nativeImage, desktopCapturer } = require('electron');
 
+// ---- Trava de instância única ----
+// Sem isso, cada relançamento (recarregamento automático do modo dev,
+// duplo-clique sem querer, autostart + abertura manual) empilha um processo
+// novo em vez de reaproveitar o que já está rodando — confirmado ao vivo:
+// 7 processos "Engine Wallpaper" simultâneos no Gerenciador de Tarefas.
+// Precisa vir antes de QUALQUER outra coisa, pra uma segunda instância
+// desistir o mais rápido possível sem fazer nenhum trabalho à toa.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+  process.exit(0);
+}
+
 // ---- RAM Saver: Dieta do Chromium ----
 app.commandLine.appendSwitch('disable-print-preview');
 app.commandLine.appendSwitch('disable-spell-checking');
@@ -22,17 +34,32 @@ app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256');
 // project_webview2_migration memory.
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 
+// Without this, Windows identifies the process by its exe's own identity
+// (still literally called "electron.exe" in dev/autostart — see
+// project_electron_binary memory) for taskbar grouping/jump lists/toast
+// notifications, which is part of why the taskbar icon showed Electron's
+// logo instead of ours after an autostart reboot.
+if (process.platform === 'win32') app.setAppUserModelId('com.enginewallpaper.desktop');
+
 const args = process.argv.map(a => a.toLowerCase());
 const _isScreensaver = args.includes('/s') || args.includes('-s');
 const _isConfigMode = args.includes('/c') || args.includes('-c');
 if (args.find(a => a.startsWith('/p') || a.startsWith('-p'))) {
   app.exit(0); // Preview mode not supported yet due to HWND complexity
 }
-try { require('electron-reload')(__dirname); } catch (_) {}
+// electron-reload REMOVIDO: scripts/dev.js já tem seu próprio watcher
+// completo (mata o processo antigo -> reempacota o ASAR -> sobe um processo
+// novo) — ter os dois ativos ao mesmo tempo fazia cada salvamento de arquivo
+// disparar DOIS relançamentos descoordenados brigando entre si (a causa real
+// dos processos "zumbis"/janelas duplicadas). Além disso o electron-reload
+// sozinho nunca ajudava de verdade aqui: ele só faz app.relaunch() sem
+// reempacotar o ASAR, e este binário só carrega direito a partir do ASAR já
+// empacotado (ver project_electron_binary) — então relançar sem reempacotar
+// nem pegava as mudanças salvas.
 const path       = require('path');
 const fs         = require('fs');
 const os         = require('os');
-const { execSync, exec, execFile } = require('child_process');
+const { execSync, exec, spawn } = require('child_process');
 const Store      = require('./src/store');
 const License    = require('./src/license');
 const RoutineEngine = require('./src/routines/engine');
@@ -40,8 +67,6 @@ const routinesMigrate = require('./src/routines/migrate');
 const TRIGGERS = require('./src/routines');
 const { getRunningProcesses } = require('./src/routines/_processMatch');
 const { reconcilePlaybackControls, appRulesNeedProcesses, setAppStatePause } = require('./src/playback-rules');
-let ffmpegPath = null;
-try { ffmpegPath = require('ffmpeg-static'); } catch (_) { /* boomerang loop just stays disabled */ }
 
 // Nudge the OS scheduler to favor this process over other startup apps
 // competing for CPU/disk right after login — part of "start fast like
@@ -49,13 +74,59 @@ try { ffmpegPath = require('ffmpeg-static'); } catch (_) { /* boomerang loop jus
 // as the process exists, and asynchronously so it never blocks our own boot
 // (a synchronous PowerShell spawn would defeat the purpose).
 if (process.platform === 'win32') {
-  exec(`powershell -NoProfile -WindowStyle Hidden -Command "(Get-Process -Id ${process.pid}).PriorityClass = 'AboveNormal'"`, () => {});
+  exec(`powershell -NoProfile -WindowStyle Hidden -Command "(Get-Process -Id ${process.pid}).PriorityClass = 'AboveNormal'"`, { windowsHide: true }, () => {});
 }
 
 let controlWin = null;
 let tray       = null;
 const store    = new Store();
 let _pendingWorkshopId = null;
+
+// ---- Log de boot persistente em arquivo ----
+// Investigando um travamento real relatado só logo após reiniciar o Windows
+// (app abre mas fica transparente/sem responder, "não reproduz") — mas
+// funciona normal quando reaberto manualmente depois. Como o problema é
+// especificamente na janela de controle, o próprio mecanismo de log que
+// espelha console.log pra dentro da UI (`_sendToUiLog` acima) é inútil pra
+// diagnosticar isso: exige uma janela de controle funcionando, que é
+// exatamente o que está travado. Grava em arquivo à parte, sobrescrito a
+// cada boot (só precisa do ÚLTIMO boot, não histórico), com timestamp
+// relativo em ms desde o início do processo — próxima vez que travar, dá pra
+// ler o arquivo e ver exatamente em qual etapa parou, em vez de adivinhar.
+const _bootStart = Date.now();
+let _bootLogPath = null;
+try {
+  _bootLogPath = path.join(app.getPath('userData'), 'boot-log.txt');
+  fs.writeFileSync(_bootLogPath, `boot iniciado ${new Date().toISOString()}\n`);
+} catch (_) { _bootLogPath = null; }
+function _bootLog(msg) {
+  if (!_bootLogPath) return;
+  try { fs.appendFileSync(_bootLogPath, `+${Date.now() - _bootStart}ms  ${msg}\n`); } catch (_) {}
+}
+_bootLog('process principal iniciado (topo do main.js)');
+
+// Diagnóstico direto de um travamento real (confirmado 2026-07-20 via
+// heartbeat contínuo do renderer — ver ctrlLog em ui/app.js — o JS da janela
+// de controle NUNCA para de rodar, mas a tela congela e para de responder a
+// clique nenhum): se o JS está provadamente vivo mas nada pinta/responde na
+// tela, o processo de GPU compartilhado (não o processo do renderer em si)
+// é o suspeito mais provável — os três eventos abaixo cobrem as diferentes
+// APIs do Electron pra isso (v18 aqui: 'render-process-gone' é o atual,
+// 'gpu-process-crashed'/'child-process-gone' cobrem variações mais antigas/
+// novas, registrar todos não faz mal nenhum se algum não existir nesta
+// versão). Registrado cedo, antes de qualquer BrowserWindow existir, pra não
+// perder um crash que aconteça logo no boot.
+app.on('render-process-gone', (_event, webContents, details) => {
+  _bootLog(`app: render-process-gone (global) reason=${details.reason} exitCode=${details.exitCode}`);
+});
+if (typeof app.on === 'function') {
+  try {
+    app.on('gpu-process-crashed', (_event, killed) => _bootLog(`app: gpu-process-crashed killed=${killed}`));
+  } catch (_) {}
+  try {
+    app.on('child-process-gone', (_event, details) => _bootLog(`app: child-process-gone type=${details.type} reason=${details.reason}`));
+  } catch (_) {}
+}
 
 
 // Mirror ALL console output (from main.js and every required module, e.g.
@@ -77,13 +148,46 @@ function _sendToUiLog(ts, msg, level) {
   }
 }
 
-function _fmtArgs(args) {
-  return args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+// JSON.stringify sozinho já rejeita referência circular direta (throw), mas
+// não protege contra objetos MUITO profundos/grandes (ex: um Error com stack
+// gigante, ou um objeto que referencia outro que referencia o primeiro
+// indiretamente) — isso pode estourar a pilha de verdade dentro do próprio
+// JSON.stringify/util.inspect do Node, derrubando o processo principal
+// inteiro (aconteceu de verdade: RangeError dentro do console.error nativo,
+// ao tentar formatar algo assim). O replacer com WeakSet guarda contra ciclo
+// indireto, e o try/catch é a rede de segurança final — logar nunca pode
+// crashar o app.
+function _safeStringify(value) {
+  try {
+    const seen = new WeakSet();
+    const json = JSON.stringify(value, (_key, val) => {
+      if (typeof val === 'object' && val !== null) {
+        if (seen.has(val)) return '[Circular]';
+        seen.add(val);
+      }
+      return val;
+    });
+    if (json && json.length > 4000) return json.slice(0, 4000) + '…(truncado)';
+    return json;
+  } catch (err) {
+    return `[não foi possível formatar: ${err.message}]`;
+  }
 }
 
-console.log = (...args) => { _origConsoleLog(...args); _sendToUiLog(_nowTs(), _fmtArgs(args), 'info'); };
-console.error = (...args) => { _origConsoleError(...args); _sendToUiLog(_nowTs(), _fmtArgs(args), 'error'); };
-console.warn = (...args) => { _origConsoleWarn(...args); _sendToUiLog(_nowTs(), _fmtArgs(args), 'warn'); };
+function _fmtArgs(args) {
+  return args.map(a => (typeof a === 'string' ? a : _safeStringify(a))).join(' ');
+}
+
+function _wrapConsole(orig, level) {
+  return (...args) => {
+    try { orig(...args); } catch (_) { /* nunca deixa o log nativo derrubar o processo */ }
+    try { _sendToUiLog(_nowTs(), _fmtArgs(args), level); } catch (_) { /* idem pro espelho na UI */ }
+  };
+}
+
+console.log = _wrapConsole(_origConsoleLog, 'info');
+console.error = _wrapConsole(_origConsoleError, 'error');
+console.warn = _wrapConsole(_origConsoleWarn, 'warn');
 
 function appLog(msg, level = 'info') {
   const ts = _nowTs();
@@ -186,6 +290,202 @@ function sendToAllWallpapers(channel, ...args) {
   for (const win of wallpaperWindows.values()) {
     if (!win.isDestroyed()) win.webContents.send(channel, ...args);
   }
+  if (channel === 'set-wallpaper' && args[0]) updateNativeWallpaperSnapshot(args[0]);
+}
+
+// ---- Posição real do cursor (pra efeitos interativos: xray, depthparallax) ----
+// A janela de wallpaper é sempre "ignoreMouseEvents" (click-through, ver
+// spawnWallpaperWindow), então o DOM dela nunca recebe mousemove de
+// verdade — a única forma de saber onde o cursor real está é perguntar pro
+// SO diretamente (screen.getCursorScreenPoint(), que funciona independente
+// de foco/click-through) e distribuir isso por IPC. Manda coordenada
+// normalizada (0-1) relativa aos limites de CADA janela de wallpaper (cada
+// monitor tem sua própria janela cobrindo a tela inteira dele).
+setInterval(() => {
+  if (wallpaperWindows.size === 0) return;
+  const pt = screen.getCursorScreenPoint();
+  for (const win of wallpaperWindows.values()) {
+    if (win.isDestroyed()) continue;
+    const b = win.getBounds();
+    const x = (pt.x - b.x) / b.width;
+    const y = (pt.y - b.y) / b.height;
+    win.webContents.send('cursor-position', { x, y, inBounds: x >= 0 && x <= 1 && y >= 0 && y <= 1 });
+  }
+}, 33);
+
+// Cliques reais no wallpaper — mesma razão do polling de posição acima
+// (janela sempre click-through, `ignoreMouseEvents`, nunca recebe um
+// mousedown de verdade do próprio Chromium). uiohook-napi já é dependência
+// do projeto (usada no fluxo do screensaver) — aqui liga um hook global
+// leve, sempre ativo enquanto existir pelo menos uma janela de wallpaper,
+// só pra destravar os scripts reais de cursor (cursorDown/cursorClick) da
+// Wallpaper Engine em objetos "solid" (ex.: botões de play/pause/skip do
+// media player). Broadcast pro mesmo formato normalizado do cursor-position.
+let _uiohookStarted = false;
+function ensureClickBroadcast() {
+  if (_uiohookStarted) return;
+  _uiohookStarted = true;
+  try {
+    const { uIOhook } = require('uiohook-napi');
+    const broadcastButtonState = (down) => {
+      if (wallpaperWindows.size === 0) return;
+      for (const win of wallpaperWindows.values()) {
+        if (!win.isDestroyed()) win.webContents.send('cursor-button', { down });
+      }
+    };
+    uIOhook.on('mousedown', (e) => {
+      if (e.button !== 1) return; // só botão esquerdo — mesma convenção da WE (CursorEvent.button sempre 0/esquerdo)
+      broadcastButtonState(true); // real: input.cursorLeftDown
+      if (wallpaperWindows.size === 0) return;
+      for (const win of wallpaperWindows.values()) {
+        if (win.isDestroyed()) continue;
+        const b = win.getBounds();
+        const x = (e.x - b.x) / b.width;
+        const y = (e.y - b.y) / b.height;
+        if (x < 0 || x > 1 || y < 0 || y > 1) continue;
+        win.webContents.send('cursor-click', { x, y });
+      }
+    });
+    uIOhook.on('mouseup', (e) => {
+      if (e.button === 1) broadcastButtonState(false);
+    });
+    uIOhook.start();
+  } catch (err) {
+    console.warn('[main] uiohook indisponível — cursorDown/cursorClick dos scripts reais da WE não vão funcionar:', err.message);
+  }
+}
+// Chamada real fica lá embaixo, dentro de app.whenReady().then(...), depois
+// de createWallpaperWindows() — ver comentário lá pra saber por quê.
+
+// ---- Integração real de media (Now Playing do Windows) ----
+// Confirmado ao vivo 2026-07-18 contra uma aba real do YouTube tocando no
+// Chrome: a API GlobalSystemMediaTransportControlsSessionManager (a mesma
+// que alimenta o flyout de volume/tela de bloqueio do Windows) devolve
+// título/artista/status de reprodução reais de QUALQUER app que reporte
+// "Now Playing" pro sistema — Spotify, Chrome/YouTube, VLC, etc. Não existe
+// binding Node/Electron direto pra essa API WinRT; a única forma viável
+// encontrada foi via PowerShell (reflection real pra "esperar" as
+// IAsyncOperation do WinRT, que o PowerShell não sabe await nativamente —
+// ver scripts/media-session-poll.ps1). Roda como processo PERSISTENTE (um
+// só PowerShell, iniciado uma vez), lendo o stdout linha a linha — cada
+// linha é um JSON só quando o estado muda de verdade, não um poll bruto a
+// cada segundo.
+//
+// Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlayback
+// Status é um enum DIFERENTE do MediaPlaybackEvent real da própria WE
+// (Closed=0/Opened=1/Changing=2/Stopped=3/Playing=4/Paused=5 vs
+// STOPPED=0/PLAYING=1/PAUSED=2) — convertido aqui antes de mandar pro
+// renderer, pra bater exato com o que os scripts reais esperam.
+function mapPlaybackStatus(winStatus) {
+  if (winStatus === 4) return 1; // Playing -> PLAYBACK_PLAYING
+  if (winStatus === 5) return 2; // Paused  -> PLAYBACK_PAUSED
+  return 0; // Closed/Opened/Changing/Stopped -> PLAYBACK_STOPPED
+}
+
+let _mediaSessionProc = null;
+function ensureMediaSessionPoll() {
+  if (_mediaSessionProc) return;
+  const psScript = path.join(__dirname, 'scripts', 'media-session-poll.ps1');
+  if (!fs.existsSync(psScript)) return;
+  try {
+    _mediaSessionProc = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psScript], {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let buf = '';
+    _mediaSessionProc.stdout.setEncoding('utf8');
+    _mediaSessionProc.stdout.on('data', (chunk) => {
+      buf += chunk;
+      let idx;
+      while ((idx = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line) continue;
+        try {
+          const data = JSON.parse(line);
+          const payload = data.hasSession
+            ? { hasSession: true, title: data.title, artist: data.artist, albumTitle: data.albumTitle, playbackStatus: mapPlaybackStatus(data.playbackStatus) }
+            : { hasSession: false };
+          for (const win of wallpaperWindows.values()) {
+            if (!win.isDestroyed()) win.webContents.send('media-session-update', payload);
+          }
+        } catch (err) {
+          appLog.warn(`media-session-poll: linha não é JSON válido: ${err.message}`);
+        }
+      }
+    });
+    _mediaSessionProc.on('exit', (code) => {
+      appLog.warn(`media-session-poll.ps1 saiu (code ${code}) — integração de mídia parada até o app reiniciar.`);
+      _mediaSessionProc = null;
+    });
+  } catch (err) {
+    console.warn('[main] Falha ao iniciar integração de media session:', err.message);
+  }
+}
+// Chamada real fica lá embaixo, dentro de app.whenReady().then(...), depois
+// de createWallpaperWindows() — ver comentário lá pra saber por quê.
+
+// O Windows desenha o efeito de vidro fosco (Mica/Acrylic) atrás da barra de
+// tarefas olhando pro wallpaper REAL registrado no sistema — não pro que
+// aparece na tela (nossa janela embutida via WorkerW nunca atualiza isso).
+// Aqui a gente mantém o wallpaper nativo em sincronia como um "retrato" do
+// que está sendo exibido, só pra a barra de tarefas ter algo de verdade pra
+// borrar (não vai animar ali, é só uma foto — limitação do próprio Windows,
+// que só suporta uma imagem estática via SystemParametersInfo).
+//
+// SystemParametersInfo força o Windows a redesenhar o wallpaper de verdade,
+// o que pisca visivelmente na área de trabalho — por isso o throttle abaixo:
+// numa playlist com Intervalo curto (ex: a cada 10s) não queremos piscar a
+// cada troca, só de vez em quando é suficiente pra barra de tarefas não ficar
+// muito desatualizada.
+let _lastNativeWallpaperUpdateAt = 0;
+const NATIVE_WALLPAPER_MIN_INTERVAL_MS = 60000;
+
+// Sem isso, a "foto" da barra de tarefas só atualiza quando o wallpaper
+// TROCA — enquanto o mesmo vídeo/cena continua tocando por horas, ela fica
+// congelada no primeiro frame. Refresca sozinha no mesmo ritmo do throttle,
+// pra acompanhar minimamente o que está passando (nunca vai ser ao vivo de
+// verdade — o Windows só aceita imagem estática aqui — mas fica bem mais
+// perto do que a Live Wallpaper faz do que uma foto única parada).
+function startNativeWallpaperRefresh() {
+  setInterval(() => {
+    const current = store.get('current');
+    // Imagem estática nunca muda de conteúdo — recapturar/reaplicar a cada
+    // ciclo só arriscaria piscar a tela à toa, sem nenhum ganho real.
+    if (current && current.type !== 'image') updateNativeWallpaperSnapshot(current);
+  }, NATIVE_WALLPAPER_MIN_INTERVAL_MS);
+}
+
+function updateNativeWallpaperSnapshot(wallpaper) {
+  if (!wallpaper) return;
+  const now = Date.now();
+  if (now - _lastNativeWallpaperUpdateAt < NATIVE_WALLPAPER_MIN_INTERVAL_MS) return;
+  _lastNativeWallpaperUpdateAt = now;
+
+  const { setNativeWallpaper } = require('./src/workerw');
+
+  if (wallpaper.type === 'image' && wallpaper.src && fs.existsSync(wallpaper.src)) {
+    setNativeWallpaper(wallpaper.src);
+    return;
+  }
+
+  // Vídeo/cena/web: não existe um arquivo estático pra apontar, então
+  // tiramos um "print" de verdade da janela do wallpaper. O delay dá tempo
+  // do conteúdo novo (vídeo/cena) carregar antes da captura.
+  setTimeout(async () => {
+    try {
+      const win = [...wallpaperWindows.values()].find(w => !w.isDestroyed());
+      if (!win) return;
+      const image = await win.webContents.capturePage();
+      const dir = path.join(app.getPath('userData'), 'native-wallpaper-snapshot');
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const snapPath = path.join(dir, 'snapshot.png');
+      fs.writeFileSync(snapPath, image.toPNG());
+      setNativeWallpaper(snapPath);
+    } catch (err) {
+      console.error('[main] Falha ao gerar retrato pro wallpaper nativo:', err.message);
+    }
+  }, 1200);
 }
 
 // ---- Control panel ----
@@ -223,6 +523,7 @@ function showActivationWindow() {
 }
 
 function createControlWindow() {
+  _bootLog('createControlWindow: início');
   const iconPath = path.join(__dirname, 'ui', 'logo-app-max.png');
   controlWin = new BrowserWindow({
     width: 980, height: 680,
@@ -233,9 +534,22 @@ function createControlWindow() {
     show: false,
     webPreferences: { nodeIntegration: true, contextIsolation: false, webviewTag: true },
   });
+  _bootLog('createControlWindow: BrowserWindow criado, chamando loadFile');
 
   controlWin.loadFile(path.join(__dirname, 'ui', 'index.html'));
-  controlWin.once('ready-to-show', () => controlWin.show());
+  // Diagnóstico do travamento real relatado logo após reiniciar o Windows
+  // (janela abre mas fica transparente/sem responder) — funcionava normal ao
+  // reabrir manualmente depois, então é uma condição de corrida específica
+  // do boot, não um bug fixo de código. Esses eventos revelam ONDE
+  // exatamente o carregamento trava na próxima vez que acontecer, em vez de
+  // adivinhar de novo (ver _bootLog acima).
+  controlWin.once('ready-to-show', () => { _bootLog('controlWin: ready-to-show'); controlWin.show(); });
+  controlWin.webContents.once('did-finish-load', () => _bootLog('controlWin: did-finish-load'));
+  controlWin.webContents.once('dom-ready', () => _bootLog('controlWin: dom-ready'));
+  controlWin.webContents.on('did-fail-load', (_e, code, desc) => _bootLog(`controlWin: did-fail-load code=${code} desc=${desc}`));
+  controlWin.webContents.on('render-process-gone', (_e, details) => _bootLog(`controlWin: render-process-gone reason=${details.reason}`));
+  controlWin.webContents.on('unresponsive', () => _bootLog('controlWin: unresponsive (renderer travado)'));
+  controlWin.webContents.on('responsive', () => _bootLog('controlWin: responsive de novo'));
   controlWin.on('closed', () => { controlWin = null; });
 
   controlWin.webContents.session.on('will-download', (_, item) => {
@@ -291,6 +605,60 @@ function createControlWindow() {
     });
   });
 }
+
+// ---- Detecção de outros gerenciadores de wallpaper concorrentes ----
+// Incidente real (2026-07-20): o usuário tinha o Lively Wallpaper instalado
+// (ver project_workerw_fragility memory) e, após reiniciar o PC, os dois
+// apps competiram pela MESMA área do desktop (o truque Progman/WorkerW não é
+// exclusivo nosso — Lively, Wallpaper Engine oficial etc. usam a mesma
+// técnica não-documentada do Windows). Resultado: a janela de controle deste
+// app ficava visível e com o JS rodando perfeitamente (confirmado via
+// heartbeat contínuo em boot-log.txt), mas completamente surda a
+// clique/teclado — sintoma indistinguível de um travamento real, só que a
+// causa era outro processo brigando pelo mesmo SetParent/WorkerW, não um bug
+// de código. Não dá pra "resolver" essa disputa de verdade (nenhum dos dois
+// apps sabe do outro por design), então a proteção possível é AVISAR cedo, em
+// vez de deixar o usuário achar que este app quebrou.
+const KNOWN_CONFLICTING_WALLPAPER_APPS = [
+  { match: /lively/i, label: 'Lively Wallpaper' },
+  { match: /wallpaper(32|64)\.exe/i, label: 'Wallpaper Engine' },
+  { match: /wallpaperservice(32|64)\.exe/i, label: 'Wallpaper Engine (serviço)' },
+];
+
+// Guarda o resultado da última checagem pra `should-show-wallpaper-conflict-
+// notice` (chamado pelo renderer só depois que o usuário fecha o aviso de
+// primeira execução) — em vez de um dialog.showMessageBox nativo (destoa do
+// resto da UI própria do app, e não tem como lembrar "não mostrar de novo"
+// sozinho), o aviso agora é um modal normal do app, com o mesmo checkbox de
+// opt-out já usado no aviso de cenas do Workshop.
+let _detectedWallpaperConflict = null;
+
+function checkConflictingWallpaperApps() {
+  if (process.platform !== 'win32') return;
+  // `tasklist` é nativo do Windows, sem dependência nova — roda em background
+  // (exec, não execSync) pra nunca atrasar createWallpaperWindows().
+  exec('tasklist', { windowsHide: true }, (err, stdout) => {
+    if (err || !stdout) return;
+    const lines = stdout.split('\n');
+    const found = new Set();
+    for (const line of lines) {
+      for (const conflictApp of KNOWN_CONFLICTING_WALLPAPER_APPS) {
+        if (conflictApp.match.test(line)) found.add(conflictApp.label);
+      }
+    }
+    if (found.size === 0) return;
+
+    _detectedWallpaperConflict = [...found].join(', ');
+    appLog.warn(`Detectado outro gerenciador de wallpaper rodando (${_detectedWallpaperConflict}) — pode causar conflito na área de trabalho (os dois tentam controlar o mesmo espaço atrás dos ícones), deixando este app com aparência de travado mesmo funcionando por dentro.`);
+  });
+}
+
+ipcMain.handle('should-show-wallpaper-conflict-notice', () => {
+  if (!_detectedWallpaperConflict) return null;
+  if (store.get('wallpaperConflictNoticeOptOut')) return null;
+  return _detectedWallpaperConflict;
+});
+ipcMain.handle('set-wallpaper-conflict-notice-optout', () => { store.set('wallpaperConflictNoticeOptOut', true); return true; });
 
 // ---- Win32 WorkerW embedding ----
 function embedWallpaperBehindDesktop(win) {
@@ -392,7 +760,7 @@ function setAutostart(enabled) {
   try {
     fs.mkdirSync(startupDir, { recursive: true });
     fs.writeFileSync(psPath, ps, 'utf8');
-    execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psPath}"`);
+    execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psPath}"`, { windowsHide: true });
     appLog.ok('Atalho de inicialização criado em ' + lnkPath);
   } catch (err) {
     appLog.err('Erro criando atalho de inicialização: ' + err.message);
@@ -496,7 +864,7 @@ function startAutomationEngine() {
 ipcMain.handle('get-library', () => {
   const library = store.get('library') || [];
   let updated = false;
-  library.forEach(w => {
+  for (const w of library) {
     if (w.workshopId && !w.properties && w.src) {
       const parsed = parseSingleWorkshopItem(path.dirname(w.src), w.workshopId);
       if (parsed && parsed.properties) {
@@ -504,7 +872,7 @@ ipcMain.handle('get-library', () => {
         updated = true;
       }
     }
-  });
+  }
   if (updated) store.set('library', library);
   return library;
 });
@@ -525,7 +893,7 @@ ipcMain.handle('toggle-favorite', (_, item) => {
 });
 ipcMain.handle('get-current',          () => store.get('current') || null);
 const DEFAULT_CLOCK_OVERLAY = { enabled: false, position: 'top-left', format24h: true, showSeconds: false, showDate: true, showDayName: true, color: '#ffffff', fontSize: 48 };
-ipcMain.handle('get-settings',         () => store.get('settings') || { volume: 50, pauseOnFullscreen: true, muteOnFullscreen: false, startWithWindows: true, audioReactive: false, clockOverlay: DEFAULT_CLOCK_OVERLAY });
+ipcMain.handle('get-settings',         () => store.get('settings') || { volume: 50, pauseOnFullscreen: true, performanceModeFullscreen: false, muteOnFullscreen: false, startWithWindows: true, audioReactive: false, hideTaskbarAndIcons: true, clockOverlay: DEFAULT_CLOCK_OVERLAY });
 ipcMain.handle('get-displays',         () => screen.getAllDisplays().map(d => ({ id: d.id, bounds: d.bounds, label: d.label || null })));
 ipcMain.handle('get-display-wallpapers', () => store.get('displayWallpapers') || {});
 
@@ -630,79 +998,6 @@ ipcMain.handle('reorder-routines', (_, orderedIds) => {
   return true;
 });
 
-// ---- Loop "bumerangue" (toca pra frente, depois ao contrário, repete) ----
-// O Chromium não decodifica vídeo ao contrário de forma fluida (playbackRate
-// negativo não é suportado em <video>, e reverter frame a frame via seek
-// exige redecodificar desde o keyframe anterior a cada passo — trava o tempo
-// todo, não só no fim). A alternativa leve escolhida: gerar UMA VEZ, com
-// FFmpeg, uma cópia do vídeo já invertida (cacheada ao lado do original), e
-// na hora de tocar só alternar entre os dois arquivos — cada um tocando pra
-// frente normalmente, sem decodificação reversa em tempo real nenhuma.
-const _reversedVideoJobs = new Map(); // videoPath -> Promise<string|null>, evita gerar o mesmo arquivo 2x em paralelo
-
-function reversedVideoPathFor(videoPath) {
-  const ext = path.extname(videoPath);
-  return videoPath.slice(0, videoPath.length - ext.length) + '.reversed.mp4';
-}
-
-function ensureReversedVideo(videoPath) {
-  if (_reversedVideoJobs.has(videoPath)) return _reversedVideoJobs.get(videoPath);
-
-  const job = (async () => {
-    if (!ffmpegPath || !fs.existsSync(ffmpegPath)) {
-      appLog.warn('FFmpeg indisponível — loop bumerangue desativado, mantendo loop simples.');
-      return null;
-    }
-    if (!fs.existsSync(videoPath)) return null;
-
-    const outPath = reversedVideoPathFor(videoPath);
-    try {
-      if (fs.existsSync(outPath) && fs.statSync(outPath).size > 0) return outPath;
-    } catch (_) { /* segue e tenta gerar de novo */ }
-
-    appLog(`Gerando versão invertida de "${path.basename(videoPath)}" para o loop bumerangue...`);
-    // -an: sem áudio — o <video> do wallpaper já toca sempre mudo, e reverter
-    // a trilha de áudio (-af areverse) só custaria tempo à toa.
-    const buildArgs = (hwaccel) => [
-      ...(hwaccel ? ['-hwaccel', 'd3d11va'] : []),
-      '-y', '-i', videoPath, '-vf', 'reverse', '-an', outPath,
-    ];
-    const runFfmpeg = (args) => new Promise((resolve, reject) => {
-      execFile(ffmpegPath, args, { maxBuffer: 1024 * 1024 * 8 }, (err, _stdout, stderr) => {
-        if (err) reject(Object.assign(err, { stderr })); else resolve();
-      });
-    });
-    try {
-      // Vídeos AV1/HDR (comuns em capturas de gameplay recentes) travam o
-      // decoder de software padrão do FFmpeg (libaom-av1) com "Bitstream not
-      // supported by this decoder" mesmo sendo arquivos válidos — confirmado
-      // real contra um wallpaper de exemplo do usuário (5120x1440 60fps AV1
-      // HDR10). O decoder via GPU (d3d11va) decodifica esse mesmo arquivo sem
-      // erro, então tenta com aceleração de hardware primeiro; se o próprio
-      // hwaccel falhar por algum motivo (GPU/driver sem suporte), cai pro
-      // decode por software puro, que já cobria os vídeos SDR comuns antes.
-      try {
-        await runFfmpeg(buildArgs(true));
-      } catch (hwErr) {
-        appLog.warn(`FFmpeg com aceleração de hardware falhou para "${path.basename(videoPath)}", tentando por software: ${hwErr.message}`);
-        await runFfmpeg(buildArgs(false));
-      }
-      if (!fs.existsSync(outPath) || fs.statSync(outPath).size === 0) throw new Error('arquivo de saída vazio');
-      appLog.ok(`Versão invertida pronta: ${path.basename(outPath)}`);
-      return outPath;
-    } catch (err) {
-      appLog.err(`Falha ao gerar vídeo invertido de "${path.basename(videoPath)}": ${err.message}`);
-      try { fs.unlinkSync(outPath); } catch (_) {}
-      return null;
-    }
-  })();
-
-  _reversedVideoJobs.set(videoPath, job);
-  return job;
-}
-
-ipcMain.handle('ensure-reversed-video', (_, videoPath) => ensureReversedVideo(videoPath));
-
 ipcMain.handle('set-wallpaper', (_, wallpaper, displayId) => {
   if (displayId) {
     const win = wallpaperWindows.get(displayId);
@@ -710,6 +1005,7 @@ ipcMain.handle('set-wallpaper', (_, wallpaper, displayId) => {
     const dw = store.get('displayWallpapers') || {};
     dw[displayId] = wallpaper;
     store.set('displayWallpapers', dw);
+    updateNativeWallpaperSnapshot(wallpaper);
   } else {
     store.set('current', wallpaper);
     sendToAllWallpapers('set-wallpaper', wallpaper);
@@ -815,6 +1111,17 @@ ipcMain.on('wallpaper-heartbeat', (_event, _info) => {
   // console.log(`[heartbeat] wallpaper renderer alive — ${_info.display} at ${new Date(_info.ts).toLocaleTimeString('pt-BR')}`);
 });
 
+// Mesma técnica de diagnóstico do heartbeat acima, agora pra JANELA DE
+// CONTROLE — investigando um travamento real relatado pelo usuário logo
+// após abrir o app (modal de aviso aparece, botão fica clicável, mas depois
+// disso nada mais responde a clique nenhum, nem os botões da própria
+// titlebar). O boot do processo principal já é logado em _bootLog e
+// terminou rápido e limpo (ver createControlWindow/did-finish-load acima) —
+// o que falta é ver o que o JS do RENDERER (ui/app.js) estava fazendo no
+// exato momento em que parou de responder. `_bootLog` grava em arquivo
+// (não depende da própria UI travada pra ser lido depois).
+ipcMain.on('control-log', (_event, msg) => _bootLog(`[renderer] ${msg}`));
+
 // Repassa o FPS medido de verdade pelo próprio renderer do wallpaper (ver
 // wallpaper.js) pro painel de controle — nenhum valor inventado aqui, só
 // encaminha o que o requestAnimationFrame de lá já mediu.
@@ -896,8 +1203,20 @@ ipcMain.handle('set-settings', (_, settings) => {
   store.set('settings', settings);
   sendToAllWallpapers('update-settings', settings);
   setAutostart(!!settings.startWithWindows);
+  applyTaskbarIconsVisibility(settings);
   return true;
 });
+
+// Esconder barra de tarefas + ícones da área de trabalho (padrão ligado) —
+// só faz sentido no modo normal, com a janela do wallpaper de verdade
+// embutida atrás dos ícones (não em modo screensaver/config).
+function applyTaskbarIconsVisibility(settings) {
+  if (_isScreensaver || _isConfigMode) return;
+  const { setDesktopIconsVisible, setTaskbarVisible } = require('./src/workerw');
+  const hide = settings.hideTaskbarAndIcons !== false; // padrão true
+  setDesktopIconsVisible(!hide);
+  setTaskbarVisible(!hide);
+}
 
 ipcMain.handle('open-file-dialog', async (_, options) => dialog.showOpenDialog(controlWin, options));
 
@@ -907,7 +1226,6 @@ ipcMain.handle('open-in-steam', (_, workshopId) => {
 });
 
 ipcMain.handle('window-minimize', () => controlWin?.minimize());
-ipcMain.handle('window-maximize', () => controlWin?.isMaximized() ? controlWin.unmaximize() : controlWin?.maximize());
 ipcMain.handle('window-close',    () => controlWin?.close());
 
 // ---- Steam Workshop scanner ----
@@ -1060,6 +1378,154 @@ function httpGet(url) {
     }).on('error', reject);
   });
 }
+
+// Igual ao httpGet acima, mas grava direto em disco em binário (não decodifica
+// como texto) — usado só para baixar o asset .asar da release, que não é JSON.
+function httpDownload(url, destPath) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(destPath);
+    https.get(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
+    }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        file.close();
+        fs.unlink(destPath, () => {});
+        return httpDownload(res.headers.location, destPath).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) {
+        file.close();
+        fs.unlink(destPath, () => {});
+        return reject(new Error(`HTTP ${res.statusCode} ao baixar atualização`));
+      }
+      res.pipe(file);
+      file.on('finish', () => file.close(() => resolve()));
+    }).on('error', (err) => {
+      file.close();
+      fs.unlink(destPath, () => {});
+      reject(err);
+    });
+  });
+}
+
+// ---- Checagem de atualização (GitHub Releases, sem infraestrutura nova) ----
+// Repositório público (Felpsbks/fynix-connect) — a API de releases da própria
+// GitHub já dá tudo que precisa (tag/versão + link da página de download),
+// sem precisar hospedar um version.json à parte nem tocar no license-server.
+const APP_VERSION = require('./package.json').version;
+const UPDATE_CHECK_REPO = 'Felpsbks/fynix-connect';
+let _pendingUpdateInfo = null;
+
+// Comparação simples de versão "x.y.z" — não é semver completo (sem
+// pre-release/build metadata), mas é tudo que este projeto usa.
+function isNewerVersion(remote, local) {
+  const a = remote.split('.').map(Number);
+  const b = local.split('.').map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const na = a[i] || 0, nb = b[i] || 0;
+    if (na !== nb) return na > nb;
+  }
+  return false;
+}
+
+async function checkForUpdates() {
+  try {
+    const raw = await httpGet(`https://api.github.com/repos/${UPDATE_CHECK_REPO}/releases/latest`);
+    const data = JSON.parse(raw);
+    if (!data || !data.tag_name) return;
+    const remoteVersion = String(data.tag_name).replace(/^v/i, '');
+    if (!isNewerVersion(remoteVersion, APP_VERSION)) return;
+    if (store.get('dismissedUpdateVersion') === remoteVersion) return;
+
+    // Se a release tiver um asset chamado "app.asar" anexado, o app pode se
+    // auto-atualizar (baixar + trocar o pacote + reabrir sozinho). Sem esse
+    // asset (ex: release só com o zip/tar.gz automático do GitHub), cai no
+    // fallback de abrir a página da release no navegador.
+    const asset = Array.isArray(data.assets) ? data.assets.find(a => /^app\.asar$/i.test(a.name)) : null;
+
+    _pendingUpdateInfo = {
+      version: remoteVersion,
+      url: data.html_url,
+      assetUrl: asset ? asset.browser_download_url : null,
+      assetSize: asset ? asset.size : null,
+    };
+    if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('update-available', _pendingUpdateInfo);
+  } catch (err) {
+    // Sem rede, GitHub fora do ar, ou repositório momentaneamente sem
+    // releases — nunca deve incomodar o usuário nem travar nada, só não
+    // mostra o aviso desta vez.
+    console.warn('[main] checkForUpdates falhou:', err.message);
+  }
+}
+
+// Renderer também pode puxar sob demanda (ex: se a checagem já rodou antes
+// da janela de controle terminar de carregar e o webContents.send perdeu a
+// hora certa) — não depende só do push.
+ipcMain.handle('get-update-info', () => {
+  if (_pendingUpdateInfo && store.get('dismissedUpdateVersion') === _pendingUpdateInfo.version) return null;
+  return _pendingUpdateInfo;
+});
+ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedUpdateVersion', version); return true; });
+
+// Auto-atualização "leve": este app sempre roda a partir de um único
+// bin/resources/app.asar (nunca solto/unpacked — ver project_electron_binary
+// na memória), então "instalar a atualização" é só baixar o app.asar novo e
+// trocar o antigo por ele. Sem instalador, sem assinatura de código, sem
+// electron-updater — só um hot-swap do pacote.
+//
+// O processo atual mantém o app.asar aberto pra leitura o tempo todo, então
+// não dá pra sobrescrever com o app rodando. Um .bat descartável (gerado aqui,
+// rodado detached) espera este processo (PID atual) terminar, só então troca
+// o arquivo e reabre o exe — depois se autodeleta.
+ipcMain.handle('apply-update', async () => {
+  if (process.platform !== 'win32') return { ok: false, reason: 'unsupported-platform' };
+  if (!_pendingUpdateInfo || !_pendingUpdateInfo.assetUrl) return { ok: false, reason: 'no-asset' };
+
+  const sendProgress = (payload) => {
+    if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('update-apply-progress', payload);
+  };
+
+  try {
+    const updateDir = path.join(app.getPath('temp'), 'engine-wallpaper-update');
+    if (fs.existsSync(updateDir)) fs.rmSync(updateDir, { recursive: true, force: true });
+    fs.mkdirSync(updateDir, { recursive: true });
+
+    const newAsarPath = path.join(updateDir, 'app.asar');
+    sendProgress({ status: 'downloading' });
+    await httpDownload(_pendingUpdateInfo.assetUrl, newAsarPath);
+
+    const downloadedSize = fs.statSync(newAsarPath).size;
+    if (!downloadedSize || (_pendingUpdateInfo.assetSize && downloadedSize !== _pendingUpdateInfo.assetSize)) {
+      throw new Error('Download incompleto ou corrompido.');
+    }
+
+    const targetAsarPath = path.join(process.resourcesPath, 'app.asar');
+    const exePath = process.execPath;
+    const pid = process.pid;
+    const batPath = path.join(updateDir, 'apply.bat');
+    const batContents = [
+      '@echo off',
+      ':wait',
+      `tasklist /FI "PID eq ${pid}" /NH | findstr /I "${pid}" >nul`,
+      'if not errorlevel 1 (',
+      '  timeout /t 1 /nobreak >nul',
+      '  goto wait',
+      ')',
+      `copy /Y "${newAsarPath}" "${targetAsarPath}" >nul`,
+      `start "" "${exePath}"`,
+      'del "%~f0"',
+    ].join('\r\n');
+    fs.writeFileSync(batPath, batContents);
+
+    sendProgress({ status: 'restarting' });
+    spawn('cmd.exe', ['/c', batPath], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    setTimeout(() => app.quit(), 300);
+    return { ok: true };
+  } catch (err) {
+    console.warn('[main] apply-update falhou:', err.message);
+    sendProgress({ status: 'error', message: err.message });
+    return { ok: false, reason: 'error', message: err.message };
+  }
+});
 
 function httpPost(url, formData) {
   return new Promise((resolve, reject) => {
@@ -1219,11 +1685,13 @@ ipcMain.handle('steam-web-login', async () => {
     // Usar uma sessão separada para não misturar com os cookies principais do app, se desejar. 
     // Ou usar defaultSession. Vamos usar defaultSession para ser simples.
     
+    const loginIconPath = path.join(__dirname, 'assets', 'icon.png');
     const loginWin = new BrowserWindow({
       width: 800,
       height: 600,
       title: 'Login Seguro - Steam',
       autoHideMenuBar: true,
+      icon: fs.existsSync(loginIconPath) ? loginIconPath : undefined,
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true
@@ -1553,35 +2021,80 @@ ipcMain.handle('install-screensaver', async () => {
 });
 
 // ---- Boot ----
+_bootLog('app.whenReady() disparado');
 app.whenReady().then(async () => {
+  _bootLog('dentro do callback de whenReady, chamando License.checkLicense');
   const licenseStatus = await License.checkLicense(store);
+  _bootLog(`License.checkLicense retornou: ok=${licenseStatus.ok}`);
   if (!licenseStatus.ok) {
+    _bootLog('licença precisa de ativação, abrindo showActivationWindow (bloqueia até o usuário agir)');
     const activated = await showActivationWindow();
+    _bootLog(`showActivationWindow resolveu: activated=${activated}`);
     if (!activated) { app.quit(); return; }
   }
 
   // First boot configuration
   if (!store.get('settings')) {
-    const defaultSettings = { volume: 50, pauseOnFullscreen: true, muteOnFullscreen: false, startWithWindows: true, audioReactive: false };
+    const defaultSettings = { volume: 50, pauseOnFullscreen: true, performanceModeFullscreen: false, muteOnFullscreen: false, startWithWindows: true, audioReactive: false, hideTaskbarAndIcons: true };
     store.set('settings', defaultSettings);
   }
   // Runs on every boot (cheap fs.existsSync check when already in sync — see
   // setAutostart) so existing installs self-migrate off the old Registry
   // Run-key mechanism without the user needing to re-toggle the setting.
   setAutostart(!!(store.get('settings') || {}).startWithWindows);
+  applyTaskbarIconsVisibility(store.get('settings') || {});
 
   // Converte timeRules/playlistConfig antigos em Playlists+Rotinas uma única
   // vez (guardado por store.get('routinesMigrated')) antes do motor iniciar.
   routinesMigrate.run(store, appLog);
+  _bootLog('configuração inicial + migração de rotinas concluídas, chamando createWallpaperWindows');
 
   createWallpaperWindows();
+  _bootLog('createWallpaperWindows retornou');
   startAutomationEngine();
-  if (!_isScreensaver) { startWorkerWWatchdog(); startRepaintNudge(); }
+  if (!_isScreensaver) { startWorkerWWatchdog(); startRepaintNudge(); startNativeWallpaperRefresh(); checkConflictingWallpaperApps(); }
+
+  // Adicionados 2026-07-18 (hook global de clique + integração de media
+  // session) — DEPOIS que o wallpaper já existe de propósito. Achado real:
+  // antes rodavam no topo do módulo, ou seja, ANTES até de app.whenReady()
+  // e createWallpaperWindows() — se o hook nativo do uiohook ou o spawn do
+  // PowerShell da media session travarem/demorarem no boot (ex.: antivírus
+  // escaneando um binário nativo recém-tocado, mesma classe de problema já
+  // visto com o bin/electron.exe), isso atrasava/travava o wallpaper
+  // inteiro, que nem chegava a ser criado. Agora essas duas coisas nunca
+  // podem bloquear o wallpaper aparecer — o pior caso é elas falharem
+  // sozinhas (já tratado com try/catch), sem afetar o resto do app.
+  ensureClickBroadcast();
+  _bootLog('ensureClickBroadcast retornou');
+  ensureMediaSessionPoll();
+  _bootLog('ensureMediaSessionPoll retornou, chamando createControlWindow');
 
   if (!_isScreensaver && !_isConfigMode) {
     createControlWindow();
+    _bootLog('createControlWindow retornou');
     createTray();
+    _bootLog('createTray retornou — boot do main process concluído');
+
+    // Checagem de atualização: nunca no caminho crítico do boot (chamada de
+    // rede) — roda uma vez alguns segundos depois de tudo já estar de pé, e
+    // depois a cada 6h (o app costuma ficar aberto o dia inteiro, rodando em
+    // segundo plano).
+    setTimeout(checkForUpdates, 8000);
+    setInterval(checkForUpdates, 6 * 60 * 60 * 1000);
   } else if (_isConfigMode) {
+    createControlWindow();
+  }
+});
+
+// Alguém tentou abrir uma segunda instância (a trava no topo do arquivo já
+// barrou o processo dela) — em vez de simplesmente ignorar, traz a janela
+// que já existe pra frente, que é o que o usuário esperava ao "abrir de novo".
+app.on('second-instance', () => {
+  if (controlWin && !controlWin.isDestroyed()) {
+    if (controlWin.isMinimized()) controlWin.restore();
+    controlWin.show();
+    controlWin.focus();
+  } else if (!_isScreensaver && !_isConfigMode) {
     createControlWindow();
   }
 });
@@ -1590,4 +2103,12 @@ app.on('window-all-closed', (e) => e.preventDefault());
 app.on('before-quit', () => {
   tray?.destroy();
   if (_engineTimer) clearInterval(_engineTimer);
+  // Sempre devolve ícones/barra de tarefas ao sair, mesmo que a opção esteja
+  // ligada — senão o usuário fica com o Windows "quebrado" (sem ícones/barra)
+  // depois de fechar o app.
+  if (!_isScreensaver && !_isConfigMode) {
+    const { setDesktopIconsVisible, setTaskbarVisible } = require('./src/workerw');
+    setDesktopIconsVisible(true);
+    setTaskbarVisible(true);
+  }
 });

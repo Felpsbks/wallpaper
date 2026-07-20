@@ -113,7 +113,19 @@ body::after {
 }
 
 /* Titlebar */
-#titlebar { position: absolute; top:0; right:0; left:0; height:var(--titlebar-h); display:flex; justify-content:flex-end; padding:0 8px; z-index: 100; pointer-events: none; }
+/* z-index bem acima de qualquer modal/overlay do app (o maior encontrado é
+   10000) — bug real encontrado 2026-07-20: o titlebar tinha z-index:100,
+   EMPATADO com .modal-backdrop (também 100). Em empate, quem vem depois no
+   HTML fica por cima — e o modal-backdrop vem bem depois no documento, então
+   qualquer modal aberto (ex: o aviso de primeira execução) ficava
+   visualmente por baixo do que parecia, mas na verdade CAPTURAVA os cliques
+   que deviam ir pros botões minimizar/fechar (mesma região da tela, o
+   backdrop cobre inset:0 inteiro). Resultado real: com um modal aberto, o
+   botão de fechar da janela (a única forma de sair, já que frame:false) não
+   respondia a clique nenhum — parecia a janela inteira travada. O titlebar
+   precisa SEMPRE vencer qualquer overlay, pra nunca haver um jeito de ficar
+   "preso" sem conseguir fechar o app. */
+#titlebar { position: absolute; top:0; right:0; left:0; height:var(--titlebar-h); display:flex; justify-content:flex-end; padding:0 8px; z-index: 10001; pointer-events: none; }
 .drag-region { position: absolute; inset: 0; -webkit-app-region: drag; z-index: 99; pointer-events: auto; }
 .win-btn { -webkit-app-region:no-drag; pointer-events: auto; width:36px; height:24px; margin-top:4px; border:none; background:transparent; color:var(--text2); cursor:pointer; border-radius:4px; font-size:12px; display:flex; align-items:center; justify-content:center; transition:background .15s,color .15s; position: relative; z-index: 100; }
 .win-btn:hover { background:var(--bg3); color:var(--text); }
@@ -159,6 +171,28 @@ body::after {
 .nav-item.active .nav-icon { color: var(--accent2); }
 .nav-icon { width:20px; height:20px; color:var(--text2); transition: color .3s; }
 .sidebar-divider { height: 1px; background: rgba(255, 255, 255, 0.05); margin: 6px 12px; }
+
+/* Aviso de atualização disponível (checagem via GitHub Releases, ver
+   checkForUpdates em main.js) — só aparece quando existe mesmo uma versão
+   mais nova, some sozinho ao clicar "Baixar" ou no X. */
+.update-banner {
+  margin-top: 12px; padding: 10px 12px; border-radius: 10px;
+  background: rgba(124, 58, 237, 0.12); border: 1px solid rgba(124, 58, 237, 0.3);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.update-banner-text { font-size: 12px; color: var(--text2); }
+.update-banner-text b { color: var(--text); }
+.update-banner-actions { display: flex; align-items: center; gap: 8px; }
+.update-banner-btn {
+  flex: 1; border: none; border-radius: 6px; padding: 6px 10px; font-size: 12px; font-weight: 600;
+  background: var(--accent); color: #fff; cursor: pointer; transition: background .15s;
+}
+.update-banner-btn:hover { background: var(--accent-hover); }
+.update-banner-close {
+  border: none; background: transparent; color: var(--text2); cursor: pointer;
+  width: 22px; height: 22px; border-radius: 5px; font-size: 11px; flex-shrink: 0;
+}
+.update-banner-close:hover { background: rgba(255,255,255,0.08); color: var(--text); }
 
 /* User Profile Sidebar (FYNIX Style) */
 .sidebar-user { margin-top: 12px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,0.05); }
@@ -211,9 +245,10 @@ body::after {
 
 /* Buttons */
 .btn { padding:9px 16px; border:none; border-radius:8px; cursor:pointer; font-size:13px; font-weight:600; transition:all .2s; display:flex; align-items:center; gap:8px; justify-content:center; }
-.btn-primary   { background:var(--accent); color:#fff; box-shadow: 0 4px 12px rgba(90,84,249,0.3); }
-.btn-primary:hover { background:var(--accent-hover); transform: translateY(-1px); }
-.btn-primary:disabled { opacity:.5; cursor:not-allowed; transform:none; box-shadow:none; }
+.btn-primary   { background: #6a32d6; color: #ffffff; box-shadow: 0 4px 14px rgba(106, 50, 214, 0.4); }
+.btn-primary:hover { background: #7c48df; transform: translateY(-2px); box-shadow: 0 6px 20px rgba(106, 50, 214, 0.6); }
+.btn-primary:active { transform: translateY(0); box-shadow: 0 2px 8px rgba(106, 50, 214, 0.4); }
+.btn-primary:disabled { opacity: .5; cursor: not-allowed; transform: none; box-shadow: none; }
 .btn-secondary { background:var(--bg3); color:var(--text); border:1px solid var(--border); }
 .btn-secondary:hover { background:var(--border); }
 .btn-steam { background:#1a3a1a; color:#5ba85b; border:1px solid #2d5a2d; }
@@ -945,26 +980,7 @@ body::after {
   color: var(--text2);
 }
 
-.modal-btn-apply {
-  background: linear-gradient(135deg, #7b2cbf 0%, #9d4edd 100%);
-  color: white;
-  border: none;
-  padding: 14px;
-  border-radius: 12px;
-  font-size: 15px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  cursor: pointer;
-  transition: all 0.2s;
-  color: white;
-  font-size: 18px;
-  font-weight: 600;
-  margin-bottom: 5px;
-  letter-spacing: 0.5px;
-}
+
 .modal-body {
   padding: 24px;
   overflow-y: auto;
@@ -1098,11 +1114,11 @@ body::after {
 }
 
 .modal-btn-apply {
-  background: linear-gradient(135deg, #7b2cbf 0%, #9d4edd 100%);
-  color: white;
+  background: #6a32d6; /* Solid vivid purple */
+  color: #ffffff;
   border: none;
-  padding: 14px;
-  border-radius: 12px;
+  padding: 14px 24px;
+  border-radius: 12px; /* Rounded corners */
   font-size: 15px;
   font-weight: 600;
   display: flex;
@@ -1110,12 +1126,14 @@ body::after {
   justify-content: center;
   gap: 8px;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
   width: 100%;
+  box-shadow: 0 4px 14px rgba(106, 50, 214, 0.4); /* Glow effect */
 }
-.modal-btn-apply:hover { transform: translateY(-2px); box-shadow: 0 8px 16px rgba(123, 44, 191, 0.4); }
-.modal-btn-apply.installed { background: var(--bg3); color: var(--text2); cursor: default; }
-.modal-btn-apply.installed:hover { transform: none; box-shadow: none; }
+.modal-btn-apply:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(106, 50, 214, 0.6); background: #7c48df; }
+.modal-btn-apply:active { transform: translateY(0); box-shadow: 0 2px 8px rgba(106, 50, 214, 0.4); }
+.modal-btn-apply.installed { background: var(--bg3); color: var(--text2); cursor: default; box-shadow: none; }
+.modal-btn-apply.installed:hover { transform: none; box-shadow: none; background: var(--bg3); }
 
 .modal-btn-row { display: flex; gap: 12px; }
 .modal-btn-row .btn { justify-content: center; background: rgba(255,255,255,0.05); padding: 12px; }
@@ -1203,6 +1221,12 @@ body::after {
 .dl-progress-text {
   color: var(--text2);
   font-size: 14px;
+}
+.dl-unstick-btn {
+  margin-top: 18px;
+  font-size: 12px;
+  padding: 8px 14px;
+  animation: pulse 2s infinite ease-in-out;
 }
 
 /* =========================================

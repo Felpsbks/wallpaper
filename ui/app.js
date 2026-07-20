@@ -1,4 +1,4 @@
-const { ipcRenderer } = require('electron');
+const { ipcRenderer, shell } = require('electron');
 const os = require('os');
 const appVersion = require('../package.json').version;
 
@@ -11,6 +11,7 @@ function _logUiError(msg) {
   if (typeof appendLogLine === 'function') {
     appendLogLine({ ts, msg, level: 'error' });
   }
+  ctrlLog(`ERRO: ${msg}`);
 }
 window.addEventListener('error', (e) => {
   _logUiError(`[UI] ${e.message} (${e.filename ? e.filename.split(/[\\/]/).pop() : '?'}:${e.lineno})`);
@@ -19,6 +20,24 @@ window.addEventListener('unhandledrejection', (e) => {
   const reason = e.reason && e.reason.message ? e.reason.message : String(e.reason);
   _logUiError(`[UI] Promise rejeitada: ${reason}`);
 });
+
+// Diagnóstico de um travamento real relatado pelo usuário (2026-07-20): a
+// janela de controle carrega, o modal de aviso aparece e o botão fica
+// clicável, mas depois disso nada mais responde a clique nenhum, nem os
+// botões da própria titlebar. `_sendToUiLog`/o painel de log do próprio app
+// (main.js) exige uma UI funcionando pra ser lido — inútil bem no momento
+// em que ela trava. Grava direto num arquivo em disco via main.js
+// (`_bootLog`/'control-log'), lido independente do estado da janela. Um
+// heartbeat a cada 2s mostra ATÉ QUANDO o JS do renderer continuou rodando —
+// se ele para de aparecer no arquivo no mesmo instante em que a tela
+// congela, é o JS que travou; se continuar aparecendo normalmente com a
+// tela já congelada, é especificamente o paint/composite (mesma classe de
+// bug já documentada pra janela do wallpaper).
+function ctrlLog(msg) {
+  try { ipcRenderer.send('control-log', msg); } catch (_) {}
+}
+ctrlLog('app.js: script carregado, topo do arquivo executando');
+setInterval(() => ctrlLog('heartbeat'), 2000);
 
 function formatBytes(bytes) {
   if (!bytes || bytes === 0) return '0 B';
@@ -578,8 +597,10 @@ document.getElementById('btn-props-save').addEventListener('click', async () => 
 const setVolume  = document.getElementById('set-volume');
 const setVolumeV = document.getElementById('set-volume-val');
 const setPauseFs = document.getElementById('set-pause-fs');
+const setPerfModeFs = document.getElementById('set-performance-mode-fs');
 const setMuteFs  = document.getElementById('set-mute-fs');
 const setStartup = document.getElementById('set-startup');
+const setHideTaskbar = document.getElementById('set-hide-taskbar');
 const setAudioRe = document.getElementById('set-audio-reactive');
 const btnInstallScr = document.getElementById('btn-install-screensaver');
 
@@ -603,8 +624,10 @@ async function saveSettings() {
     ...settings,
     volume: +setVolume.value,
     pauseOnFullscreen: setPauseFs.checked,
+    performanceModeFullscreen: setPerfModeFs.checked,
     muteOnFullscreen: setMuteFs.checked,
     startWithWindows: setStartup.checked,
+    hideTaskbarAndIcons: setHideTaskbar.checked,
     audioReactive: setAudioRe.checked,
     clockOverlay: {
       enabled: clockEnabled.checked,
@@ -619,7 +642,7 @@ async function saveSettings() {
   };
   await ipc('set-settings', settings);
 }
-[setVolume, setPauseFs, setMuteFs, setStartup, setAudioRe,
+[setVolume, setPauseFs, setPerfModeFs, setMuteFs, setStartup, setHideTaskbar, setAudioRe,
  clockEnabled, clockPosition, clockFormat24h, clockSeconds, clockDate, clockDayName, clockColor, clockFontSize
 ].forEach(el => el.addEventListener('change', saveSettings));
 
@@ -1106,8 +1129,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const closeBtn = document.getElementById('modal-close');
   if (overlay && closeBtn) {
     closeBtn.addEventListener('click', () => overlay.classList.remove('open'));
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) overlay.classList.remove('open');
+    
+    // Fechar ao clicar fora do painel lateral
+    document.addEventListener('mousedown', (e) => {
+      if (overlay.classList.contains('open') && !overlay.contains(e.target)) {
+        // Evitar conflito se o clique for exatamente num card que abre o modal
+        const isCardClick = e.target.closest('.wp-card, .wallpaper-card, .playlist-card');
+        if (!isCardClick) {
+          overlay.classList.remove('open');
+        }
+      }
     });
   }
   initHeaderAndSystemPanel();
@@ -1150,6 +1181,16 @@ function initHeaderAndSystemPanel() {
   const settingsBtn = document.getElementById('btn-header-settings');
   if (settingsBtn) {
     settingsBtn.addEventListener('click', () => {
+      const settingsNav = document.querySelector('.nav-item[data-panel="settings"]');
+      if (settingsNav) settingsNav.click();
+    });
+  }
+
+  // Clicar no nome/avatar do usuário na sidebar também abre Configurações.
+  const sidebarUser = document.querySelector('.sidebar-user');
+  if (sidebarUser) {
+    sidebarUser.style.cursor = 'pointer';
+    sidebarUser.addEventListener('click', () => {
       const settingsNav = document.querySelector('.nav-item[data-panel="settings"]');
       if (settingsNav) settingsNav.click();
     });
@@ -1334,6 +1375,38 @@ document.getElementById('btn-unstick-steam').addEventListener('click', async () 
   setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 3000);
 });
 
+// A Steam local às vezes pausa sozinha a fila de update do Wallpaper Engine
+// com erro "File locked" (nosso próprio app mantendo um arquivo de vídeo do
+// Workshop aberto — ver comentário em main.js/download-workshop-item) e não
+// dá nenhum sinal disso pro nosso lado: o download só fica parado pra sempre
+// no mesmo estado "progress" (que, nesse fluxo de web-subscribe, é só um
+// placeholder fixo, não progresso real — não tem como distinguir "ainda
+// baixando" de "travou"). Em vez de o usuário precisar descobrir isso e ir
+// nas Configurações clicar em "Destravar", mostra o mesmo botão direto aqui
+// depois de um tempo parado sem terminar.
+const DL_UNSTICK_DELAY_MS = 20000;
+let _dlUnstickTimer = null;
+function armDlUnstickButton() {
+  clearTimeout(_dlUnstickTimer);
+  const btn = document.getElementById('dl-unstick-btn');
+  btn.style.display = 'none';
+  _dlUnstickTimer = setTimeout(() => { btn.style.display = 'inline-block'; }, DL_UNSTICK_DELAY_MS);
+}
+function disarmDlUnstickButton() {
+  clearTimeout(_dlUnstickTimer);
+  document.getElementById('dl-unstick-btn').style.display = 'none';
+}
+document.getElementById('dl-unstick-btn').addEventListener('click', async (e) => {
+  e.stopPropagation();
+  const btn = e.currentTarget;
+  const original = btn.textContent;
+  btn.textContent = '⏳ Pedindo...';
+  btn.disabled = true;
+  await ipc('unstick-steam-downloads');
+  btn.textContent = '✅ Steam avisada, aguarde...';
+  setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 5000);
+});
+
 ipcRenderer.on('download-progress', async (_, data) => {
   const dlScreen = document.getElementById('dl-loading-screen');
   const dlTitle = document.getElementById('dl-loading-title');
@@ -1348,6 +1421,7 @@ ipcRenderer.on('download-progress', async (_, data) => {
     dlText.textContent = 'Iniciando...';
     dlScreen.classList.add('visible');
     setWsStatus(`⏳ ${data.name}`);
+    armDlUnstickButton();
   } else if (data.state === 'start') {
     dlTitle.textContent = 'Aplicando wallpaper';
     dlSubtitle.textContent = data.name;
@@ -1355,6 +1429,7 @@ ipcRenderer.on('download-progress', async (_, data) => {
     dlText.textContent = '0% (Conectando...)';
     dlScreen.classList.add('visible');
     setWsStatus(`📥 Baixando: ${data.name}`, '', 0.02);
+    armDlUnstickButton();
   } else if (data.state === 'progress') {
     const pct = data.pct || 0;
     const pctInt = Math.round(pct * 100);
@@ -1367,10 +1442,11 @@ ipcRenderer.on('download-progress', async (_, data) => {
     dlText.textContent = `${pctInt}% - ${spd} (${size})`;
     setWsStatus(`📥 ${pctInt}%  ${size}`, spd, pct);
   } else if (data.state === 'completed') {
+    disarmDlUnstickButton();
     dlTitle.textContent = `Concluído!`;
     dlFill.style.width = '100%';
     dlText.textContent = 'Instalando wallpaper...';
-    
+
     setWsStatus('✅ Download concluído!', 'Wallpaper adicionado à biblioteca.', 1, '#4caf50');
     setTimeout(() => { wsStatus.style.display = 'none'; }, 5000);
     _slPending = null;
@@ -1389,6 +1465,7 @@ ipcRenderer.on('download-progress', async (_, data) => {
       dlScreen.classList.remove('visible');
     }, 1500);
   } else if (data.state === 'needs-login') {
+    disarmDlUnstickButton();
     dlScreen.classList.remove('visible');
     wsStatus.style.display = 'none';
     _slPending = { workshopId: data.workshopId, name: data.name, previewUrl: data.previewUrl };
@@ -1409,6 +1486,7 @@ ipcRenderer.on('download-progress', async (_, data) => {
   } else if (data.state === 'needs-mobile-auth') {
     setWsStatus('📱 Aprove o login no aplicativo da Steam no celular...', '', null, '#ff9800');
   } else if (data.state === 'error') {
+    disarmDlUnstickButton();
     document.getElementById('dl-loading-screen').classList.remove('visible');
     setWsStatus('❌ ' + data.msg, '', null, '#f44336');
     setTimeout(() => { wsStatus.style.display = 'none'; }, 8000);
@@ -2306,6 +2384,7 @@ function updateHeroSection(item) {
 
 // ---- Init ----
 async function init() {
+  ctrlLog('init(): início');
   try {
     [library, current, settings, allDisplays, displayWallpapers, favorites, playlists, routines] = await Promise.all([
       ipc('get-library'),
@@ -2317,13 +2396,16 @@ async function init() {
       ipc('get-playlists'),
       ipc('get-routines'),
     ]);
+    ctrlLog('init(): Promise.all dos ipc() resolveu');
 
     // Settings UI
     setVolume.value = settings.volume ?? 50;
     setVolumeV.textContent = (settings.volume ?? 50) + '%';
     setPauseFs.checked = settings.pauseOnFullscreen ?? true;
+    setPerfModeFs.checked = settings.performanceModeFullscreen ?? false;
     setMuteFs.checked  = settings.muteOnFullscreen  ?? false;
     setStartup.checked = settings.startWithWindows  ?? true;
+    setHideTaskbar.checked = settings.hideTaskbarAndIcons ?? true;
     setAudioRe.checked = settings.audioReactive     ?? false;
     appRules = settings.appRules || [];
 
@@ -2344,19 +2426,25 @@ async function init() {
     renderMonitors();
     renderAppRules();
     renderPlaylistsGrid();
+    ctrlLog('init(): render*() todos concluídos, chamando checkFirstRunNotice');
     checkFirstRunNotice();
+    ctrlLog('init(): fim (checkFirstRunNotice é async, pode continuar depois)');
   } catch (e) {
+    ctrlLog(`init(): EXCEÇÃO capturada: ${e.stack}`);
     alert('Erro crítico no init: ' + e.stack);
   }
 }
 
 async function checkFirstRunNotice() {
+  ctrlLog('checkFirstRunNotice(): início, chamando should-show-we-scene-notice');
   const shouldShow = await ipc('should-show-we-scene-notice');
-  if (!shouldShow) return;
+  ctrlLog(`checkFirstRunNotice(): shouldShow=${shouldShow}`);
+  if (!shouldShow) { checkWallpaperConflictNotice(); return; }
 
   const modal = document.getElementById('modal-first-run-notice');
   const btn = document.getElementById('btn-first-run-notice-close');
   modal.classList.add('open');
+  ctrlLog('checkFirstRunNotice(): modal aberto, iniciando contagem de 3s');
 
   let secondsLeft = 3;
   btn.textContent = `Entendi (${secondsLeft})`;
@@ -2366,17 +2454,90 @@ async function checkFirstRunNotice() {
       clearInterval(countdown);
       btn.textContent = 'Entendi';
       btn.disabled = false;
+      ctrlLog('checkFirstRunNotice(): botão Entendi liberado');
     } else {
       btn.textContent = `Entendi (${secondsLeft})`;
     }
   }, 1000);
 
   btn.addEventListener('click', async () => {
+    ctrlLog('checkFirstRunNotice(): botão Entendi CLICADO');
     closeModal('modal-first-run-notice');
     const optOut = document.getElementById('chk-first-run-notice-optout')?.checked;
     if (optOut) await ipc('set-we-scene-notice-optout');
+    checkWallpaperConflictNotice();
   }, { once: true });
 }
+
+// Encadeado depois do aviso de cenas do Workshop (ver checkFirstRunNotice) —
+// só existe conteúdo pra mostrar se main.js's checkConflictingWallpaperApps()
+// realmente detectou outro gerenciador de wallpaper (Lively, Wallpaper
+// Engine) rodando junto no boot (ver [[project_workerw_fragility]]: dois
+// apps brigando pelo mesmo truque de embutir atrás do desktop deixava este
+// app com aparência de travado). IPC retorna null quando não há conflito ou
+// o usuário já pediu pra não ver mais.
+async function checkWallpaperConflictNotice() {
+  const names = await ipc('should-show-wallpaper-conflict-notice');
+  if (!names) return;
+
+  const modal = document.getElementById('modal-wallpaper-conflict-notice');
+  const btn = document.getElementById('btn-wallpaper-conflict-notice-close');
+  const namesEl = document.getElementById('wallpaper-conflict-names');
+  if (namesEl) namesEl.textContent = names;
+  modal.classList.add('open');
+
+  btn.addEventListener('click', async () => {
+    closeModal('modal-wallpaper-conflict-notice');
+    const optOut = document.getElementById('chk-wallpaper-conflict-notice-optout')?.checked;
+    if (optOut) await ipc('set-wallpaper-conflict-notice-optout');
+  }, { once: true });
+}
+
+// Checagem de atualização (main.js's checkForUpdates, GitHub Releases) —
+// dois caminhos pro mesmo resultado: 'update-available' chega via push se a
+// checagem em background terminar com a janela já aberta, ou puxamos direto
+// aqui no boot (get-update-info) caso ela já tivesse rodado antes da janela
+// existir. Qualquer um dos dois preenche o mesmo card no rodapé da sidebar.
+function showUpdateBanner(info) {
+  if (!info) return;
+  const banner = document.getElementById('update-banner');
+  const versionEl = document.getElementById('update-banner-version');
+  const btn = document.getElementById('update-banner-download');
+  if (versionEl) versionEl.textContent = `v${info.version}`;
+  banner.style.display = 'flex';
+
+  const resetButton = () => {
+    btn.disabled = false;
+    btn.textContent = info.assetUrl ? 'Atualizar agora' : 'Baixar';
+  };
+  resetButton();
+
+  btn.onclick = () => {
+    if (!info.assetUrl) { shell.openExternal(info.url); return; }
+    btn.disabled = true;
+    btn.textContent = 'Baixando...';
+    ipc('apply-update').then((res) => {
+      if (res && res.ok) return; // app já vai fechar e reabrir sozinho
+      // Sem asset anexado nesta release, ou algo deu errado — cai pro link manual.
+      resetButton();
+      shell.openExternal(info.url);
+    });
+  };
+
+  document.getElementById('update-banner-dismiss').onclick = async () => {
+    banner.style.display = 'none';
+    await ipc('dismiss-update-notice', info.version);
+  };
+}
+ipcRenderer.on('update-available', (_e, info) => showUpdateBanner(info));
+ipc('get-update-info').then(showUpdateBanner);
+ipcRenderer.on('update-apply-progress', (_e, { status }) => {
+  const btn = document.getElementById('update-banner-download');
+  if (!btn) return;
+  if (status === 'downloading') btn.textContent = 'Baixando...';
+  else if (status === 'restarting') btn.textContent = 'Reiniciando...';
+  else if (status === 'error') { btn.disabled = false; btn.textContent = 'Atualizar agora'; }
+});
 
 document.getElementById('btn-sync-steam')?.addEventListener('click', async () => {
   const btn = document.getElementById('btn-sync-steam');

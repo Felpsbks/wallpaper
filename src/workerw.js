@@ -1,7 +1,30 @@
 const koffi = require('koffi');
 
 let user32 = null;
-let FindWindowA, FindWindowExA, SendMessageTimeoutA, SetParent, SetWindowPos, EnumWindows, EnumWindowsCb, SystemParametersInfoW, GetWindowLongA, SetWindowLongA, GetParent, IsIconic, IsWindowVisible;
+let shell32 = null;
+let FindWindowA, FindWindowExA, SendMessageTimeoutA, SetParent, SetWindowPos, EnumWindows, EnumWindowsCb, SystemParametersInfoW, GetWindowLongA, SetWindowLongA, GetParent, IsIconic, IsWindowVisible, ShowWindow;
+let SHAppBarMessage;
+
+// AppBar constants
+const ABM_GETSTATE = 4;
+const ABM_SETSTATE = 10;
+const ABS_AUTOHIDE = 1;
+const ABS_ALWAYSONTOP = 2;
+
+let originalTaskbarState = null;
+
+const RECT = koffi.struct('RECT', {
+  left: 'int', top: 'int', right: 'int', bottom: 'int'
+});
+
+const APPBARDATA = koffi.struct('APPBARDATA', {
+  cbSize: 'uint32',
+  hWnd: 'void*',
+  uCallbackMessage: 'uint32',
+  uEdge: 'uint32',
+  rc: RECT,
+  lParam: 'intptr_t'
+});
 
 // SetWindowPos flags/constants (winuser.h)
 const HWND_BOTTOM     = 1;
@@ -17,6 +40,10 @@ const WS_CHILD  = 0x40000000;
 const SPI_SETDESKWALLPAPER = 0x0014;
 const SPIF_UPDATEINIFILE   = 0x01;
 const SPIF_SENDCHANGE      = 0x02;
+
+// ShowWindow constants (winuser.h)
+const SW_HIDE = 0;
+const SW_SHOW = 5;
 
 function loadUser32() {
   if (user32) return true;
@@ -45,6 +72,10 @@ function loadUser32() {
     GetParent = user32.func('void* GetParent(void* hWnd)');
     IsIconic = user32.func('bool IsIconic(void* hWnd)');
     IsWindowVisible = user32.func('bool IsWindowVisible(void* hWnd)');
+    ShowWindow = user32.func('bool ShowWindow(void* hWnd, int nCmdShow)');
+
+    shell32 = koffi.load('shell32.dll');
+    SHAppBarMessage = shell32.func('intptr_t SHAppBarMessage(uint32 dwMessage, APPBARDATA* pData)');
 
     return true;
   } catch (err) {
@@ -229,4 +260,100 @@ function logWindowState(hwndBuffer, label) {
   }
 }
 
-module.exports = { embedBehindDesktop, setNativeWallpaper, logWindowState, isEmbeddedCorrectly };
+// Acha a ListView real dos ícones da área de trabalho (SysListView32, dentro
+// de SHELLDLL_DefView). Reaproveita a mesma dualidade "desktop normal vs
+// raised desktop" já documentada em embedBehindDesktop, mas usando o loop
+// FindWindowExA(parent=null, ...) em vez de EnumWindows+callback — mais
+// simples pra só enumerar top-level WorkerW's atrás do DefView.
+function findDesktopListView() {
+  const progman = FindWindowA('Progman', null);
+  if (!progman) return null;
+
+  let defView = FindWindowExA(progman, null, 'SHELLDLL_DefView', null);
+  if (!defView) {
+    let workerW = null;
+    while (true) {
+      workerW = FindWindowExA(null, workerW, 'WorkerW', null);
+      if (!workerW) break;
+      const candidate = FindWindowExA(workerW, null, 'SHELLDLL_DefView', null);
+      if (candidate) { defView = candidate; break; }
+    }
+  }
+  if (!defView) return null;
+  return FindWindowExA(defView, null, 'SysListView32', null);
+}
+
+// Mostra/esconde os ícones da área de trabalho — mesmo efeito de clicar com
+// o botão direito na área de trabalho > Exibir > Mostrar ícones da área de
+// trabalho, só que via API direta (ShowWindow na ListView real) em vez do
+// truque de "toggle" (WM_COMMAND 0x7402), que não dá pra saber com certeza
+// o estado atual antes de mandar.
+function setDesktopIconsVisible(visible) {
+  if (process.platform !== 'win32') return false;
+  if (!loadUser32()) return false;
+  try {
+    const listView = findDesktopListView();
+    if (!listView) { console.error('[workerw] SysListView32 não encontrada'); return false; }
+    ShowWindow(listView, visible ? SW_SHOW : SW_HIDE);
+    return true;
+  } catch (err) {
+    console.error('[workerw] setDesktopIconsVisible error:', err.message);
+    return false;
+  }
+}
+
+// Mostra/esconde a barra de tarefas — a principal (Shell_TrayWnd) e qualquer
+// barra secundária em outros monitores (Shell_SecondaryTrayWnd), enumeradas
+// com o mesmo loop de FindWindowExA (não existe só uma instância quando o
+// Windows está configurado pra mostrar a barra em todas as telas).
+function setTaskbarVisible(visible) {
+  if (process.platform !== 'win32') return false;
+  if (!loadUser32()) return false;
+  try {
+    const primary = FindWindowA('Shell_TrayWnd', null);
+    if (primary) {
+      const data = {
+        cbSize: koffi.sizeof(APPBARDATA),
+        hWnd: primary,
+        uCallbackMessage: 0,
+        uEdge: 0,
+        rc: { left: 0, top: 0, right: 0, bottom: 0 },
+        lParam: 0
+      };
+
+      if (!visible) {
+        // Save the original state before changing it for the first time
+        if (originalTaskbarState === null) {
+          originalTaskbarState = SHAppBarMessage(ABM_GETSTATE, data);
+        }
+        data.lParam = ABS_AUTOHIDE;
+        SHAppBarMessage(ABM_SETSTATE, data);
+      } else {
+        if (originalTaskbarState !== null) {
+          data.lParam = originalTaskbarState;
+          SHAppBarMessage(ABM_SETSTATE, data);
+        } else {
+          data.lParam = ABS_ALWAYSONTOP; // Fallback
+          SHAppBarMessage(ABM_SETSTATE, data);
+        }
+      }
+    }
+
+    let any = !!primary;
+
+    let secondary = null;
+    while (true) {
+      secondary = FindWindowExA(null, secondary, 'Shell_SecondaryTrayWnd', null);
+      if (!secondary) break;
+      any = true;
+    }
+
+    if (!any) console.error('[workerw] Nenhuma barra de tarefas encontrada');
+    return any;
+  } catch (err) {
+    console.error('[workerw] setTaskbarVisible error:', err.message);
+    return false;
+  }
+}
+
+module.exports = { embedBehindDesktop, setNativeWallpaper, logWindowState, isEmbeddedCorrectly, setDesktopIconsVisible, setTaskbarVisible };

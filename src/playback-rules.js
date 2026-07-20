@@ -13,6 +13,7 @@ function appRulesNeedProcesses(store) {
 function reconcilePlaybackControls(store, sendToAllWallpapers, context, manualPause) {
   const settings = store.get('settings') || {};
   let rulesActive = { pause: false, mute: false, stop: false };
+  let stopCausedByPerformanceMode = false;
 
   // 1. App Rules
   if (settings.appRules && settings.appRules.length > 0 && context.runningProcesses) {
@@ -32,7 +33,16 @@ function reconcilePlaybackControls(store, sendToAllWallpapers, context, manualPa
       const { isFullscreenAppRunning } = require('./fullscreen');
       const isFs = isFullscreenAppRunning(screen.getAllDisplays());
       if (isFs) {
-        if (settings.pauseOnFullscreen) rulesActive.pause = true;
+        if (settings.pauseOnFullscreen) {
+          // "Modo Desempenho": em vez de só pausar (que mantém vídeo/textura/
+          // partículas carregados na RAM/VRAM o tempo todo), descarrega tudo
+          // de verdade — reaproveita o mesmo 'stop'/'unstop' já usado pelas
+          // App Rules ("Parar (Economiza RAM/GPU)", ver wallpaper.js's
+          // hideAll()/unstop). Troca velocidade de retomada (recarrega do
+          // zero) por RAM/VRAM realmente livres durante o jogo.
+          if (settings.performanceModeFullscreen) { rulesActive.stop = true; stopCausedByPerformanceMode = true; }
+          else rulesActive.pause = true;
+        }
         if (settings.muteOnFullscreen) rulesActive.mute = true;
       }
     } catch {}
@@ -45,6 +55,24 @@ function reconcilePlaybackControls(store, sendToAllWallpapers, context, manualPa
 
   if (rulesActive.stop !== _appState.stop) {
     sendToAllWallpapers(rulesActive.stop ? 'stop' : 'unstop');
+    // Card nativo (notificação do Windows) avisando que o Modo Desempenho
+    // ligou — só faz sentido mostrar aqui (nunca dá tempo de aparecer algo
+    // desenhado no PRÓPRIO wallpaper, já que ele fica atrás do jogo em
+    // tela cheia segundos depois) e só quando é ESTE gatilho específico
+    // (não quando uma App Rule manual "Parar" já configurada pelo usuário
+    // dispara — esse já é um comportamento esperado por ele).
+    if (rulesActive.stop && stopCausedByPerformanceMode) {
+      try {
+        const { Notification } = require('electron');
+        if (Notification.isSupported()) {
+          new Notification({
+            title: 'Modo Desempenho ativado',
+            body: 'Papel de parede descarregado da memória enquanto o jogo estiver em tela cheia.',
+            silent: true,
+          }).show();
+        }
+      } catch {}
+    }
   }
   if (!rulesActive.stop) {
     if (rulesActive.pause !== _appState.pause) {

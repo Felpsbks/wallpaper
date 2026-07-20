@@ -2,7 +2,6 @@ const { ipcRenderer } = require('electron');
 const path = require('path');
 
 let videoEl      = document.getElementById('video-layer');
-let videoElB     = document.getElementById('video-layer-b'); // hidden pre-buffer for the boomerang loop
 const imageEl    = document.getElementById('image-layer');
 const webEl      = document.getElementById('web-layer');
 const canvasEl   = document.getElementById('scene-layer');
@@ -120,6 +119,7 @@ function updateAudioData() {
 const MONTH_ABBR = ['JAN','FEV','MAR','ABR','MAI','JUN','JUL','AGO','SET','OUT','NOV','DEZ'];
 let _clockTimer  = null;
 let _clockConfig = null;
+let _currentRenderType = null;
 
 function renderClockOverlay() {
   if (!_clockConfig || !_clockConfig.enabled) return;
@@ -156,7 +156,11 @@ function applyClockOverlay(cfg) {
 
   if (_clockTimer) { clearInterval(_clockTimer); _clockTimer = null; }
 
-  if (_clockConfig.enabled) {
+  // WE scenes render their own native clock/date objects when the scene
+  // defines them — our own overlay on top would duplicate it (confirmed
+  // live 2026-07-18: a ghost clock floating above the scene's real one,
+  // "Music Visualizer" has its own datetime widget already).
+  if (_clockConfig.enabled && _currentRenderType !== 'we-scene') {
     clockEl.style.display = 'block';
     renderClockOverlay();
     _clockTimer = setInterval(renderClockOverlay, 1000);
@@ -173,21 +177,17 @@ ipcRenderer.invoke('get-settings').then(s => {
 
 function hideAll() {
   videoEl.style.display = 'none';
-  videoElB.style.display = 'none';
   imageEl.style.display = 'none';
   webEl.style.display   = 'none';
   canvasEl.style.display = 'none';
   weSceneEl.style.display = 'none';
   videoEl.pause();
-  videoElB.pause();
   // Pausar sozinho não solta o arquivo — o Chromium mantém o handle aberto
   // num <video> pausado. Isso já travou a Steam com "File locked" ao tentar
   // gravar num item do Workshop enquanto outro vídeo do Workshop tocava.
   // Limpar o src força o handle a ser liberado de verdade.
   videoEl.removeAttribute('src');
   videoEl.load();
-  videoElB.removeAttribute('src');
-  videoElB.load();
   webEl.src = 'about:blank';
   if (currentScene)   { currentScene.destroy();   currentScene = null; }
   if (currentWeScene) { currentWeScene.destroy(); currentWeScene = null; }
@@ -222,69 +222,12 @@ function makeVideoElement(id) {
 // forever, with no error event and no crash, but *only* when switched into
 // from a different video already playing (fine on a fresh page load). Rather
 // than chase the exact internal Chromium state causing that one file to get
-// stuck, sidestep the whole bug class: tear down and recreate both video DOM
-// nodes on every genuine *wallpaper* switch instead of mutating them. Does
-// NOT run on every boomerang segment swap (see armBoomerang below) — only
-// when a different wallpaper is actually selected.
+// stuck, sidestep the whole bug class: tear down and recreate the video DOM
+// node on every genuine *wallpaper* switch instead of mutating it.
 function recreateVideoElements() {
-  const freshA = makeVideoElement('video-layer');
-  const freshB = makeVideoElement('video-layer-b');
-  videoEl.replaceWith(freshA);
-  videoElB.replaceWith(freshB);
-  videoEl = freshA;
-  videoElB = freshB;
-}
-
-// "Bumerangue": toca o vídeo pra frente até quase o fim, troca (num segundo
-// elemento, pré-carregado com antecedência) pra uma cópia do MESMO vídeo já
-// invertida por FFmpeg (ver ensureReversedVideo em main.js), deixa ela tocar
-// até o fim, troca de volta pro arquivo original, repete pra sempre. Como o
-// último frame de um lado é literalmente o primeiro frame do outro (é o
-// mesmo vídeo, só invertido), a troca é entre frames que já combinam — ao
-// contrário da tentativa anterior de fazer isso lopando um único arquivo
-// (ver [[project_video_switch_bugs]] "bug 5"), que crossfadeava frames sem
-// nenhuma relação (fim x início do mesmo clipe) e por isso piscava. Troca é
-// um corte instantâneo (display none/block), sem transição CSS nenhuma —
-// lição da tentativa anterior: misturar (crossfade) dois frames é o que
-// pareceu um flash, não o corte em si.
-const PREBUFFER_LEAD_S = 0.28; // segundos antes do fim pra começar a pré-carregar o próximo segmento
-
-function armBoomerang(front, currentSrc, nextSrc) {
-  const onTimeUpdate = () => {
-    const dur = front.duration;
-    if (!dur || !isFinite(dur)) return;
-    if (dur <= PREBUFFER_LEAD_S) {
-      // Curto demais pra dar tempo de pré-carregar — troca direto no fim.
-      front.removeEventListener('timeupdate', onTimeUpdate);
-      front.addEventListener('ended', () => {
-        front.src = nextSrc;
-        front.currentTime = 0;
-        front.play().catch(() => {});
-        armBoomerang(front, nextSrc, currentSrc);
-      }, { once: true });
-      return;
-    }
-    if (front.currentTime < dur - PREBUFFER_LEAD_S) return;
-    front.removeEventListener('timeupdate', onTimeUpdate);
-
-    const back = (front === videoEl) ? videoElB : videoEl;
-    back.src = nextSrc;
-    back.volume = front.volume;
-    back.currentTime = 0;
-    back.play().catch(() => {});
-
-    const onPlaying = () => {
-      back.removeEventListener('playing', onPlaying);
-      back.style.display = 'block';
-      front.style.display = 'none';
-      if (front === videoEl) { videoEl = back; videoElB = front; }
-      else                   { videoElB = back; videoEl = front; }
-      front.pause(); // lado antigo, agora oculto — congela até virar o próximo buffer
-      armBoomerang(back, nextSrc, currentSrc); // alterna: o destino seguinte é o segmento de onde acabamos de sair
-    };
-    back.addEventListener('playing', onPlaying);
-  };
-  front.addEventListener('timeupdate', onTimeUpdate);
+  const fresh = makeVideoElement('video-layer');
+  videoEl.replaceWith(fresh);
+  videoEl = fresh;
 }
 
 function showVideo(wallpaper) {
@@ -294,20 +237,10 @@ function showVideo(wallpaper) {
   videoEl.src = wallpaper.src;
   savedVolume = (wallpaper.volume ?? 50) / 100;
   videoEl.volume = savedVolume;
-  videoEl.loop = true; // padrão seguro até (e a menos que) a cópia invertida fique pronta
+  videoEl.loop = true;
   videoEl.play().catch((err) => {
     ipcRenderer.send('wallpaper-video-error', { stage: 'play', message: err.message, src: videoEl.src, ts: Date.now() });
   });
-
-  // Gera (ou reusa, se já em cache) a cópia invertida em segundo plano — não
-  // bloqueia nada, o vídeo já está tocando normalmente com loop simples
-  // enquanto isso. Só liga o bumerangue se, quando isso terminar, o usuário
-  // ainda não tiver trocado de wallpaper.
-  ipcRenderer.invoke('ensure-reversed-video', wallpaper.src).then((reversedSrc) => {
-    if (!reversedSrc || _activeWallpaper !== wallpaper) return;
-    videoEl.loop = false;
-    armBoomerang(videoEl, wallpaper.src, reversedSrc);
-  }).catch(() => {});
 
   // Diagnostic: some failures (this app's "7ucky's" repro) show the correct
   // first frame but never advance — no error event fires either, since
@@ -430,6 +363,8 @@ function applyWallpaperNow(wallpaper) {
   if (renderType === 'scene' && wallpaper.workshopId) {
     renderType = wallpaper.weSceneDir ? 'we-scene' : 'image';
   }
+  _currentRenderType = renderType;
+  applyClockOverlay(_clockConfig); // re-avalia visibilidade pro novo renderType
 
   ipcRenderer.send('wallpaper-set-attempt', {
     id: wallpaper.id, name: wallpaper.name, type: wallpaper.type, renderType, src: wallpaper.src, ts: Date.now(),
@@ -471,12 +406,12 @@ function setWallpaper(wallpaper) {
 ipcRenderer.on('set-wallpaper',    (_, w) => setWallpaper(w));
 ipcRenderer.on('stop',             ()     => { hideAll(); });
 ipcRenderer.on('unstop',           ()     => { if (_activeWallpaper) setWallpaper(_activeWallpaper); });
-ipcRenderer.on('pause',            ()     => { videoEl.pause(); videoElB.pause(); });
+ipcRenderer.on('pause',            ()     => { videoEl.pause(); });
 ipcRenderer.on('resume',           ()     => { videoEl.play().catch(() => {}); });
-ipcRenderer.on('mute',             ()     => { videoEl.volume = 0; videoElB.volume = 0; });
-ipcRenderer.on('unmute',           (_, v) => { savedVolume = v / 100; videoEl.volume = savedVolume; videoElB.volume = savedVolume; });
+ipcRenderer.on('mute',             ()     => { videoEl.volume = 0; });
+ipcRenderer.on('unmute',           (_, v) => { savedVolume = v / 100; videoEl.volume = savedVolume; });
 ipcRenderer.on('update-settings',  (_, s) => {
-  if (s.volume !== undefined) { savedVolume = s.volume / 100; videoEl.volume = savedVolume; videoElB.volume = savedVolume; }
+  if (s.volume !== undefined) { savedVolume = s.volume / 100; videoEl.volume = savedVolume; }
   if (s.audioReactive !== undefined) {
     if (s.audioReactive && !audioContext) initAudioVisualizer();
     else if (!s.audioReactive && audioContext) {
