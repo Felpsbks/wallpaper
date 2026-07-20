@@ -52,9 +52,9 @@ Causa confirmada com dado real: consultei `GetPublishedFileDetails` pro item da 
 
 **SteamCMD está descartado por decisão prévia do usuário** — ver `feedback-no-steamcmd` na memória (já causou problema antes, revertido numa sessão anterior). Não é uma opção a reconsiderar.
 
-**Conclusão:** com o approach atual (web-subscribe + poll da pasta local), **não tem como baixar itens novos do Workshop sem o Wallpaper Engine estar instalado** — é limitação da própria Steam (como ela distribui conteúdo de depot), não do nosso código. Usuário pode instalar → baixar o que precisa → desinstalar depois (não confirmado se o conteúdo já baixado permanece na pasta após desinstalar o WE — não testado).
+**Conclusão:** com o approach padrão (web-subscribe + poll da pasta local), não tem como baixar itens novos do Workshop sem o Wallpaper Engine estar instalado — é limitação da própria Steam (como ela distribui conteúdo de depot), não do nosso código.
 
-Ainda sem mudança de código pra isso — usuário pediu só documentar por enquanto (2026-07-20). Ideias em aberto pra quando for revisitar: avisar na UI antes de tentar baixar, ou detectar instalação antes de sequer chamar subscribe.
+**Resolvido (mesma sessão, depois):** ver [steamcmd-pc-secundario.md](steamcmd-pc-secundario.md) — caminho adicional opt-in via SteamCMD, pro caso de uso pessoal (levar conteúdo de um PC que tem o WE instalado pro PC que não tem), sem mexer no fluxo padrão descrito acima.
 
 ---
 

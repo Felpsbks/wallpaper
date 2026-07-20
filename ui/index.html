@@ -534,6 +534,10 @@
           <div><div class="setting-label">Downloads travados</div><div class="setting-desc">Se um download ficar parado, a Steam pode ter pausado a atualização do Wallpaper Engine sozinha (erro "File locked"). Clique para pedir que ela verifique e retome.</div></div>
           <button class="btn btn-secondary" id="btn-unstick-steam">🔓 Destravar</button>
         </div>
+        <div class="setting-row">
+          <div><div class="setting-label">Baixar sem o Wallpaper Engine instalado</div><div class="setting-desc">Pra baixar itens novos do Workshop neste PC quando o Wallpaper Engine não está instalado aqui (avançado, via SteamCMD — a conta ainda precisa possuir o Wallpaper Engine na Steam)</div></div>
+          <button class="btn btn-secondary" id="btn-open-steamcmd">⬇️ Configurar</button>
+        </div>
 
         <div class="settings-section-title" style="margin-top:24px">Relógio na Área de Trabalho</div>
         <div class="setting-desc" style="padding:0 0 10px">Sobrepõe hora, data e dia da semana ao wallpaper atual — como nas cenas do Wallpaper Engine</div>
@@ -825,6 +829,42 @@
     <div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border); display:flex; justify-content:center; gap:16px;">
       <button class="btn-link" id="btn-sl-export-session" style="background:none;border:none;color:var(--text2);font-size:12px;cursor:pointer;">📤 Exportar sessão p/ outro PC</button>
       <button class="btn-link" id="btn-sl-import-session" style="background:none;border:none;color:var(--text2);font-size:12px;cursor:pointer;">📥 Importar sessão</button>
+    </div>
+  </div>
+</div>
+
+<!-- SteamCMD: baixar Workshop sem o Wallpaper Engine instalado neste PC -->
+<div class="modal-backdrop" id="modal-steamcmd">
+  <div class="modal" style="width:440px;">
+    <h3>⬇️ Baixar sem o Wallpaper Engine instalado</h3>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:14px;line-height:1.6">
+      Uso avançado — pra quando este PC não tem o Wallpaper Engine instalado. A conta Steam ainda precisa <b>possuir</b> o Wallpaper Engine. Na primeira vez, o app baixa uma ferramenta oficial da Steam (SteamCMD) e pode pedir sua senha e o código do Steam Guard; depois disso a sessão fica salva e não pede de novo.
+    </p>
+    <div class="field">
+      <label>Usuário Steam</label>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <input type="text" id="scmd-username" placeholder="seu_usuario_steam" autocomplete="off" style="flex:1;" />
+        <button class="btn btn-secondary" id="btn-scmd-validate" style="white-space:nowrap;">Verificar</button>
+      </div>
+      <div id="scmd-login-check" style="font-size:12px;margin-top:6px;"></div>
+    </div>
+    <div class="field">
+      <label>ID ou link do item do Workshop</label>
+      <input type="text" id="scmd-workshop-id" placeholder="ex: 3005028837 ou o link do item" autocomplete="off" />
+    </div>
+    <div id="scmd-prompt-field" class="field" style="display:none">
+      <label id="scmd-prompt-label">Senha</label>
+      <input type="password" id="scmd-prompt-input" autocomplete="off" />
+    </div>
+    <div id="scmd-status" style="font-size:12px;color:var(--text2);min-height:18px;margin:4px 0 6px;display:flex;align-items:center;gap:8px;">
+      <span id="scmd-status-dot" style="display:none;width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0;animation:pulse 1.2s infinite ease-in-out;"></span>
+      <span id="scmd-status-text"></span>
+    </div>
+    <div id="scmd-log-lines" style="display:none;font-family:Consolas,'Courier New',monospace;font-size:11px;line-height:1.6;color:var(--text2);background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;max-height:120px;overflow-y:auto;white-space:pre-wrap;margin-bottom:10px;"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="btn-scmd-cancel" onclick="closeModal('modal-steamcmd')">Fechar</button>
+      <button class="btn btn-secondary" id="btn-scmd-confirm-prompt" style="display:none">Confirmar</button>
+      <button class="btn btn-primary" id="btn-scmd-download">Baixar</button>
     </div>
   </div>
 </div>

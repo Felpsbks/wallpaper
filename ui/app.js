@@ -1103,14 +1103,17 @@ function showWallpaperModal(item) {
   } else {
     applyBtn.innerHTML = _defaultApplyBtnHtml;
     applyBtn.classList.remove('installed');
-    applyBtn.onclick = () => {
-      overlay.classList.remove('open');
+    // Padrão agora é baixar sem precisar do Wallpaper Engine instalado
+    // (via SteamCMD) — um clique só, sem menu de escolha.
+    applyBtn.onclick = (e) => {
+      e.stopPropagation();
       if (!item.compatible) {
         setWsStatus('⚠️ Wallpaper incompatível com o formato livre deste motor.', '', null, '#f44336');
         setTimeout(() => { document.getElementById('ws-status-bar')?.style && (document.getElementById('ws-status-bar').style.display = 'none'); }, 4000);
         return;
       }
-      startWorkshopDownload(item.workshopId, safeTitle, item.preview, item.file_url);
+      overlay.classList.remove('open');
+      startSteamCmdDirect(item.workshopId, item.title);
     };
   }
 
@@ -1425,6 +1428,217 @@ document.getElementById('dl-unstick-btn').addEventListener('click', async (e) =>
   await ipc('unstick-steam-downloads');
   btn.textContent = '✅ Steam avisada, aguarde...';
   setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 5000);
+});
+
+// ---- SteamCMD (opt-in, PC sem Wallpaper Engine instalado) ----
+// Caminho ADICIONAL ao fluxo de download-progress acima — não mexe nele.
+let _scmdPendingPromptKind = null; // 'password' | 'guard-code' | null
+
+function _scmdSetStatus(text, busy) {
+  document.getElementById('scmd-status-text').textContent = text;
+  document.getElementById('scmd-status-dot').style.display = busy ? 'inline-block' : 'none';
+}
+
+function _scmdLog(line) {
+  const box = document.getElementById('scmd-log-lines');
+  box.style.display = 'block';
+  box.textContent += (box.textContent ? '\n' : '') + line;
+  box.scrollTop = box.scrollHeight;
+}
+
+function _setScmdBusy(busy) {
+  document.getElementById('btn-scmd-validate').disabled = busy;
+  document.getElementById('btn-scmd-download').disabled = busy;
+  document.getElementById('btn-scmd-download').textContent = busy ? 'Aguarde...' : 'Baixar';
+}
+
+async function openSteamCmdModal(prefillWorkshopId) {
+  const savedUsername = await ipc('steamcmd-get-username');
+  document.getElementById('scmd-username').value = savedUsername || '';
+  document.getElementById('scmd-workshop-id').value = prefillWorkshopId || '';
+  document.getElementById('scmd-login-check').textContent = '';
+  document.getElementById('scmd-prompt-field').style.display = 'none';
+  document.getElementById('scmd-prompt-input').value = '';
+  document.getElementById('btn-scmd-confirm-prompt').style.display = 'none';
+  document.getElementById('scmd-log-lines').textContent = '';
+  document.getElementById('scmd-log-lines').style.display = 'none';
+  _scmdSetStatus('', false);
+  _setScmdBusy(false);
+  _scmdPendingPromptKind = null;
+  document.getElementById('modal-steamcmd').classList.add('open');
+}
+
+document.getElementById('btn-open-steamcmd').addEventListener('click', () => openSteamCmdModal());
+
+// Ação padrão do "Aplicar Wallpaper" pra item ainda não baixado: um clique
+// só, sem abrir modal — usa o usuário Steam já salvo. Só abre o modal (pra
+// digitar o usuário uma vez) se for a primeiríssima vez, sem nada salvo
+// ainda. Usa a mesma tela cheia de carregamento do fluxo padrão
+// (dl-loading-screen) — pedido do usuário, pra não ficar sem nenhuma
+// indicação visual de que algo está acontecendo. Como o SteamCMD não dá
+// porcentagem real (só estados discretos), a barra avança em degraus fixos
+// por etapa, igual ao "progress" falso que o fluxo padrão já usava.
+async function startSteamCmdDirect(workshopId, title) {
+  const displayTitle = title || 'Wallpaper';
+  const savedUsername = await ipc('steamcmd-get-username');
+  if (!savedUsername) {
+    openSteamCmdModal(workshopId);
+    return;
+  }
+  const dlScreen = document.getElementById('dl-loading-screen');
+  document.getElementById('dl-loading-title').textContent = 'Aplicando wallpaper';
+  document.getElementById('dl-loading-subtitle').textContent = displayTitle;
+  document.getElementById('dl-progress-fill').style.width = '0%';
+  document.getElementById('dl-progress-text').textContent = 'Iniciando...';
+  dlScreen.classList.add('visible');
+  setWsStatus(`⏳ ${displayTitle}`);
+
+  const result = await ipc('steamcmd-download-item', { username: savedUsername, workshopId });
+  if (!result || !result.ok) {
+    dlScreen.classList.remove('visible');
+    setWsStatus('❌ ' + (result && result.msg ? result.msg : 'Falha no download.'), '', null, '#c0392b');
+    setTimeout(() => { wsStatus.style.display = 'none'; }, 5000);
+  }
+}
+
+document.getElementById('btn-scmd-validate').addEventListener('click', async () => {
+  const username = document.getElementById('scmd-username').value.trim();
+  const checkEl = document.getElementById('scmd-login-check');
+  if (!username) {
+    _scmdSetStatus('❌ Informe o usuário Steam.', false);
+    return;
+  }
+  _setScmdBusy(true);
+  checkEl.textContent = '';
+  document.getElementById('scmd-log-lines').textContent = '';
+  document.getElementById('scmd-log-lines').style.display = 'none';
+  _scmdSetStatus('Verificando login...', true);
+  const result = await ipc('steamcmd-validate-login', { username });
+  _setScmdBusy(false);
+  document.getElementById('scmd-prompt-field').style.display = 'none';
+  document.getElementById('btn-scmd-confirm-prompt').style.display = 'none';
+  _scmdPendingPromptKind = null;
+  _scmdSetStatus('', false);
+  if (result && result.ok) {
+    checkEl.textContent = '✅ Usuário e senha corretos.';
+    checkEl.style.color = '#4caf50';
+  } else {
+    checkEl.textContent = '❌ ' + (result && result.msg ? result.msg : 'Usuário ou senha incorretos.');
+    checkEl.style.color = '#e05a5a';
+  }
+});
+
+document.getElementById('btn-scmd-download').addEventListener('click', async () => {
+  const username = document.getElementById('scmd-username').value.trim();
+  const workshopId = document.getElementById('scmd-workshop-id').value.trim();
+  if (!username || !workshopId) {
+    _scmdSetStatus('❌ Preencha usuário e ID/link do item.', false);
+    return;
+  }
+  _setScmdBusy(true);
+  document.getElementById('scmd-log-lines').textContent = '';
+  document.getElementById('scmd-log-lines').style.display = 'none';
+  _scmdSetStatus('Preparando SteamCMD...', true);
+  const result = await ipc('steamcmd-download-item', { username, workshopId });
+  _setScmdBusy(false);
+  document.getElementById('scmd-prompt-field').style.display = 'none';
+  document.getElementById('btn-scmd-confirm-prompt').style.display = 'none';
+  _scmdPendingPromptKind = null;
+  if (result && result.ok) {
+    _scmdSetStatus('✅ Baixado e adicionado à biblioteca!', false);
+  } else {
+    _scmdSetStatus('❌ ' + (result && result.msg ? result.msg : 'Falha no download.'), false);
+  }
+});
+
+document.getElementById('btn-scmd-confirm-prompt').addEventListener('click', async () => {
+  const value = document.getElementById('scmd-prompt-input').value;
+  if (!value || !_scmdPendingPromptKind) return;
+  if (_scmdPendingPromptKind === 'password') {
+    await ipc('steamcmd-provide-password', value);
+  } else {
+    await ipc('steamcmd-provide-guard-code', value);
+  }
+  document.getElementById('scmd-prompt-input').value = '';
+  document.getElementById('scmd-prompt-field').style.display = 'none';
+  document.getElementById('btn-scmd-confirm-prompt').style.display = 'none';
+  _scmdSetStatus('Continuando...', true);
+  _scmdPendingPromptKind = null;
+});
+
+ipcRenderer.on('steamcmd-need-password', () => {
+  _scmdPendingPromptKind = 'password';
+  _scmdSetStatus('🔑 A Steam pediu sua senha.', true);
+  document.getElementById('scmd-prompt-label').textContent = 'Senha';
+  document.getElementById('scmd-prompt-input').type = 'password';
+  document.getElementById('scmd-prompt-input').value = '';
+  document.getElementById('scmd-prompt-field').style.display = 'block';
+  document.getElementById('btn-scmd-confirm-prompt').style.display = 'inline-block';
+  document.getElementById('scmd-prompt-input').focus();
+});
+
+ipcRenderer.on('steamcmd-need-guard-code', () => {
+  _scmdPendingPromptKind = 'guard-code';
+  _scmdSetStatus('📱 Digite o código do Steam Guard.', true);
+  document.getElementById('scmd-prompt-label').textContent = 'Código do Steam Guard';
+  document.getElementById('scmd-prompt-input').type = 'text';
+  document.getElementById('scmd-prompt-input').value = '';
+  document.getElementById('scmd-prompt-field').style.display = 'block';
+  document.getElementById('btn-scmd-confirm-prompt').style.display = 'inline-block';
+  document.getElementById('scmd-prompt-input').focus();
+});
+
+// Linha crua do SteamCMD (mesmo texto que vai pra aba Log) — mostrada
+// também aqui dentro do modal, pra não parecer travado numa espera longa.
+ipcRenderer.on('steamcmd-log-line', (_, line) => _scmdLog(line));
+
+ipcRenderer.on('steamcmd-status', (_, data) => {
+  // Espelha o mesmo status na barra flutuante de sempre (setWsStatus) e,
+  // quando veio do clique direto em "Aplicar Wallpaper", na tela cheia
+  // clássica de download (dl-loading-screen) — sem porcentagem real (o
+  // SteamCMD não dá isso), avança em degraus fixos por etapa.
+  const dlScreen = document.getElementById('dl-loading-screen');
+  const dlFill = document.getElementById('dl-progress-fill');
+  const dlText = document.getElementById('dl-progress-text');
+  const dlActive = dlScreen.classList.contains('visible');
+
+  if (data.state === 'need-interactive-login') {
+    _scmdSetStatus('🪟 Uma janela do SteamCMD vai abrir — se ela pedir senha ou código, digite direto ali (não aqui).', true);
+    setWsStatus('🪟 Uma janela do SteamCMD vai abrir — se pedir senha/código, digite ali.', '', 0.2);
+    if (dlActive) { dlFill.style.width = '20%'; dlText.textContent = 'Aguardando login na Steam...'; }
+  } else if (data.state === 'validating') {
+    _scmdSetStatus('Verificando login...', true);
+    setWsStatus('⏳ Verificando login na Steam...', '', 0.4);
+    if (dlActive) { dlFill.style.width = '45%'; dlText.textContent = 'Verificando login...'; }
+  } else if (data.state === 'starting') {
+    _scmdSetStatus('Baixando via SteamCMD...', true);
+    setWsStatus('📥 Baixando via SteamCMD...', '', 0.6);
+    if (dlActive) { dlFill.style.width = '70%'; dlText.textContent = 'Baixando arquivos...'; }
+  } else if (data.state === 'completed') {
+    const wp = data.wallpaper;
+    if (wp && !library.some(w => w.id === wp.id)) {
+      library.push(wp);
+      renderLibrary();
+    }
+    if (wp) {
+      // Mesmo comportamento do fluxo padrão: baixou, já aplica — e mostra o
+      // mesmo aviso "flutuante" de sempre, visível mesmo se o modal já tiver
+      // sido fechado, pra ficar óbvio que terminou e o quê aconteceu.
+      setWallpaper(wp).catch((err) => console.error('[steamcmd-auto-aplicar]', err));
+      setWsStatus('✅ Baixado via SteamCMD e aplicado!', wp.name || '', 1, '#4caf50');
+      setTimeout(() => { wsStatus.style.display = 'none'; }, 5000);
+    }
+    if (dlActive) {
+      document.getElementById('dl-loading-title').textContent = 'Concluído!';
+      dlFill.style.width = '100%';
+      dlText.textContent = 'Instalando wallpaper...';
+      setTimeout(() => { dlScreen.classList.remove('visible'); }, 1500);
+    }
+  } else if (data.state === 'error') {
+    if (dlActive) dlScreen.classList.remove('visible');
+  }
+  // 'error' já é refletido no texto de retorno do ipc('steamcmd-download-item')
+  // acima — este evento também loga na aba Log (main.js), sem duplicar aqui.
 });
 
 ipcRenderer.on('download-progress', async (_, data) => {

@@ -2025,6 +2025,228 @@ ipcMain.handle('sync-steam-desktop', async () => {
   return { count: added };
 });
 
+// ---- SteamCMD (opt-in, caminho ADICIONAL — PC sem Wallpaper Engine instalado) ----
+// Não substitui nem altera o fluxo padrão (download-workshop-item acima,
+// web-subscribe + poll do cliente Steam). Só existe pra quando o PC não tem
+// o Wallpaper Engine instalado: nesse caso a Steam nunca sincroniza o
+// conteúdo pra pasta local (confirmado ao vivo — ver memória do projeto,
+// GetPublishedFileDetails.file_url vem vazio pra esses itens, é conteúdo de
+// depot). O SteamCMD fala o mesmo protocolo de depot da Steam e consegue
+// baixar Workshop content sem o app-alvo instalado, contanto que a conta
+// possua o app — sempre disparado manualmente pelo usuário (Configurações),
+// nunca automático.
+const steamCmdDir = path.join(app.getPath('userData'), 'steamcmd');
+const steamCmdExe = path.join(steamCmdDir, 'steamcmd.exe');
+let _steamCmdProc = null;
+
+async function ensureSteamCmd() {
+  if (fs.existsSync(steamCmdExe)) return steamCmdExe;
+  appLog('Baixando o SteamCMD pela primeira vez (só acontece uma vez)...');
+  fs.mkdirSync(steamCmdDir, { recursive: true });
+  const zipPath = path.join(os.tmpdir(), 'steamcmd_' + Date.now() + '.zip');
+  await httpDownload('https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip', zipPath);
+  const AdmZip = require('adm-zip');
+  new AdmZip(zipPath).extractAllTo(steamCmdDir, true);
+  fs.unlink(zipPath, () => {});
+  if (!fs.existsSync(steamCmdExe)) throw new Error('steamcmd.exe não apareceu depois de extrair o zip.');
+  appLog.ok('SteamCMD pronto.');
+  return steamCmdExe;
+}
+
+// Roda um comando do SteamCMD do início ao fim (login + o que mais vier nos
+// args), lidando com os prompts de senha/Steam Guard igual nos dois usos
+// (validar login sozinho, ou validar+baixar). Só um processo por vez —
+// _steamCmdProc é compartilhado, é nele que os handlers de
+// provide-password/provide-guard-code escrevem.
+function runSteamCmd(exePath, args) {
+  return new Promise((resolve) => {
+    const proc = spawn(exePath, args, { cwd: steamCmdDir, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    _steamCmdProc = proc;
+
+    let buf = '';
+    let sawError = null;
+    let sawLoginOk = false;
+    const handleLine = (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      if (/password:\s*$/i.test(trimmed)) {
+        if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-need-password');
+        return;
+      }
+      if (/steam guard code:\s*$/i.test(trimmed) || /two-factor code:\s*$/i.test(trimmed)) {
+        if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-need-guard-code');
+        return;
+      }
+      if (/logging in user .* to steam public\.\.\.\s*ok/i.test(trimmed)) sawLoginOk = true;
+      if (/^ERROR!/i.test(trimmed) || /FAILED/i.test(trimmed)) sawError = trimmed;
+      appLog(`[SteamCMD] ${trimmed}`);
+      if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-log-line', trimmed);
+    };
+    const onData = (chunk) => {
+      buf += chunk.toString();
+      let idx;
+      while ((idx = buf.indexOf('\n')) !== -1) {
+        handleLine(buf.slice(0, idx));
+        buf = buf.slice(idx + 1);
+      }
+      // SteamCMD escreve os prompts (ex: "password:") sem quebra de linha
+      // no final — sem checar o buffer parcial, nunca detectaríamos o pedido.
+      if (/password:\s*$/i.test(buf) || /steam guard code:\s*$/i.test(buf) || /two-factor code:\s*$/i.test(buf)) {
+        handleLine(buf);
+        buf = '';
+      }
+    };
+    proc.stdout.on('data', onData);
+    proc.stderr.on('data', onData);
+
+    proc.on('exit', (code) => {
+      _steamCmdProc = null;
+      resolve({ code, sawError, sawLoginOk });
+    });
+    proc.on('error', (err) => {
+      _steamCmdProc = null;
+      resolve({ code: -1, sawError: err.message, sawLoginOk: false });
+    });
+  });
+}
+
+// Login interativo, numa janela de console REAL e visível do Windows — sem
+// pipe nenhum na saída. Confirmado ao vivo (2026-07-20): quando a saída do
+// SteamCMD vai pra um pipe (stdio:'pipe', usado no runSteamCmd acima), ele
+// engasga a saída no buffer interno dele (linhas como "password:" nunca são
+// liberadas) — comportamento conhecido de apps de console no Windows quando
+// não tem uma console real anexada. Testado à mão pelo usuário: no
+// PowerShell direto, os mesmos prompts aparecem normal.
+//
+// stdio:'ignore' sozinho NÃO basta: em `npm run dev`, o Electron herda a
+// console do terminal onde foi lançado (por isso os logs aparecem lá), e o
+// processo filho reaproveita essa mesma console — só que sem handles de
+// entrada/saída de verdade (ignorados), fica cego e mudo, sem nenhuma
+// janela aparecendo. `cmd.exe /c start ... /wait` força uma console NOVA
+// de verdade sempre, não importa o que o processo pai tem — é isso que faz
+// o SteamCMD voltar a se comportar como no teste manual (usuário digita
+// senha/código direto na janela nova). Instantâneo (sem prompt nenhum) se a
+// sessão já estiver em cache.
+function runSteamCmdInteractive(exePath, args) {
+  return new Promise((resolve) => {
+    const proc = spawn('cmd.exe', ['/c', 'start', 'SteamCMD Login', '/wait', exePath, ...args], {
+      cwd: steamCmdDir,
+      windowsHide: false,
+    });
+    proc.on('exit', (code) => resolve({ code }));
+    proc.on('error', (err) => resolve({ code: -1, error: err.message }));
+  });
+}
+
+// O próprio SteamCMD já guarda a sessão nesse arquivo — se ele existe, já
+// logamos com sucesso alguma vez nessa pasta (userData/steamcmd), então não
+// precisa abrir a janela de login de novo. Pedido do usuário: não quer ver
+// aquela janela toda vez que baixar algo, só na primeira vez de verdade.
+function hasCachedSteamCmdSession() {
+  return fs.existsSync(path.join(steamCmdDir, 'config', 'config.vdf'));
+}
+
+// Só confirma se usuário/senha (e Steam Guard, se pedir) estão corretos —
+// não baixa nada. Pedido explícito do usuário: validar antes de tentar
+// baixar um item, em vez de descobrir que a senha está errada só depois.
+// Sucesso aqui já deixa a sessão cacheada, então o download logo em seguida
+// não deve pedir senha/código de novo.
+ipcMain.handle('steamcmd-validate-login', async (_, { username }) => {
+  if (_steamCmdProc) return { ok: false, msg: 'Já existe uma operação do SteamCMD em andamento.' };
+  if (!username) return { ok: false, msg: 'Informe o usuário Steam.' };
+
+  let exePath;
+  try {
+    exePath = await ensureSteamCmd();
+  } catch (err) {
+    appLog.err('Falha ao preparar o SteamCMD: ' + err.message);
+    return { ok: false, msg: 'Falha ao baixar o SteamCMD: ' + err.message };
+  }
+
+  appLog(`Validando login Steam (${username}) via SteamCMD...`);
+  if (!hasCachedSteamCmdSession()) {
+    if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'need-interactive-login' });
+    await runSteamCmdInteractive(exePath, ['+login', username, '+quit']);
+  }
+
+  if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'validating' });
+  const { sawError, sawLoginOk } = await runSteamCmd(exePath, ['+login', username, '+quit']);
+  if (sawLoginOk && !sawError) {
+    store.set('steamCmdUsername', username);
+    appLog.ok('Login Steam validado com sucesso via SteamCMD.');
+    return { ok: true };
+  }
+  const msg = sawError || 'Não foi possível confirmar o login (usuário ou senha incorretos?).';
+  appLog.err('Falha ao validar login via SteamCMD: ' + msg);
+  return { ok: false, msg };
+});
+
+// Login + download num processo único (evita gerenciar estado de sessão
+// entre chamadas separadas). Sessão fica cacheada pelo próprio SteamCMD em
+// steamCmdDir/config — enquanto essa pasta não for apagada, logins
+// seguintes com o mesmo usuário não pedem senha/código de novo (inclusive
+// reaproveita a sessão já validada por steamcmd-validate-login acima).
+ipcMain.handle('steamcmd-download-item', async (_, { username, workshopId }) => {
+  if (_steamCmdProc) return { ok: false, msg: 'Já existe um download via SteamCMD em andamento.' };
+  const idMatch = String(workshopId || '').match(/\d+/);
+  if (!idMatch) return { ok: false, msg: 'ID ou link do item do Workshop inválido.' };
+  const id = idMatch[0];
+  if (!username) return { ok: false, msg: 'Informe o usuário Steam.' };
+  store.set('steamCmdUsername', username);
+
+  let exePath;
+  try {
+    exePath = await ensureSteamCmd();
+  } catch (err) {
+    appLog.err('Falha ao preparar o SteamCMD: ' + err.message);
+    return { ok: false, msg: 'Falha ao baixar o SteamCMD: ' + err.message };
+  }
+
+  appLog(`Iniciando download via SteamCMD do item ${id}...`);
+  if (!hasCachedSteamCmdSession()) {
+    if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'need-interactive-login' });
+    await runSteamCmdInteractive(exePath, ['+login', username, '+quit']);
+  }
+
+  if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'starting' });
+  const { code, sawError } = await runSteamCmd(exePath, [
+    '+login', username,
+    '+workshop_download_item', '431960', id, 'validate',
+    '+quit',
+  ]);
+
+  const contentDir = path.join(steamCmdDir, 'steamapps', 'workshop', 'content', '431960', id);
+  if (fs.existsSync(contentDir) && fs.readdirSync(contentDir).length > 0) {
+    const wpItem = importFromContentDir(contentDir, id);
+    if (wpItem) {
+      appLog.ok('Item baixado via SteamCMD e importado com sucesso!');
+      if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'completed', wallpaper: wpItem });
+      return { ok: true, wallpaper: wpItem };
+    }
+    appLog.err('SteamCMD baixou os arquivos, mas o formato não foi reconhecido.');
+    if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'error', msg: 'Formato não reconhecido.' });
+    return { ok: false, msg: 'Formato não reconhecido.' };
+  }
+  const msg = sawError || `SteamCMD encerrou (código ${code}) sem baixar o item.`;
+  appLog.err('Download via SteamCMD falhou: ' + msg);
+  if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'error', msg });
+  return { ok: false, msg };
+});
+
+ipcMain.handle('steamcmd-provide-password', (_, password) => {
+  if (!_steamCmdProc) return { ok: false };
+  _steamCmdProc.stdin.write(password + '\n');
+  return { ok: true };
+});
+
+ipcMain.handle('steamcmd-provide-guard-code', (_, code) => {
+  if (!_steamCmdProc) return { ok: false };
+  _steamCmdProc.stdin.write(code + '\n');
+  return { ok: true };
+});
+
+ipcMain.handle('steamcmd-get-username', () => store.get('steamCmdUsername') || '');
+
 ipcMain.handle('install-screensaver', async () => {
   try {
     const binDir = path.join(__dirname, 'bin');

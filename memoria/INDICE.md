@@ -25,3 +25,4 @@ Documentação completa do projeto gerada automaticamente em 2026-07-16.
 | [puppet-esqueleto-e-uv.md](puppet-esqueleto-e-uv.md) | *(2026-07-20)* Decodifica o esqueleto real do puppet (29 ossos) e corrige o bug real dos "pedaços espalhados" — era mapeamento de UV, não skinning |
 | [auto-atualizacao-e-build-usuario.md](auto-atualizacao-e-build-usuario.md) | *(2026-07-20)* Verificação/auto-instalação de update via GitHub Releases + filtro vídeo-só na build final |
 | [correcoes-update-e-ui.md](correcoes-update-e-ui.md) | *(2026-07-20)* Crash do ASAR no update, versão na sidebar, modal de confirmação estilizado + blur no fundo dos modais |
+| [steamcmd-pc-secundario.md](steamcmd-pc-secundario.md) | *(2026-07-20)* Caminho adicional (opt-in) pra baixar Workshop sem o Wallpaper Engine instalado — SteamCMD, uso pessoal entre 2 PCs |
