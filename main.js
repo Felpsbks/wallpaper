@@ -47,6 +47,13 @@ const _isConfigMode = args.includes('/c') || args.includes('-c');
 if (args.find(a => a.startsWith('/p') || a.startsWith('-p'))) {
   app.exit(0); // Preview mode not supported yet due to HWND complexity
 }
+
+// Dev sempre roda o binário com o nome original "electron.exe" (bin/, via
+// npm start/run pack/run dev). scripts/build-dist.js só renomeia pra
+// "Engine Wallpaper.exe" na hora de gerar o pacote final pro usuário. Usa
+// esse nome como o sinal "isto é uma build pra usuário final?", sem precisar
+// de nenhuma flag/config nova pra alternar manualmente.
+const _isEndUserBuild = require('path').basename(process.execPath).toLowerCase() !== 'electron.exe';
 // electron-reload REMOVIDO: scripts/dev.js já tem seu próprio watcher
 // completo (mata o processo antigo -> reempacota o ASAR -> sobe um processo
 // novo) — ter os dois ativos ao mesmo tempo fazia cada salvamento de arquivo
@@ -1292,6 +1299,14 @@ function parseSingleWorkshopItem(wpDir, id) {
   let project; try { project = JSON.parse(fs.readFileSync(pf, 'utf-8')); } catch { return null; }
   const type = (project.type || '').toLowerCase();
   if (type !== 'video' && type !== 'web' && type !== 'scene') return null;
+
+  // Builds pro usuário final (ver _isEndUserBuild) só mostram wallpapers de
+  // vídeo do Steam Workshop. O renderer de "scene"/web é uma reimplementação
+  // parcial e reversa do formato da Wallpaper Engine, ainda cheia de recursos
+  // "não confirmados ao vivo" (ver memória do projeto) — não é algo pra expor
+  // pra quem não está depurando isso de perto. No meu próprio dev
+  // (bin/electron.exe) continua tudo liberado, sem filtro.
+  if (_isEndUserBuild && type !== 'video') return null;
 
   let preview = null;
   for (const n of [project.preview, 'preview.gif', 'preview.jpg', 'preview.png'].filter(Boolean)) {
