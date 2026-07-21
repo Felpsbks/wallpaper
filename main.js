@@ -278,10 +278,24 @@ console.log = _wrapConsole(_origConsoleLog, 'info');
 console.error = _wrapConsole(_origConsoleError, 'error');
 console.warn = _wrapConsole(_origConsoleWarn, 'warn');
 
+// Persiste em disco o mesmo texto que vai pra aba Log da UI — sem isso, o
+// conteúdo da aba Log só existe enquanto a janela de controle está aberta na
+// tela (confirmado ao vivo: pra pegar a linha "[GPU]" nesta sessão de debug,
+// sempre precisou pedir pro usuário abrir a aba e copiar manualmente).
+// Sobrescrito a cada boot, mesmo padrão do boot-log.txt.
+let _appLogPath = null;
+try {
+  _appLogPath = path.join(app.getPath('userData'), 'app-log.txt');
+  fs.writeFileSync(_appLogPath, `log iniciado ${new Date().toISOString()}\n`);
+} catch (_) { _appLogPath = null; }
+
 function appLog(msg, level = 'info') {
   const ts = _nowTs();
   _origConsoleLog(`[${ts}] [${level.toUpperCase()}] ${msg}`);
   _sendToUiLog(ts, msg, level);
+  if (_appLogPath) {
+    try { fs.appendFileSync(_appLogPath, `[${ts}] [${level.toUpperCase()}] ${msg}\n`); } catch (_) {}
+  }
 }
 appLog.ok    = (msg) => appLog(msg, 'success');
 appLog.warn  = (msg) => appLog(msg, 'warn');

@@ -84,18 +84,27 @@ if ($defenderEvents) {
 }
 Add ""
 
-# --- 4. Log interno do app (boot-log.txt) ---
+# --- 4. Log interno do app (linha [GPU], gravada em disco desde a v1.0.10) ---
 Add "--- 4. Log interno do app (linha [GPU]) ---"
-$bootLog = Join-Path $env:APPDATA "engine-wallpaper\boot-log.txt"
-if (Test-Path $bootLog) {
-    $gpuLines = Select-String -Path $bootLog -Pattern "\[GPU" -ErrorAction SilentlyContinue
+$appLog = Join-Path $env:APPDATA "engine-wallpaper\app-log.txt"
+if (Test-Path $appLog) {
+    $gpuLines = Select-String -Path $appLog -Pattern "\[GPU" -ErrorAction SilentlyContinue
     if ($gpuLines) {
         foreach ($l in $gpuLines) { Add "  $($l.Line)" }
     } else {
-        Add "  Arquivo existe mas não tem nenhuma linha [GPU] (talvez o app não tenha aberto ainda com essa versão)."
+        Add "  Arquivo existe mas não tem nenhuma linha [GPU] (atualize o app pra versão mais recente e abra ele de novo)."
     }
 } else {
-    Add "  Não encontrado em $bootLog (abra o app pelo menos uma vez antes de rodar este diagnóstico)."
+    Add "  Não encontrado em $appLog (atualize o app pra versão mais recente e abra ele pelo menos uma vez antes de rodar este diagnóstico)."
+}
+Add ""
+
+Add "--- 4b. Log completo de boot (boot-log.txt) ---"
+$bootLog = Join-Path $env:APPDATA "engine-wallpaper\boot-log.txt"
+if (Test-Path $bootLog) {
+    Get-Content $bootLog | ForEach-Object { Add "  $_" }
+} else {
+    Add "  Não encontrado em $bootLog."
 }
 Add ""
 
