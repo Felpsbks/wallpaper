@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, dialog, screen, nativeImage, desktopCapturer } = require('electron');
+const { app, BrowserWindow, BrowserView, ipcMain, Tray, Menu, dialog, screen, nativeImage, desktopCapturer } = require('electron');
 
 // ---- Trava de instância única ----
 // Sem isso, cada relançamento (recarregamento automático do modo dev,
@@ -333,6 +333,33 @@ const routineEngine = new RoutineEngine(store, (...args) => sendToAllWallpapers(
 // Map of displayId -> BrowserWindow (wallpaper windows)
 const wallpaperWindows = new Map();
 
+// Map of BrowserWindow.id -> BrowserView, usado só pelo wallpaper tipo "web".
+// Achado ao vivo (2026-07-21): a tag <webview> deste Electron tem um bug
+// interno não contornável (o canal GUEST_VIEW_MANAGER_CALL que sincroniza o
+// tamanho do conteúdo com o elemento host falha sempre, travando a altura em
+// 150px). BrowserView é uma superfície nativa controlada por aqui mesmo (main
+// process), sem esse tipo de sincronização quebrada — é o substituto que a
+// própria Electron recomenda no lugar de <webview>.
+const wallpaperWebViews = new Map();
+
+function getOrCreateWallpaperWebView(win) {
+  let view = wallpaperWebViews.get(win.id);
+  if (view && !view.webContents.isDestroyed()) return view;
+  view = new BrowserView({
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      webSecurity: false,
+      backgroundThrottling: false,
+    },
+  });
+  wallpaperWebViews.set(win.id, view);
+  win.on('closed', () => {
+    wallpaperWebViews.delete(win.id);
+  });
+  return view;
+}
+
 app.commandLine.appendSwitch('disable-web-security');
 app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
 
@@ -357,7 +384,10 @@ function createWallpaperWindows() {
   screen.on('display-added', (_, display) => spawnWallpaperWindow(display));
   screen.on('display-removed', (_, display) => {
     const win = wallpaperWindows.get(display.id);
-    if (win && !win.isDestroyed()) win.destroy();
+    if (win && !win.isDestroyed()) {
+      wallpaperWebViews.delete(win.id);
+      win.destroy();
+    }
     wallpaperWindows.delete(display.id);
   });
 }
@@ -373,7 +403,7 @@ function spawnWallpaperWindow(display) {
     fullscreen: _isScreensaver,
     webPreferences: {
       nodeIntegration: true, contextIsolation: false,
-      webviewTag: true, webSecurity: false,
+      webSecurity: false,
       // This window is never focused and is always "covered" (behind icons,
       // behind every other app) from Chromium's point of view — without this,
       // it throttles/pauses timers and rendering in what it thinks is a
@@ -1329,6 +1359,18 @@ ipcMain.handle('we-scene-save-overrides', (_, { wallpaperId, overrides }) => {
 
 ipcMain.on('update-native-prop', (_, data) => {
   sendToAllWallpapers('update-native-prop', data);
+  // Wallpaper "web" (BrowserView) não passa pelo listener da própria janela
+  // de wallpaper — encaminha direto pra cada view ativa.
+  for (const view of wallpaperWebViews.values()) {
+    if (view.webContents.isDestroyed()) continue;
+    view.webContents.executeJavaScript(`
+      if (window.wallpaperPropertyListener && window.wallpaperPropertyListener.applyUserProperties) {
+        window.wallpaperPropertyListener.applyUserProperties({
+          "${data.key}": { value: ${JSON.stringify(data.value)} }
+        });
+      }
+    `).catch(() => {});
+  }
 });
 
 // Diagnostic: if this stops appearing while the wallpaper looks frozen, the
@@ -1409,6 +1451,57 @@ ipcMain.on('wallpaper-visibility-change', (event, info) => {
 
 ipcMain.on('wallpaper-set-attempt', (event, info) => {
   console.log(`[wallpaper] applying "${info.name || info.id}" type=${info.type} renderType=${info.renderType} src=${info.src}`);
+});
+
+// Wallpaper tipo "web": renderizado via BrowserView (ver comentário acima de
+// wallpaperWebViews) em vez da tag <webview>, que tem um bug de sincronização
+// de tamanho não contornável nesta versão do Electron.
+ipcMain.on('web-wallpaper-show', (event, { src, options }) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win.isDestroyed()) return;
+  const view = getOrCreateWallpaperWebView(win);
+  win.addBrowserView(view);
+  const bounds = win.getContentBounds();
+  view.setBounds({ x: 0, y: 0, width: bounds.width, height: bounds.height });
+  view.setAutoResize({ width: true, height: true });
+  view.webContents.loadURL(src);
+
+  const injectBridge = () => {
+    view.webContents.executeJavaScript(`
+      window.wallpaperRegisterAudioListener = function(cb) { window._weAudioCallback = cb; };
+    `).catch(() => {});
+    if (options && Object.keys(options).length > 0) {
+      const propsObj = {};
+      for (const [key, val] of Object.entries(options)) propsObj[key] = { value: val };
+      view.webContents.executeJavaScript(`
+        if (window.wallpaperPropertyListener && window.wallpaperPropertyListener.applyUserProperties) {
+          window.wallpaperPropertyListener.applyUserProperties(${JSON.stringify(propsObj)});
+        }
+      `).catch(() => {});
+    }
+  };
+  view.webContents.once('dom-ready', injectBridge);
+});
+
+ipcMain.on('web-wallpaper-hide', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win.isDestroyed()) return;
+  const view = wallpaperWebViews.get(win.id);
+  if (view && !view.webContents.isDestroyed()) {
+    win.removeBrowserView(view);
+    view.webContents.loadURL('about:blank');
+  }
+});
+
+ipcMain.on('web-wallpaper-audio-data', (event, weArray) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win.isDestroyed()) return;
+  const view = wallpaperWebViews.get(win.id);
+  if (view && !view.webContents.isDestroyed()) {
+    view.webContents.executeJavaScript(`
+      if (window._weAudioCallback) { window._weAudioCallback(${JSON.stringify(weArray)}); }
+    `).catch(() => {});
+  }
 });
 
 ipcMain.on('wallpaper-video-error', (event, info) => {
@@ -1718,6 +1811,21 @@ ipcMain.handle('get-update-info', () => {
 });
 ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedUpdateVersion', version); return true; });
 
+// ---- "Novidades desta versão" — aviso único depois de atualizar ----
+// Pedido do usuário: avisar logo no início o que mudou, não só deixar a
+// mudança "acontecer" silenciosamente. Texto editado a cada release
+// relevante; installs novos (sem 'settings' salvo ainda) nunca veem isso,
+// não tem "novidade" pra quem tá abrindo o app pela primeira vez.
+const WHATS_NEW = {
+  version: APP_VERSION,
+  text: 'Wallpapers "web" da Workshop agora funcionam de verdade (preenchem a tela — antes ficavam pequenos, travados num bug antigo do Electron). O feed de Descobrir também prioriza mais vídeo e web, que é o que funciona melhor hoje.',
+};
+ipcMain.handle('get-whats-new', () => {
+  if (store.get('lastSeenWhatsNewVersion') === WHATS_NEW.version) return null;
+  return WHATS_NEW;
+});
+ipcMain.handle('mark-whats-new-seen', (_e, version) => { store.set('lastSeenWhatsNewVersion', version); return true; });
+
 // Auto-atualização "leve": este app sempre roda a partir de um único
 // bin/resources/app.asar (nunca solto/unpacked — ver project_electron_binary
 // na memória), então "instalar a atualização" é só baixar o app.asar novo e
@@ -1918,62 +2026,87 @@ ipcMain.handle('get-workshop-details', async (_, ids) => {
   }
 });
 
+async function fetchWorkshopPage({ sort, search, page, tag }) {
+  // Step 1: Scrape the browse page to get workshop item IDs
+  let browseUrl = `https://steamcommunity.com/workshop/browse/?appid=431960&browsesort=${sort || 'trend'}&section=readytouseitems&actualsort=${sort || 'trend'}&p=${page || 1}`;
+  if (search) browseUrl += '&searchtext=' + encodeURIComponent(search);
+  if (tag) browseUrl += '&requiredtags%5B%5D=' + encodeURIComponent(tag);
+
+  const html = await httpGet(browseUrl);
+  const idPattern = /sharedfiles\/filedetails\/\?id=(\d+)/g;
+  const ids = new Set();
+  let m;
+  while ((m = idPattern.exec(html)) !== null) ids.add(m[1]);
+  const idList = [...ids];
+
+  if (idList.length === 0) {
+    appLog.warn(`browse-workshop (sort=${sort || 'trend'}, tag=${tag || '-'}, page=${page || 1}): scrape retornou 0 IDs (html length=${html.length}). Steam pode ter bloqueado/mudado a página.`);
+    return { items: [], total: 0 };
+  }
+
+  // Step 2: Get full details via Steam public API (no key needed)
+  const formData = { itemcount: idList.length };
+  idList.forEach((id, i) => { formData[`publishedfileids[${i}]`] = id; });
+  const detailJson = await httpPost('https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/', formData);
+  let details;
+  try {
+    details = JSON.parse(detailJson);
+  } catch (parseErr) {
+    appLog.err(`browse-workshop (sort=${sort || 'trend'}): resposta da API de detalhes não é JSON válido (${idList.length} ids). Resposta: ${detailJson.slice(0, 200)}`);
+    return { items: [], total: 0, error: 'Resposta inválida da Steam API' };
+  }
+  if (!details.response || !details.response.publishedfiledetails) {
+    appLog.warn(`browse-workshop (sort=${sort || 'trend'}): API respondeu sem publishedfiledetails (${idList.length} ids enviados). result=${details.response && details.response.result}`);
+  }
+
+  const items = (details.response?.publishedfiledetails || []).map(d => {
+    const tags = (d.tags || []).map(t => t.tag);
+    const waType = inferWaType(tags);
+    return {
+      workshopId: d.publishedfileid,
+      title: d.title || 'Sem título',
+      preview: d.preview_url || '',
+      file_url: d.file_url || '',
+      description: (d.description || '').substring(0, 200),
+      tags,
+      subscribers: d.subscriptions || 0,
+      views: d.views || 0,
+      favorited: d.favorited || 0,
+      timeCreated: d.time_created || null,
+      waType,
+      // 'scene' still works here — it just renders as a static preview image
+      // instead of the animated proprietary scene (see wallpaper.js fallback).
+      compatible: waType === 'video' || waType === 'web' || waType === 'scene',
+    };
+  });
+
+  return { items, total: items.length };
+}
+
 ipcMain.handle('browse-workshop', async (_, { sort, search, page, tag }) => {
   try {
-    // Step 1: Scrape the browse page to get workshop item IDs
-    let browseUrl = `https://steamcommunity.com/workshop/browse/?appid=431960&browsesort=${sort || 'trend'}&section=readytouseitems&actualsort=${sort || 'trend'}&p=${page || 1}`;
-    if (search) browseUrl += '&searchtext=' + encodeURIComponent(search);
-    if (tag) browseUrl += '&requiredtags%5B%5D=' + encodeURIComponent(tag);
-
-    const html = await httpGet(browseUrl);
-    const idPattern = /sharedfiles\/filedetails\/\?id=(\d+)/g;
-    const ids = new Set();
-    let m;
-    while ((m = idPattern.exec(html)) !== null) ids.add(m[1]);
-    const idList = [...ids];
-
-    if (idList.length === 0) {
-      appLog.warn(`browse-workshop (sort=${sort || 'trend'}, page=${page || 1}): scrape retornou 0 IDs (html length=${html.length}). Steam pode ter bloqueado/mudado a página.`);
-      return { items: [], total: 0 };
+    // Achado ao vivo (2026-07-21): a maioria do conteúdo da Workshop é do
+    // tipo "Scene" (motor proprietário da WE, só mostramos como preview
+    // estático) ou "Application" (não suportado) — só vídeo e web tocam de
+    // verdade hoje. O feed padrão (sem busca nem tag escolhida pelo usuário)
+    // busca "Video" e "Web" separadamente e intercala, em vez de depender da
+    // sorte do mix genérico que a Steam devolve.
+    if (!tag && !search) {
+      const [videoRes, webRes] = await Promise.all([
+        fetchWorkshopPage({ sort, search, page, tag: 'Video' }),
+        fetchWorkshopPage({ sort, search, page, tag: 'Web' }),
+      ]);
+      const merged = [];
+      const seen = new Set();
+      const a = videoRes.items, b = webRes.items;
+      const max = Math.max(a.length, b.length);
+      for (let i = 0; i < max; i++) {
+        if (a[i] && !seen.has(a[i].workshopId)) { merged.push(a[i]); seen.add(a[i].workshopId); }
+        if (b[i] && !seen.has(b[i].workshopId)) { merged.push(b[i]); seen.add(b[i].workshopId); }
+      }
+      return { items: merged, total: merged.length };
     }
-
-    // Step 2: Get full details via Steam public API (no key needed)
-    const formData = { itemcount: idList.length };
-    idList.forEach((id, i) => { formData[`publishedfileids[${i}]`] = id; });
-    const detailJson = await httpPost('https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/', formData);
-    let details;
-    try {
-      details = JSON.parse(detailJson);
-    } catch (parseErr) {
-      appLog.err(`browse-workshop (sort=${sort || 'trend'}): resposta da API de detalhes não é JSON válido (${idList.length} ids). Resposta: ${detailJson.slice(0, 200)}`);
-      return { items: [], total: 0, error: 'Resposta inválida da Steam API' };
-    }
-    if (!details.response || !details.response.publishedfiledetails) {
-      appLog.warn(`browse-workshop (sort=${sort || 'trend'}): API respondeu sem publishedfiledetails (${idList.length} ids enviados). result=${details.response && details.response.result}`);
-    }
-
-    const items = (details.response?.publishedfiledetails || []).map(d => {
-      const tags = (d.tags || []).map(t => t.tag);
-      const waType = inferWaType(tags);
-      return {
-        workshopId: d.publishedfileid,
-        title: d.title || 'Sem título',
-        preview: d.preview_url || '',
-        file_url: d.file_url || '',
-        description: (d.description || '').substring(0, 200),
-        tags,
-        subscribers: d.subscriptions || 0,
-        views: d.views || 0,
-        favorited: d.favorited || 0,
-        timeCreated: d.time_created || null,
-        waType,
-        // 'scene' still works here — it just renders as a static preview image
-        // instead of the animated proprietary scene (see wallpaper.js fallback).
-        compatible: waType === 'video' || waType === 'web' || waType === 'scene',
-      };
-    });
-
-    return { items, total: items.length };
+    return await fetchWorkshopPage({ sort, search, page, tag });
   } catch (e) {
     console.error('[browse-workshop]', e.message);
     return { items: [], total: 0, error: e.message };
@@ -2672,6 +2805,10 @@ app.whenReady().then(async () => {
   if (!store.get('settings')) {
     const defaultSettings = { volume: 50, pauseOnFullscreen: true, performanceModeFullscreen: false, muteOnFullscreen: false, startWithWindows: true, audioReactive: false, hideTaskbarAndIcons: true };
     store.set('settings', defaultSettings);
+    // Instalação nova: a versão atual É "o app" pra esse usuário, não uma
+    // "novidade" — não faz sentido mostrar o aviso de "o que mudou" (ver
+    // WHATS_NEW acima) pra quem nunca usou uma versão anterior.
+    store.set('lastSeenWhatsNewVersion', WHATS_NEW.version);
   }
   // Runs on every boot (cheap fs.existsSync check when already in sync — see
   // setAutostart) so existing installs self-migrate off the old Registry

@@ -6,13 +6,12 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
-    #video-layer, #image-layer, #web-layer, #scene-layer, #we-scene-layer {
+    #video-layer, #image-layer, #scene-layer, #we-scene-layer {
       display: none;
       position: fixed; inset: 0;
       width: 100%; height: 100%;
     }
     #video-layer, #image-layer { object-fit: cover; }
-    #web-layer { border: none; }
     #we-scene-layer { overflow: hidden; background: #000; }
 
     #clock-overlay {
@@ -48,7 +47,6 @@
 <body>
   <video  id="video-layer"    autoplay muted playsinline></video>
   <img    id="image-layer"  />
-  <webview id="web-layer"  allowpopups disablewebsecurity></webview>
   <canvas id="scene-layer"></canvas>
   <div id="we-scene-layer"></div>
   <div id="clock-overlay"></div>

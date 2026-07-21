@@ -3,7 +3,6 @@ const path = require('path');
 
 let videoEl      = document.getElementById('video-layer');
 const imageEl    = document.getElementById('image-layer');
-const webEl      = document.getElementById('web-layer');
 const canvasEl   = document.getElementById('scene-layer');
 const weSceneEl  = document.getElementById('we-scene-layer');
 const clockEl    = document.getElementById('clock-overlay');
@@ -12,6 +11,8 @@ const transitionEl = document.getElementById('transition-overlay');
 let currentScene   = null;
 let currentWeScene  = null;
 let savedVolume = 0.5;
+// Wallpaper tipo "web" (BrowserView, controlado pelo main.js — ver showWeb).
+let _webWallpaperActive = false;
 
 // Diagnostic: proves whether this renderer's JS is still executing when the
 // visual content looks frozen, vs. JS running fine but paint/composite not
@@ -95,22 +96,17 @@ async function initAudioVisualizer() {
 }
 
 function updateAudioData() {
-  if (analyser && dataArray && webEl.style.display === 'block') {
+  if (analyser && dataArray && _webWallpaperActive) {
     analyser.getByteFrequencyData(dataArray);
-    
+
     const weArray = new Array(128).fill(0);
     for (let i = 0; i < 64; i++) {
       const val = (dataArray[i] || 0) / 255.0;
-      weArray[i] = val;       
-      weArray[i + 64] = val;  
+      weArray[i] = val;
+      weArray[i + 64] = val;
     }
 
-    const code = `
-      if (window._weAudioCallback) {
-        window._weAudioCallback(${JSON.stringify(weArray)});
-      }
-    `;
-    webEl.executeJavaScript(code).catch(() => {});
+    ipcRenderer.send('web-wallpaper-audio-data', weArray);
   }
   requestAnimationFrame(updateAudioData);
 }
@@ -178,7 +174,6 @@ ipcRenderer.invoke('get-settings').then(s => {
 function hideAll() {
   videoEl.style.display = 'none';
   imageEl.style.display = 'none';
-  webEl.style.display   = 'none';
   canvasEl.style.display = 'none';
   weSceneEl.style.display = 'none';
   videoEl.pause();
@@ -188,13 +183,12 @@ function hideAll() {
   // Limpar o src força o handle a ser liberado de verdade.
   videoEl.removeAttribute('src');
   videoEl.load();
-  // Só reseta a <webview> se ela estava mesmo em uso — resetar ela sempre,
-  // mesmo trocando entre dois wallpapers de vídeo que nunca tocaram nela,
-  // dispara "GUEST_VIEW_MANAGER_CALL"/about:blank/ERR_ABORTED toda vez
-  // (confirmado ao vivo, 2026-07-20, em TODA troca de wallpaper) — suspeito
-  // de atrapalhar a composição da janela inteira nalgumas GPUs (vídeo
-  // continua tocando por dentro, mas a tela para de repintar).
-  if (webEl.style.display !== 'none') webEl.src = 'about:blank';
+  // Só esconde/reseta o BrowserView do wallpaper "web" se ele estava mesmo
+  // em uso — mesma cautela que já existia com a antiga <webview>.
+  if (_webWallpaperActive) {
+    _webWallpaperActive = false;
+    ipcRenderer.send('web-wallpaper-hide');
+  }
   if (currentScene)   { currentScene.destroy();   currentScene = null; }
   if (currentWeScene) { currentWeScene.destroy(); currentWeScene = null; }
 }
@@ -278,60 +272,17 @@ function showImage(wallpaper) {
   imageEl.style.display = 'block';
 }
 
+// Wallpaper tipo "web": renderizado via BrowserView, controlado pelo processo
+// principal (ver main.js). Achado ao vivo (2026-07-21): a tag <webview> desta
+// versão do Electron tem um bug interno não contornável — o canal que
+// sincroniza o tamanho do conteúdo com o elemento host falha sempre,
+// travando a altura da página em 150px mesmo com o host do tamanho certo.
+// BrowserView é a superfície nativa que a própria Electron recomenda no
+// lugar de <webview> justamente por causa desse tipo de bug.
 function showWeb(wallpaper) {
   hideAll();
-  webEl.style.display = 'block';
-  // O CSS do <webview> já diz 100%/100% (ver index.html), mas o Electron
-  // às vezes não propaga isso pro guest view interno só com display:none →
-  // block — forçar em pixel de verdade é um empurrão mais confiável.
-  webEl.style.width  = window.innerWidth  + 'px';
-  webEl.style.height = window.innerHeight + 'px';
-
-  // Apply saved properties when webview finishes loading
-  const onDomReady = () => {
-    // Achado ao vivo (2026-07-21): wallpapers "web" reais da Workshop (ex:
-    // um mini-jogo em HTML) renderizavam do tamanho natural da página —
-    // pequenos, no canto — deixando o resto da tela mostrando só o nosso
-    // fundo preto padrão por trás. Esses projetos são feitos pra rodar
-    // dentro do player oficial da Wallpaper Engine, que injeta CSS esticando
-    // a página pro tamanho da tela — sem isso, não tem nada garantindo que
-    // o próprio html/body da página vai preencher o espaço. Reproduzimos
-    // esse mesmo esticamento aqui.
-    webEl.insertCSS(`
-      html, body {
-        width: 100% !important;
-        height: 100% !important;
-        margin: 0 !important;
-        padding: 0 !important;
-        overflow: hidden !important;
-      }
-    `).catch(() => {});
-
-    // Inject audio listener bridge
-    const audioCode = `
-      window.wallpaperRegisterAudioListener = function(cb) {
-        window._weAudioCallback = cb;
-      };
-    `;
-    webEl.executeJavaScript(audioCode).catch(() => {});
-
-    if (wallpaper.options && Object.keys(wallpaper.options).length > 0) {
-      const propsObj = {};
-      for (const [key, val] of Object.entries(wallpaper.options)) {
-        propsObj[key] = { value: val };
-      }
-      const code = `
-        if (window.wallpaperPropertyListener && window.wallpaperPropertyListener.applyUserProperties) {
-          window.wallpaperPropertyListener.applyUserProperties(${JSON.stringify(propsObj)});
-        }
-      `;
-      webEl.executeJavaScript(code).catch(() => {});
-    }
-    webEl.removeEventListener('dom-ready', onDomReady);
-  };
-  webEl.addEventListener('dom-ready', onDomReady);
-  
-  webEl.src = wallpaper.src;
+  _webWallpaperActive = true;
+  ipcRenderer.send('web-wallpaper-show', { src: wallpaper.src, options: wallpaper.options });
 }
 
 function showScene(wallpaper) {
@@ -474,15 +425,5 @@ window.addEventListener('resize', () => {
   if (currentWeScene?.resize) currentWeScene.resize();
 });
 
-ipcRenderer.on('update-native-prop', (_, data) => {
-  if (webEl.style.display === 'block') {
-    const code = `
-      if (window.wallpaperPropertyListener && window.wallpaperPropertyListener.applyUserProperties) {
-        window.wallpaperPropertyListener.applyUserProperties({
-          "${data.key}": { value: ${JSON.stringify(data.value)} }
-        });
-      }
-    `;
-    webEl.executeJavaScript(code).catch(() => {});
-  }
-});
+// Wallpaper "web" agora é um BrowserView controlado pelo main.js, que já
+// encaminha update-native-prop direto pra view ativa (ver ipcMain.on lá).

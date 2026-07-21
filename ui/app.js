@@ -2798,6 +2798,22 @@ function showUpdateBanner(info) {
 }
 ipcRenderer.on('update-available', (_e, info) => showUpdateBanner(info));
 ipc('get-update-info').then(showUpdateBanner);
+
+// "O que mudou" desde a última vez que o usuário abriu o app — pedido
+// explícito pra não deixar mudanças acontecendo "caladas". Só aparece uma
+// vez por versão (main.js já filtra instalação nova e versão já vista).
+ipc('get-whats-new').then((info) => {
+  if (!info) return;
+  const banner = document.getElementById('whatsnew-banner');
+  const textEl = document.getElementById('whatsnew-banner-text');
+  if (!banner || !textEl) return;
+  textEl.textContent = info.text;
+  banner.style.display = 'flex';
+  document.getElementById('whatsnew-banner-dismiss').onclick = async () => {
+    banner.style.display = 'none';
+    await ipc('mark-whats-new-seen', info.version);
+  };
+});
 // Antes disso, o único sinal de que uma atualização estava acontecendo era
 // o texto de um botão pequeno na sidebar — que some assim que a janela
 // fecha pra trocar de versão, dando a impressão de "só uma tela preta"
