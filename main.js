@@ -27,14 +27,16 @@ app.commandLine.appendSwitch('disable-logging');
 // anterior, revertida — não compensa o custo de disco) não tinha NENHUMA
 // linha mencionando GPU, nem no início do arquivo. A decisão de não usar a
 // GPU acontece antes até do sistema de log existir — não dá pra ver o
-// "porquê" por aí. Nova tentativa, mais direta: em vez de deixar o Chromium
-// escolher sozinho o backend gráfico (ele está escolhendo nenhum —
-// "glImplementationParts":"(gl=none,angle=none)" confirmado no diagnóstico
-// getGPUInfo), força um backend específico do ANGLE. d3d9 é o mais antigo e
-// compatível dos backends do Windows — se o auto-detect estiver falhando
-// por alguma incompatibilidade com a detecção do D3D11 (o padrão), forçar
-// uma via mais simples pode contornar. AINDA NÃO CONFIRMADO.
-app.commandLine.appendSwitch('use-angle', 'd3d9');
+// "porquê" por aí.
+//
+// use-angle=d3d9 foi tentado em seguida e REVERTIDO NO MESMO DIA: quebrou o
+// PC principal, que tinha funcionado perfeitamente a sessão inteira até
+// então (regressão confirmada pelo usuário — "nem no meu está funcionado"
+// logo depois de instalar essa versão). Esse PC certamente estava indo bem
+// com o backend padrão (d3d11, escolhido automaticamente) — forçar d3d9
+// nele quebrou algo que já funcionava, sem consertar nada no PC com
+// problema. Não forçar mais nenhum backend específico do ANGLE; deixar o
+// Chromium escolher sozinho.
 
 // The wallpaper window is *always* occluded from the OS's point of view — it
 // permanently sits behind the desktop icons layer by design. Chromium's
