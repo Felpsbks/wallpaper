@@ -13,6 +13,17 @@ const ABS_ALWAYSONTOP = 2;
 
 let originalTaskbarState = null;
 
+// Confirmado ao vivo (2026-07-21, PC com 2 monitores): as duas janelas de
+// wallpaper (uma por monitor) eram posicionadas relativas ao MESMO ponto
+// (shellDllDefView) na ordem de empilhamento — as duas competindo pela
+// posição exata de "logo atrás dos ícones". Quem se encaixava por último
+// "roubava" essa posição da outra, deixando só uma tela funcionando por vez
+// (e trocando qual, dependendo da ordem/timing). Encadear cada janela nova
+// atrás da anterior (em vez de sempre atrás do DefView) dá uma posição
+// própria pra cada uma, sem conflito — todas continuam atrás dos ícones de
+// qualquer forma, a ordem relativa entre elas não importa.
+let _lastEmbeddedWallpaperHwnd = null;
+
 const RECT = koffi.struct('RECT', {
   left: 'int', top: 'int', right: 'int', bottom: 'int'
 });
@@ -175,6 +186,15 @@ function embedBehindDesktop(hwndBuffer, bounds) {
     // — not to WorkerW at all, which is the wrong target here.
     const isRaisedDesktop = !!shellDllDefView;
 
+    // Encadeia atrás da última janela de wallpaper já encaixada (se houver
+    // outra, de outro monitor) em vez de sempre atrás do DefView — evita a
+    // colisão de 2+ janelas competindo pelo mesmo ponto de inserção (ver
+    // comentário de _lastEmbeddedWallpaperHwnd acima). A primeira janela de
+    // cada boot ainda usa o DefView normalmente, como sempre.
+    const chainTarget = (_lastEmbeddedWallpaperHwnd && _lastEmbeddedWallpaperHwnd !== hwnd)
+      ? _lastEmbeddedWallpaperHwnd
+      : null;
+
     if (isRaisedDesktop) {
       // Lively applies WS_EX_LAYERED here too, but Lively's renderer isn't
       // Chromium — Electron's `transparent: true` window already gets its
@@ -184,16 +204,18 @@ function embedBehindDesktop(hwndBuffer, bounds) {
       // heartbeat ping — a still-updating clock just never shows on screen
       // — so this was specifically a paint/composite bug, not a hang).
       SetParent(hwnd, progman);
-      SetWindowPos(hwnd, shellDllDefView, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+      SetWindowPos(hwnd, chainTarget || shellDllDefView, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     } else {
       if (!workerW) {
         console.error('[workerw] Target WorkerW not found');
         return false;
       }
       SetParent(hwnd, workerW);
-      const insertAfter = shellDllDefView || HWND_BOTTOM;
+      const insertAfter = chainTarget || shellDllDefView || HWND_BOTTOM;
       SetWindowPos(hwnd, insertAfter, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
+
+    _lastEmbeddedWallpaperHwnd = hwnd;
 
     console.log('[workerw] Successfully embedded behind desktop' + (isRaisedDesktop ? ' (raised desktop mode)' : ''));
     return true;
