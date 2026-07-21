@@ -281,9 +281,32 @@ function showImage(wallpaper) {
 function showWeb(wallpaper) {
   hideAll();
   webEl.style.display = 'block';
-  
+  // O CSS do <webview> já diz 100%/100% (ver index.html), mas o Electron
+  // às vezes não propaga isso pro guest view interno só com display:none →
+  // block — forçar em pixel de verdade é um empurrão mais confiável.
+  webEl.style.width  = window.innerWidth  + 'px';
+  webEl.style.height = window.innerHeight + 'px';
+
   // Apply saved properties when webview finishes loading
   const onDomReady = () => {
+    // Achado ao vivo (2026-07-21): wallpapers "web" reais da Workshop (ex:
+    // um mini-jogo em HTML) renderizavam do tamanho natural da página —
+    // pequenos, no canto — deixando o resto da tela mostrando só o nosso
+    // fundo preto padrão por trás. Esses projetos são feitos pra rodar
+    // dentro do player oficial da Wallpaper Engine, que injeta CSS esticando
+    // a página pro tamanho da tela — sem isso, não tem nada garantindo que
+    // o próprio html/body da página vai preencher o espaço. Reproduzimos
+    // esse mesmo esticamento aqui.
+    webEl.insertCSS(`
+      html, body {
+        width: 100% !important;
+        height: 100% !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: hidden !important;
+      }
+    `).catch(() => {});
+
     // Inject audio listener bridge
     const audioCode = `
       window.wallpaperRegisterAudioListener = function(cb) {
