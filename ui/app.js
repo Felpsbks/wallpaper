@@ -2763,8 +2763,10 @@ async function checkWallpaperConflictNotice() {
 // checagem em background terminar com a janela já aberta, ou puxamos direto
 // aqui no boot (get-update-info) caso ela já tivesse rodado antes da janela
 // existir. Qualquer um dos dois preenche o mesmo card no rodapé da sidebar.
+let _pendingUpdateVersion = null;
 function showUpdateBanner(info) {
   if (!info) return;
+  _pendingUpdateVersion = info.version;
   const banner = document.getElementById('update-banner');
   const versionEl = document.getElementById('update-banner-version');
   const btn = document.getElementById('update-banner-download');
@@ -2796,12 +2798,41 @@ function showUpdateBanner(info) {
 }
 ipcRenderer.on('update-available', (_e, info) => showUpdateBanner(info));
 ipc('get-update-info').then(showUpdateBanner);
-ipcRenderer.on('update-apply-progress', (_e, { status }) => {
+// Antes disso, o único sinal de que uma atualização estava acontecendo era
+// o texto de um botão pequeno na sidebar — que some assim que a janela
+// fecha pra trocar de versão, dando a impressão de "só uma tela preta"
+// (pedido explícito do usuário pra melhorar). Reusa a mesma tela cheia
+// roxa de sempre (dl-loading-screen), com progresso real de bytes baixados.
+ipcRenderer.on('update-apply-progress', (_e, data) => {
   const btn = document.getElementById('update-banner-download');
-  if (!btn) return;
-  if (status === 'downloading') btn.textContent = 'Baixando...';
-  else if (status === 'restarting') btn.textContent = 'Reiniciando...';
-  else if (status === 'error') { btn.disabled = false; btn.textContent = 'Atualizar agora'; }
+  const dlScreen = document.getElementById('dl-loading-screen');
+  const dlFill = document.getElementById('dl-progress-fill');
+  const dlText = document.getElementById('dl-progress-text');
+
+  if (data.status === 'downloading') {
+    if (btn) btn.textContent = 'Baixando...';
+    document.getElementById('dl-loading-title').textContent = 'Atualizando o app';
+    document.getElementById('dl-loading-subtitle').textContent = _pendingUpdateVersion ? `Versão ${_pendingUpdateVersion}` : '';
+    dlScreen.classList.add('visible');
+    if (data.pct !== null && data.pct !== undefined) {
+      const pctInt = Math.round(data.pct * 100);
+      dlFill.style.width = pctInt + '%';
+      dlText.textContent = `${pctInt}% (${formatBytes(data.received)} / ${formatBytes(data.total)})`;
+    } else {
+      dlFill.style.width = '15%';
+      dlText.textContent = 'Baixando...';
+    }
+  } else if (data.status === 'restarting') {
+    if (btn) btn.textContent = 'Reiniciando...';
+    document.getElementById('dl-loading-title').textContent = 'Quase lá!';
+    dlFill.style.width = '100%';
+    dlText.textContent = 'Reiniciando o app...';
+  } else if (data.status === 'error') {
+    if (btn) { btn.disabled = false; btn.textContent = 'Atualizar agora'; }
+    dlScreen.classList.remove('visible');
+    setWsStatus('❌ Falha ao atualizar: ' + (data.message || 'erro desconhecido'), '', null, '#c0392b');
+    setTimeout(hideWsStatus, 6000);
+  }
 });
 
 document.getElementById('btn-sync-steam')?.addEventListener('click', async () => {

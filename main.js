@@ -63,6 +63,19 @@ app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,Di
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 
+// Confirmado ao vivo (2026-07-20) via app.getGPUFeatureStatus() logado no
+// boot: no PC onde o vídeo trava, TUDO relacionado a GPU vem
+// "disabled_software" — gpu_compositing, video_decode, opengl, webgl, tudo.
+// Não é sobre prioridade/composição, o Chromium simplesmente recusou usar a
+// GPU física inteira pra esse app (PC físico normal, sem RDP/VM — descartado
+// direto com o usuário). Isso é o comportamento clássico da blocklist
+// interna de GPU/driver do Chromium (lista de combinações conhecidas por dar
+// problema, mantida pela própria Google/Chromium, reavaliada a cada versão).
+// Essa flag força ignorar essa lista e tentar usar a GPU mesmo assim — ainda
+// NÃO CONFIRMADO se resolve o vídeo, mas é a primeira tentativa que ataca a
+// causa raiz de verdade encontrada nos dados, não mais uma suposição.
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
+
 // Without this, Windows identifies the process by its exe's own identity
 // (still literally called "electron.exe" in dev/autostart — see
 // project_electron_binary memory) for taskbar grouping/jump lists/toast
@@ -1532,7 +1545,11 @@ function httpGet(url) {
 
 // Igual ao httpGet acima, mas grava direto em disco em binário (não decodifica
 // como texto) — usado só para baixar o asset .asar da release, que não é JSON.
-function httpDownload(url, destPath) {
+// `onProgress(receivedBytes, totalBytes|null)` opcional — usado pela tela de
+// progresso real da atualização (antes disso, a única pista de que algo
+// estava acontecendo era o texto de um botão pequeno na sidebar, some
+// assim que a janela fecha pra trocar de versão).
+function httpDownload(url, destPath, onProgress) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(destPath);
     https.get(url, {
@@ -1541,12 +1558,20 @@ function httpDownload(url, destPath) {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         file.close();
         fs.unlink(destPath, () => {});
-        return httpDownload(res.headers.location, destPath).then(resolve).catch(reject);
+        return httpDownload(res.headers.location, destPath, onProgress).then(resolve).catch(reject);
       }
       if (res.statusCode !== 200) {
         file.close();
         fs.unlink(destPath, () => {});
         return reject(new Error(`HTTP ${res.statusCode} ao baixar atualização`));
+      }
+      const total = Number(res.headers['content-length']) || null;
+      let received = 0;
+      if (onProgress) {
+        res.on('data', (chunk) => {
+          received += chunk.length;
+          onProgress(received, total);
+        });
       }
       res.pipe(file);
       file.on('finish', () => file.close(() => resolve()));
@@ -1653,8 +1678,10 @@ ipcMain.handle('apply-update', async () => {
     // Electron, então esse patch nunca entra em ação ali.
     const downloadTmpPath = path.join(updateDir, 'app-update.download');
     appLog(`Baixando atualização (v${_pendingUpdateInfo.version})...`);
-    sendProgress({ status: 'downloading' });
-    await httpDownload(_pendingUpdateInfo.assetUrl, downloadTmpPath);
+    sendProgress({ status: 'downloading', pct: 0 });
+    await httpDownload(_pendingUpdateInfo.assetUrl, downloadTmpPath, (received, total) => {
+      sendProgress({ status: 'downloading', pct: total ? received / total : null, received, total });
+    });
 
     const downloadedSize = fs.statSync(downloadTmpPath).size;
     if (!downloadedSize || (_pendingUpdateInfo.assetSize && downloadedSize !== _pendingUpdateInfo.assetSize)) {
