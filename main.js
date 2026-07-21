@@ -2114,7 +2114,7 @@ ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedU
 // não tem "novidade" pra quem tá abrindo o app pela primeira vez.
 const WHATS_NEW = {
   version: APP_VERSION,
-  text: 'Wallpapers "web" da Workshop agora funcionam de verdade (preenchem a tela — antes ficavam pequenos, travados num bug antigo do Electron). O feed de Descobrir também prioriza mais vídeo e web, que é o que funciona melhor hoje.',
+  text: 'Nova seção "YouTube" na barra lateral: pesquise dentro do app e o vídeo já vira papel de parede de fundo automaticamente, com opção de baixar em alta qualidade (até 4K) separada. Wallpapers "web" agora também aceitam clique em elementos internos (botões/config) e têm áudio/volume sincronizado.',
 };
 ipcMain.handle('get-whats-new', () => {
   if (store.get('lastSeenWhatsNewVersion') === WHATS_NEW.version) return null;
