@@ -22,6 +22,10 @@ console.log('Copying Electron runtime...');
 for (const entry of fs.readdirSync(binSrc)) {
   // Ferramentas de build que não devem ir pro pacote do usuário final.
   if (['rcedit.exe', '7z.exe', '7z.sfx', '7z.dll'].includes(entry)) continue;
+  // Arquivo temporário que o rcedit às vezes deixa pra trás (confirmado ao
+  // vivo, 2026-07-20 — um "RCXXXXX.tmp" de 33MB inflou o pacote final por
+  // engano) — nunca deve ser copiado, não importa o nome exato.
+  if (/^RC[0-9A-F]+\.tmp$/i.test(entry)) continue;
   const src  = path.join(binSrc, entry);
   const name = entry === 'electron.exe' ? exeName : entry;
   const dst  = path.join(distApp, name);
