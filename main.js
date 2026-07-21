@@ -21,17 +21,20 @@ app.commandLine.appendSwitch('disable-sync');
 app.commandLine.appendSwitch('disable-metrics');
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256');
 
-// TEMPORÁRIO — diagnóstico da falha real de inicialização de GPU (ver
-// memória video-congelado-workerw-repaint): 'disable-logging' de cima foi
-// removido e substituído por isso, só pra conseguir ver a mensagem de erro
-// verdadeira do Chromium (ex.: falha de D3D11CreateDevice) — normalmente
-// esse log não vai pra lugar nenhum num app empacotado. Reverter pra
-// 'disable-logging' de volta assim que a causa raiz for encontrada (escrita
-// constante em disco não combina com o objetivo de ficar leve do projeto).
-const gpuDebugLogPath = require('path').join(app.getPath('userData'), 'chromium-debug.log');
-app.commandLine.appendSwitch('enable-logging', 'file');
-app.commandLine.appendSwitch('log-file', gpuDebugLogPath);
-app.commandLine.appendSwitch('v', '1');
+app.commandLine.appendSwitch('disable-logging');
+
+// Confirmado ao vivo (2026-07-20): log verboso do Chromium (tentativa
+// anterior, revertida — não compensa o custo de disco) não tinha NENHUMA
+// linha mencionando GPU, nem no início do arquivo. A decisão de não usar a
+// GPU acontece antes até do sistema de log existir — não dá pra ver o
+// "porquê" por aí. Nova tentativa, mais direta: em vez de deixar o Chromium
+// escolher sozinho o backend gráfico (ele está escolhendo nenhum —
+// "glImplementationParts":"(gl=none,angle=none)" confirmado no diagnóstico
+// getGPUInfo), força um backend específico do ANGLE. d3d9 é o mais antigo e
+// compatível dos backends do Windows — se o auto-detect estiver falhando
+// por alguma incompatibilidade com a detecção do D3D11 (o padrão), forçar
+// uma via mais simples pode contornar. AINDA NÃO CONFIRMADO.
+app.commandLine.appendSwitch('use-angle', 'd3d9');
 
 // The wallpaper window is *always* occluded from the OS's point of view — it
 // permanently sits behind the desktop icons layer by design. Chromium's
