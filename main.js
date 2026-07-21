@@ -1525,13 +1525,13 @@ function parseSingleWorkshopItem(wpDir, id) {
   const type = (project.type || '').toLowerCase();
   if (type !== 'video' && type !== 'web' && type !== 'scene') return null;
 
-  // Builds pro usuário final (ver _isEndUserBuild) só mostram wallpapers de
-  // vídeo do Steam Workshop. O renderer de "scene"/web é uma reimplementação
-  // parcial e reversa do formato da Wallpaper Engine, ainda cheia de recursos
-  // "não confirmados ao vivo" (ver memória do projeto) — não é algo pra expor
-  // pra quem não está depurando isso de perto. No meu próprio dev
-  // (bin/electron.exe) continua tudo liberado, sem filtro.
-  if (_isEndUserBuild && type !== 'video') return null;
+  // Builds pro usuário final (ver _isEndUserBuild) mostram vídeo E web do
+  // Steam Workshop — "web" é uma página HTML/JS normal, não depende do
+  // renderer reverso de "scene" (esse continua escondido: reimplementação
+  // parcial do formato proprietário da Wallpaper Engine, ainda cheia de
+  // recursos "não confirmados ao vivo", ver memória do projeto). No meu
+  // próprio dev (bin/electron.exe) continua tudo liberado, sem filtro.
+  if (_isEndUserBuild && type !== 'video' && type !== 'web') return null;
 
   let preview = null;
   for (const n of [project.preview, 'preview.gif', 'preview.jpg', 'preview.png'].filter(Boolean)) {
@@ -2131,8 +2131,8 @@ function describeUnrecognizedDownload(contentDir) {
   }
   if (!project) return 'o formato não foi reconhecido (sem project.json legível).';
   const type = (project.type || '').toLowerCase();
-  if (_isEndUserBuild && type && type !== 'video') {
-    return `é do tipo "${type}" — esta versão só aceita vídeo (cenas/web não são suportadas no app final).`;
+  if (_isEndUserBuild && type && type !== 'video' && type !== 'web') {
+    return `é do tipo "${type}" — esta versão só aceita vídeo e web (cenas não são suportadas no app final).`;
   }
   return `o formato não foi reconhecido (tipo "${type || 'desconhecido'}").`;
 }
