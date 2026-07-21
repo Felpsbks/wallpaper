@@ -87,10 +87,27 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding');
 // direto com o usuário). Isso é o comportamento clássico da blocklist
 // interna de GPU/driver do Chromium (lista de combinações conhecidas por dar
 // problema, mantida pela própria Google/Chromium, reavaliada a cada versão).
-// Essa flag força ignorar essa lista e tentar usar a GPU mesmo assim — ainda
-// NÃO CONFIRMADO se resolve o vídeo, mas é a primeira tentativa que ataca a
-// causa raiz de verdade encontrada nos dados, não mais uma suposição.
+// Essa flag força ignorar essa lista e tentar usar a GPU mesmo assim.
+// CONFIRMADO AO VIVO (2026-07-20) QUE NÃO MUDA NADA — mesmo [GPU] idêntico
+// antes/depois no PC afetado. Isso é informação: se fosse bloqueio da lista
+// de combinações conhecidas, essa flag bypassa exatamente isso. Como não
+// mudou nada, a causa não é a blocklist — mantida mesmo assim (sem custo).
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
+
+// Novo dado do diagnóstico completo (getGPUInfo) desse mesmo PC:
+// "inProcessGpu":true e "sandboxed":false — isso sugere que o processo de
+// GPU do Chromium (que normalmente roda ISOLADO, dentro de um sandbox
+// próprio, como o processo renderer também faz) nunca chegou a nascer como
+// processo separado — o Chromium caiu direto pro modo degradado embutido no
+// processo principal, sem gerar nenhum evento de crash (bate com o
+// boot-log.txt real desse PC: gpu-process-crashed/child-process-gone nunca
+// disparam). Teoria nova: algo no SO está impedindo a CRIAÇÃO do processo
+// sandboxed de GPU (política de segurança, proteção contra exploração,
+// etc.) — diferente de "GPU incompatível" (já descartado acima) ou "crash
+// depois de iniciar" (também descartado, sem eventos de crash). Essa flag
+// desliga só o sandbox do processo de GPU (não do resto do app), pra testar
+// se é isso que está barrando ele de sequer iniciar. AINDA NÃO CONFIRMADO.
+app.commandLine.appendSwitch('disable-gpu-sandbox');
 
 // Without this, Windows identifies the process by its exe's own identity
 // (still literally called "electron.exe" in dev/autostart — see
