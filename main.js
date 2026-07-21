@@ -835,27 +835,16 @@ function startWorkerWWatchdog() {
 // a foreign process's window tree the way a plain native window hosting a
 // WebView2 *child control* — what Lively actually does — would).
 //
-// Terceira tentativa (2026-07-20), depois de investigar um PC real onde a
-// GPU inteira é rejeitada pelo Chromium (ver comentário [GPU] no topo do
-// arquivo): nesse PC, o vídeo continua decodificando por dentro
-// normalmente (currentTime avança, readyState=4 — confirmado no log), mas a
-// TELA só atualiza esporadicamente (o usuário via um frame novo a cada
-// several segundos, sem padrão fixo) — ou seja, não é lentidão de
-// decodificação, é o compositor de software simplesmente não tendo um laço
-// de repaint contínuo pra essa janela reparentada. Diferente das duas
-// tentativas anteriores, invalidate() não mexe em posição/tamanho/
-// visibilidade da janela — só pede pro Chromium reagendar um repaint —
-// então não deve causar o mesmo flicker que hide()+show causou antes.
-// Roda sempre (não só quando a GPU está desligada, porque não dá pra saber
-// isso por janela individualmente) — custo é só um pedido de repaint, não
-// uma renderização pesada. AINDA NÃO CONFIRMADO.
+// Terceira tentativa (2026-07-20): webContents.invalidate() a cada 200ms.
+// REVERTIDA NO MESMO DIA — confirmado ao vivo que piorou o PC afetado (tela
+// ficou preta, antes pelo menos mostrava um frame estático/avançando
+// devagar). Suspeita: invalidate() força um repaint completo que, numa
+// janela transparent:true + gpu_compositing desligada, perde a composição
+// de transparência que deixa o vídeo aparecer através da janela
+// reparentada — pinta preto sólido em vez de deixar o conteúdo por trás
+// aparecer. Não tentar de novo sem entender melhor essa interação.
 function startRepaintNudge() {
-  setInterval(() => {
-    for (const win of wallpaperWindows.values()) {
-      if (win.isDestroyed()) continue;
-      try { win.webContents.invalidate(); } catch (_) {}
-    }
-  }, 200);
+  // intentionally a no-op for now
 }
 
 // ---- Autostart (Startup-folder .lnk, not the Registry Run key) ----
