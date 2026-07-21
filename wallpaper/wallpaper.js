@@ -188,7 +188,13 @@ function hideAll() {
   // Limpar o src força o handle a ser liberado de verdade.
   videoEl.removeAttribute('src');
   videoEl.load();
-  webEl.src = 'about:blank';
+  // Só reseta a <webview> se ela estava mesmo em uso — resetar ela sempre,
+  // mesmo trocando entre dois wallpapers de vídeo que nunca tocaram nela,
+  // dispara "GUEST_VIEW_MANAGER_CALL"/about:blank/ERR_ABORTED toda vez
+  // (confirmado ao vivo, 2026-07-20, em TODA troca de wallpaper) — suspeito
+  // de atrapalhar a composição da janela inteira nalgumas GPUs (vídeo
+  // continua tocando por dentro, mas a tela para de repintar).
+  if (webEl.style.display !== 'none') webEl.src = 'about:blank';
   if (currentScene)   { currentScene.destroy();   currentScene = null; }
   if (currentWeScene) { currentWeScene.destroy(); currentWeScene = null; }
 }

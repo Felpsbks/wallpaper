@@ -1636,6 +1636,7 @@ ipcMain.handle('apply-update', async () => {
     // no `copy` do .bat abaixo, que roda via cmd.exe — fora do Node do
     // Electron, então esse patch nunca entra em ação ali.
     const downloadTmpPath = path.join(updateDir, 'app-update.download');
+    appLog(`Baixando atualização (v${_pendingUpdateInfo.version})...`);
     sendProgress({ status: 'downloading' });
     await httpDownload(_pendingUpdateInfo.assetUrl, downloadTmpPath);
 
@@ -1648,26 +1649,64 @@ ipcMain.handle('apply-update', async () => {
     const exePath = process.execPath;
     const pid = process.pid;
     const batPath = path.join(updateDir, 'apply.bat');
+    // Confirmado ao vivo (2026-07-20): esse script ficou preso pra sempre
+    // numa máquina — a janela cmd (que devia ficar escondida, windowsHide
+    // não é 100% confiável em todo Windows) nunca sumia, o app nunca
+    // reabria. Duas correções:
+    // 1. Contador de segurança (%wait_count%) — nunca espera mais de 30s.
+    //    Se passar disso, segue em frente de qualquer jeito (troca o
+    //    arquivo e reabre) em vez de travar pra sempre — reabrir com a
+    //    versão antiga ainda rodando por baixo é recuperável; ficar preso
+    //    escondido não é.
+    // 2. `findstr /I "%pid%"` fazia busca por SUBSTRING no PID, não
+    //    igualdade exata — um PID que aparece como substring de outro
+    //    número na saída do tasklist (memória, sessão, outro PID) geraria
+    //    falso positivo de "ainda rodando" pra sempre. Testei ao vivo trocar
+    //    isso por casar aspas literais (formato CSV sempre entrega cada
+    //    linha de processo entre aspas) via `findstr /C:"\""`, mas TODA
+    //    variante que tentei quebrava de verdade (`FINDSTR: não foi
+    //    possível abrir >nul`, confirmado com um processo real vivo e um
+    //    inexistente) — problema de parsing de aspas do próprio findstr
+    //    nesse contexto, não só teoria. O que funcionou testado ao vivo:
+    //    contar linhas da saída com `find /C /V ""` — processo filtrado por
+    //    PID exato sempre devolve exatamente 1 linha CSV quando existe, e a
+    //    mensagem de "não encontrado" nunca é exatamente 1 linha desse
+    //    formato (confirmado: 2 linhas no Windows em português).
+    // O app fecha (app.quit()) enquanto esse .bat ainda está rodando, então
+    // a aba Log normal (em memória no renderer) não sobrevive pra mostrar o
+    // que aconteceu aqui — confirmado ao vivo (2026-07-20) que um travamento
+    // real nesse script não deixou NENHUM rastro visível em lugar nenhum.
+    // Esse .bat agora escreve seu próprio log num arquivo; o boot seguinte
+    // (ver applyUpdateLogPath mais abaixo em app.whenReady) lê e mostra esse
+    // arquivo na aba Log de verdade antes de apagar.
+    const applyLogPath = path.join(updateDir, 'apply-log.txt');
     const batContents = [
       '@echo off',
+      `echo [%date% %time%] Iniciando, esperando PID ${pid} fechar... > "${applyLogPath}"`,
+      'set wait_count=0',
       ':wait',
-      `tasklist /FI "PID eq ${pid}" /NH | findstr /I "${pid}" >nul`,
-      'if not errorlevel 1 (',
-      '  timeout /t 1 /nobreak >nul',
-      '  goto wait',
-      ')',
-      `copy /Y "${downloadTmpPath}" "${targetAsarPath}" >nul`,
+      `for /f %%i in ('tasklist /FI "PID eq ${pid}" /FO CSV /NH 2^>NUL ^| find /C /V ""') do set proc_count=%%i`,
+      'if not "%proc_count%"=="1" goto swap',
+      'set /a wait_count+=1',
+      `if %wait_count% GEQ 30 (echo [%date% %time%] Limite de 30s atingido, seguindo mesmo assim. ^>^> "${applyLogPath}" & goto swap)`,
+      'timeout /t 1 /nobreak >nul',
+      'goto wait',
+      ':swap',
+      `echo [%date% %time%] Processo antigo encerrado (ou limite atingido). Copiando app.asar... >> "${applyLogPath}"`,
+      `copy /Y "${downloadTmpPath}" "${targetAsarPath}" >nul 2>>"${applyLogPath}"`,
+      `echo [%date% %time%] Copiado. Reabrindo o app... >> "${applyLogPath}"`,
       `start "" "${exePath}"`,
       'del "%~f0"',
     ].join('\r\n');
     fs.writeFileSync(batPath, batContents);
 
+    appLog.ok(`Download concluído (${downloadedSize} bytes). Fechando pra trocar o arquivo e reabrir...`);
     sendProgress({ status: 'restarting' });
     spawn('cmd.exe', ['/c', batPath], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
     setTimeout(() => app.quit(), 300);
     return { ok: true };
   } catch (err) {
-    console.warn('[main] apply-update falhou:', err.message);
+    appLog.err('Falha ao aplicar atualização: ' + err.message);
     sendProgress({ status: 'error', message: err.message });
     return { ok: false, reason: 'error', message: err.message };
   }
@@ -2471,6 +2510,20 @@ app.whenReady().then(async () => {
     appLog(`[GPU] ${JSON.stringify(gpuStatus)}`);
   } catch (err) {
     appLog.warn('[GPU] Não consegui ler getGPUFeatureStatus(): ' + err.message);
+  }
+
+  // Se a última atualização deixou um log pra trás (ver apply-update acima),
+  // mostra ele agora na aba Log de verdade e apaga — só existe se um
+  // apply-update rodou desde o último boot bem-sucedido.
+  try {
+    const applyLogPath = path.join(app.getPath('temp'), 'engine-wallpaper-update', 'apply-log.txt');
+    if (fs.existsSync(applyLogPath)) {
+      const content = fs.readFileSync(applyLogPath, 'utf-8').trim();
+      appLog('[Atualização anterior] ' + content.split('\n').join(' | '));
+      fs.unlinkSync(applyLogPath);
+    }
+  } catch (err) {
+    appLog.warn('Não consegui ler o log da última atualização: ' + err.message);
   }
 
   _bootLog('dentro do callback de whenReady, chamando License.checkLicense');
