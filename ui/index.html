@@ -39,6 +39,10 @@
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
         Descobrir
       </div>
+      <div class="nav-item" data-panel="youtube">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22.54 6.42a2.78 2.78 0 0 0-1.94-2C18.88 4 12 4 12 4s-6.88 0-8.6.46a2.78 2.78 0 0 0-1.94 2A29 29 0 0 0 1 11.75a29 29 0 0 0 .46 5.33A2.78 2.78 0 0 0 3.4 19c1.72.46 8.6.46 8.6.46s6.88 0 8.6-.46a2.78 2.78 0 0 0 1.94-2 29 29 0 0 0 .46-5.25 29 29 0 0 0-.46-5.33z"></path><polygon points="9.75 15.02 15.5 11.75 9.75 8.48 9.75 15.02"></polygon></svg>
+        YouTube
+      </div>
       <div class="nav-item" data-panel="library">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
         Biblioteca
@@ -113,6 +117,13 @@
       <div class="update-banner-text">📢 <b>Novidades</b> — <span id="whatsnew-banner-text"></span></div>
       <div class="update-banner-actions">
         <button class="update-banner-close" id="whatsnew-banner-dismiss" title="Ok, entendi">✕</button>
+      </div>
+    </div>
+
+    <div class="update-banner" id="monitor-detected-banner" style="display:none;">
+      <div class="update-banner-text">🖥️ <span id="monitor-detected-text"></span></div>
+      <div class="update-banner-actions">
+        <button class="update-banner-close" id="monitor-detected-dismiss" title="Ok">✕</button>
       </div>
     </div>
 
@@ -219,6 +230,20 @@
         </div>
         <div id="discover-feed-footer" style="grid-column:1/-1;text-align:center;padding:16px 0 32px 0;color:var(--text2);font-size:13px;"></div>
       </div>
+    </div>
+
+    <!-- ===== YOUTUBE ===== -->
+    <div class="panel" id="panel-youtube" style="flex-direction:column;">
+      <div class="panel-header">
+        <h2>YouTube</h2>
+        <div class="youtube-status youtube-status-idle" id="youtube-status-idle">Pesquise e abra um vídeo abaixo — ele já toca no fundo sozinho.</div>
+        <div class="youtube-status youtube-status-video" id="youtube-status-video" style="display:none;">
+          <span>▶</span>
+          <span id="youtube-apply-title"></span>
+          <button class="btn btn-secondary" id="youtube-apply-btn">Baixar em alta qualidade</button>
+        </div>
+      </div>
+      <div id="youtube-view-container" style="flex:1; position:relative; background:#0d0d0d;"></div>
     </div>
 
     <!-- ===== LIBRARY ===== -->

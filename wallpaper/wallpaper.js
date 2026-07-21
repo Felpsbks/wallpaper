@@ -282,7 +282,7 @@ function showImage(wallpaper) {
 function showWeb(wallpaper) {
   hideAll();
   _webWallpaperActive = true;
-  ipcRenderer.send('web-wallpaper-show', { src: wallpaper.src, options: wallpaper.options });
+  ipcRenderer.send('web-wallpaper-show', { src: wallpaper.src, options: wallpaper.options, properties: wallpaper.properties });
 }
 
 function showScene(wallpaper) {

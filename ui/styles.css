@@ -740,6 +740,13 @@ body::after {
 .panel-header .btn { padding: 8px 14px; border-radius: 8px; font-size: 14px; }
 .panel-header .search-wrap { margin-right: 12px; }
 
+/* Aba YouTube — barra de status/ação fica FORA da área do BrowserView (o
+   navegador embutido é uma superfície nativa que sempre desenha por cima do
+   DOM da página, não dá pra sobrepor um botão HTML em cima dele). */
+.youtube-status { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text2); }
+.youtube-status-video span:first-child { color: var(--accent); }
+#youtube-apply-title { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+
 /* Cabeçalho da Biblioteca (título+subtítulo, busca, botões de adicionar) */
 .panel-header.lib-header { padding: 18px 24px; gap: 16px; }
 .lib-header-title { margin-right: auto; }

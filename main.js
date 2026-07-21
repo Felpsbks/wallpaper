@@ -1,4 +1,4 @@
-const { app, BrowserWindow, BrowserView, ipcMain, Tray, Menu, dialog, screen, nativeImage, desktopCapturer } = require('electron');
+const { app, BrowserWindow, BrowserView, ipcMain, Tray, Menu, dialog, screen, nativeImage, desktopCapturer, globalShortcut } = require('electron');
 
 // ---- Trava de instância única ----
 // Sem isso, cada relançamento (recarregamento automático do modo dev,
@@ -22,6 +22,16 @@ app.commandLine.appendSwitch('disable-metrics');
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256');
 
 app.commandLine.appendSwitch('disable-logging');
+
+// Sem gesto de usuário nenhum (o wallpaper nunca é clicado pra "começar a
+// tocar" — ele já aparece tocando sozinho), o Chromium pode aplicar sua
+// política padrão de autoplay e bloquear o ÁUDIO de conteúdo carregado numa
+// BrowserView "nova" (sem histórico de engajamento) mesmo com autoplay=1 na
+// URL — o vídeo local (<video> na própria janela do wallpaper) parece já
+// escapar disso, mas uma página "web" carregada numa BrowserView é um
+// webContents separado, com engajamento próprio (zerado). Desliga essa
+// política pra todo o app de propósito, não só pro caso do vídeo local.
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 // Confirmado ao vivo (2026-07-20): log verboso do Chromium (tentativa
 // anterior, revertida — não compensa o custo de disco) não tinha NENHUMA
@@ -165,6 +175,7 @@ const routinesMigrate = require('./src/routines/migrate');
 const TRIGGERS = require('./src/routines');
 const { getRunningProcesses } = require('./src/routines/_processMatch');
 const { reconcilePlaybackControls, appRulesNeedProcesses, setAppStatePause } = require('./src/playback-rules');
+const youtubeDownload = require('./src/youtube-download');
 
 // Nudge the OS scheduler to favor this process over other startup apps
 // competing for CPU/disk right after login — part of "start fast like
@@ -333,6 +344,43 @@ const routineEngine = new RoutineEngine(store, (...args) => sendToAllWallpapers(
 // Map of displayId -> BrowserWindow (wallpaper windows)
 const wallpaperWindows = new Map();
 
+// Wallpapers "web" às vezes têm sua própria UI clicável (ex: um botão de
+// configuração desenhado na própria cena). Achado ao vivo (2026-07-21):
+// só desligar ignoreMouseEvents NÃO bastava — o wallpaper fica embaixo do
+// SHELLDLL_DefView (os ícones), que cobre o desktop inteiro e é sempre topo
+// na ordem de empilhamento, então cliques nunca chegavam nele de jeito
+// nenhum. Precisa desencaixar de verdade (sair da árvore do Progman/WorkerW
+// — ver detachFromDesktop) e subir na ordem normal enquanto durar o modo
+// interativo; o watchdog (que existe pra CORRIGIR exatamente esse tipo de
+// "desencaixe") precisa ficar pausado nesse meio tempo, senão ele reencaixa
+// sozinho em ~1s e desfaz tudo.
+let _wallpaperInteractive = false;
+let _watchdogPaused = false;
+function toggleWallpaperInteractive() {
+  _wallpaperInteractive = !_wallpaperInteractive;
+  _watchdogPaused = _wallpaperInteractive;
+  const { detachFromDesktop } = require('./src/workerw');
+
+  for (const win of wallpaperWindows.values()) {
+    if (win.isDestroyed() || _isScreensaver) continue;
+    if (_wallpaperInteractive) {
+      detachFromDesktop(win.getNativeWindowHandle());
+      win.setIgnoreMouseEvents(false);
+      win.setFocusable(true);
+      win.moveTop();
+    } else {
+      win.setIgnoreMouseEvents(true);
+      win.setFocusable(false);
+      embedWallpaperBehindDesktop(win); // reencaixa atrás do desktop de novo
+    }
+  }
+
+  appLog(_wallpaperInteractive
+    ? 'Modo interativo do wallpaper ATIVADO (Ctrl+Alt+W ou menu da bandeja pra desligar) — o wallpaper cobre a tela por cima de outras janelas até desligar.'
+    : 'Modo interativo do wallpaper desligado — voltou ao normal (atrás do desktop, click-through).');
+  if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('wallpaper-interactive-changed', _wallpaperInteractive);
+}
+
 // Map of BrowserWindow.id -> BrowserView, usado só pelo wallpaper tipo "web".
 // Achado ao vivo (2026-07-21): a tag <webview> deste Electron tem um bug
 // interno não contornável (o canal GUEST_VIEW_MANAGER_CALL que sincroniza o
@@ -375,13 +423,26 @@ app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
 // no WorkerW quase simultâneo — uma atrapalha a outra. Espaçar a criação
 // evita a corrida: a primeira janela termina de inicializar e se encaixar
 // antes da segunda começar.
+// Manda a lista atual de monitores pro painel de controle (aba
+// Configurações > Monitores) toda vez que ela muda de verdade — sem isso, a
+// tela só reflete o que existia no boot do app; conectar/desconectar um
+// monitor com o app já aberto deixava a lista velha até reiniciar.
+function notifyDisplaysChanged() {
+  if (!controlWin || controlWin.isDestroyed()) return;
+  const displays = screen.getAllDisplays().map(d => ({ id: d.id, bounds: d.bounds, label: d.label || null }));
+  controlWin.webContents.send('displays-changed', displays);
+}
+
 function createWallpaperWindows() {
   const displays = screen.getAllDisplays();
   displays.forEach((display, i) => {
     setTimeout(() => spawnWallpaperWindow(display), i * 800);
   });
 
-  screen.on('display-added', (_, display) => spawnWallpaperWindow(display));
+  screen.on('display-added', (_, display) => {
+    spawnWallpaperWindow(display);
+    notifyDisplaysChanged();
+  });
   screen.on('display-removed', (_, display) => {
     const win = wallpaperWindows.get(display.id);
     if (win && !win.isDestroyed()) {
@@ -389,6 +450,16 @@ function createWallpaperWindows() {
       win.destroy();
     }
     wallpaperWindows.delete(display.id);
+    // Sem isso, um wallpaper específico ficava "preso" num monitor que não
+    // existe mais — nunca reaparecia se aquele mesmo ID de monitor voltasse
+    // (ex: notebook saindo/voltando do modo clamshell) nem dava pra saber
+    // que a atribuição estava órfã.
+    const dw = store.get('displayWallpapers') || {};
+    if (dw[display.id]) {
+      delete dw[display.id];
+      store.set('displayWallpapers', dw);
+    }
+    notifyDisplaysChanged();
   });
 }
 
@@ -419,7 +490,7 @@ function spawnWallpaperWindow(display) {
   }
 
   win.loadFile(path.join(__dirname, 'wallpaper', 'index.html'));
-  win.setIgnoreMouseEvents(!_isScreensaver);
+  win.setIgnoreMouseEvents(_isScreensaver ? false : !_wallpaperInteractive);
 
   if (_isScreensaver) {
     win.webContents.on('before-input-event', () => app.exit(0));
@@ -461,6 +532,36 @@ function sendToAllWallpapers(channel, ...args) {
     if (!win.isDestroyed()) win.webContents.send(channel, ...args);
   }
   if (channel === 'set-wallpaper' && args[0]) updateNativeWallpaperSnapshot(args[0]);
+  applyAudioToWebWallpaperViews(channel, args);
+}
+
+// Wallpaper "web" (BrowserView, controlado por aqui — ver
+// getOrCreateWallpaperWebView) não recebe os mesmos eventos de áudio que o
+// <video> local: mute/unmute/volume vão só pro DOM da janela de wallpaper,
+// que o BrowserView nem faz parte. Sem isso, o volume/mudo do app nunca
+// afetava o som de um wallpaper web (ex: vídeo do YouTube tocando de fundo).
+function applyAudioToWebWallpaperViews(channel, args) {
+  if (wallpaperWebViews.size === 0) return;
+  if (channel === 'mute') {
+    for (const view of wallpaperWebViews.values()) {
+      if (!view.webContents.isDestroyed()) view.webContents.setAudioMuted(true);
+    }
+  } else if (channel === 'unmute') {
+    for (const view of wallpaperWebViews.values()) {
+      if (!view.webContents.isDestroyed()) view.webContents.setAudioMuted(false);
+    }
+  } else if (channel === 'update-settings' && args[0] && args[0].volume !== undefined) {
+    // setAudioMuted só liga/desliga — pra um volume fracionado de verdade
+    // precisa mexer direto nos elementos de mídia da própria página (não
+    // tem API nativa de "nível de volume" pra webContents no Electron).
+    const vol = Math.max(0, Math.min(1, args[0].volume / 100));
+    for (const view of wallpaperWebViews.values()) {
+      if (view.webContents.isDestroyed()) continue;
+      view.webContents.executeJavaScript(`
+        document.querySelectorAll('video, audio').forEach(function(el) { el.volume = ${vol}; });
+      `).catch(() => {});
+    }
+  }
 }
 
 // ---- Posição real do cursor (pra efeitos interativos: xray, depthparallax) ----
@@ -720,7 +821,7 @@ function createControlWindow() {
   controlWin.webContents.on('render-process-gone', (_e, details) => _bootLog(`controlWin: render-process-gone reason=${details.reason}`));
   controlWin.webContents.on('unresponsive', () => _bootLog('controlWin: unresponsive (renderer travado)'));
   controlWin.webContents.on('responsive', () => _bootLog('controlWin: responsive de novo'));
-  controlWin.on('closed', () => { controlWin = null; });
+  controlWin.on('closed', () => { controlWin = null; youtubeBrowseView = null; });
 
   controlWin.webContents.session.on('will-download', (_, item) => {
     const fname = item.getFilename();
@@ -861,6 +962,10 @@ function embedWallpaperBehindDesktop(win) {
 function startWorkerWWatchdog() {
   const { isEmbeddedCorrectly } = require('./src/workerw');
   setInterval(() => {
+    // Modo interativo do wallpaper (Ctrl+Alt+W / menu da bandeja) desencaixa a janela de
+    // propósito pra ela poder receber clique — sem essa pausa, o watchdog
+    // reencaixava sozinho ~1s depois e desfazia isso a cada tick.
+    if (_watchdogPaused) return;
     for (const win of wallpaperWindows.values()) {
       if (win.isDestroyed()) continue;
       const hwnd = win.getNativeWindowHandle();
@@ -1059,6 +1164,15 @@ function createTray() {
         if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('wallpaper-changed', next);
       } },
     { label: 'Pausar',             click: () => sendToAllWallpapers('pause') },
+    { type: 'separator' },
+    { label: 'Interagir com o wallpaper (clicar em botões dele)', click: () => toggleWallpaperInteractive() },
+    { label: 'Diagnóstico: forçar recomposição de tela', click: () => {
+        const { forceDisplayChangeBroadcast } = require('./src/workerw');
+        const ok = forceDisplayChangeBroadcast();
+        appLog(ok
+          ? 'Diagnóstico: broadcast de WM_DISPLAYCHANGE enviado — veja se o wallpaper travado volta a atualizar agora.'
+          : 'Diagnóstico: falhou ao enviar o broadcast (veja o console).');
+      } },
     { type: 'separator' },
     { label: 'Sair',               click: () => app.exit(0) },
   ]);
@@ -1351,7 +1465,7 @@ ipcMain.handle('we-scene-save-overrides', (_, { wallpaperId, overrides }) => {
     if (current && current.id === wallpaperId) store.set('current', library[idx]);
   }
   for (const win of wallpaperWindows.values()) {
-    if (!win.isDestroyed()) win.setIgnoreMouseEvents(!_isScreensaver);
+    if (!win.isDestroyed()) win.setIgnoreMouseEvents(_isScreensaver ? false : !_wallpaperInteractive);
   }
   if (controlWin && !controlWin.isDestroyed()) { controlWin.restore(); controlWin.focus(); }
   return { ok: true };
@@ -1456,7 +1570,7 @@ ipcMain.on('wallpaper-set-attempt', (event, info) => {
 // Wallpaper tipo "web": renderizado via BrowserView (ver comentário acima de
 // wallpaperWebViews) em vez da tag <webview>, que tem um bug de sincronização
 // de tamanho não contornável nesta versão do Electron.
-ipcMain.on('web-wallpaper-show', (event, { src, options }) => {
+ipcMain.on('web-wallpaper-show', (event, { src, options, properties }) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win || win.isDestroyed()) return;
   const view = getOrCreateWallpaperWebView(win);
@@ -1470,15 +1584,49 @@ ipcMain.on('web-wallpaper-show', (event, { src, options }) => {
     view.webContents.executeJavaScript(`
       window.wallpaperRegisterAudioListener = function(cb) { window._weAudioCallback = cb; };
     `).catch(() => {});
-    if (options && Object.keys(options).length > 0) {
-      const propsObj = {};
+
+    // Achado ao vivo (2026-07-21): o diagnóstico de áudio mostrou um <video>
+    // existente mas com src="" e readyState=0 — nunca chegou a carregar nada.
+    // Wallpapers "web" reais geralmente têm um vídeo/áudio de fundo cujo
+    // NOME DO ARQUIVO é ele mesmo uma propriedade configurável (definida no
+    // project.json), e a própria página só descobre o arquivo via
+    // applyUserProperties. Antes só mandávamos isso se o usuário tivesse
+    // personalizado algo na Biblioteca (w.options) — se não tinha, a página
+    // nunca recebia NENHUM valor, nem os padrões do próprio wallpaper, e o
+    // <video> ficava sem source pra sempre. Agora manda sempre que existir
+    // um schema de propriedades (project.json), usando o padrão de cada uma
+    // quando o usuário não personalizou aquela específica.
+    const propsObj = {};
+    if (properties) {
+      for (const [key, prop] of Object.entries(properties)) {
+        const overridden = options && options[key] !== undefined;
+        propsObj[key] = { value: overridden ? options[key] : prop.value };
+      }
+    } else if (options) {
       for (const [key, val] of Object.entries(options)) propsObj[key] = { value: val };
+    }
+    if (Object.keys(propsObj).length > 0) {
       view.webContents.executeJavaScript(`
         if (window.wallpaperPropertyListener && window.wallpaperPropertyListener.applyUserProperties) {
           window.wallpaperPropertyListener.applyUserProperties(${JSON.stringify(propsObj)});
         }
       `).catch(() => {});
     }
+
+    // Diagnóstico temporário (2026-07-21): autoplay-policy sozinho não
+    // resolveu o som — precisa ver o estado real de qualquer <video>/<audio>
+    // da página em vez de continuar chutando (paused? muted? volume?
+    // existe ALGUM elemento de mídia na página, ou o áudio dela é
+    // sintetizado via Web Audio API, que isso nem alcançaria?).
+    setTimeout(() => {
+      view.webContents.executeJavaScript(`
+        Array.from(document.querySelectorAll('video, audio')).map(function(el) {
+          return { tag: el.tagName, src: (el.currentSrc || el.src || '').slice(-60), paused: el.paused, muted: el.muted, volume: el.volume, readyState: el.readyState, error: el.error ? el.error.message : null };
+        })
+      `).then((mediaState) => {
+        appLog(`[web-audio-diag] mediaElements=${JSON.stringify(mediaState)}`);
+      }).catch((err) => appLog.warn('[web-audio-diag] falhou: ' + err.message));
+    }, 2000);
   };
   view.webContents.once('dom-ready', injectBridge);
 });
@@ -1501,6 +1649,154 @@ ipcMain.on('web-wallpaper-audio-data', (event, weArray) => {
     view.webContents.executeJavaScript(`
       if (window._weAudioCallback) { window._weAudioCallback(${JSON.stringify(weArray)}); }
     `).catch(() => {});
+  }
+});
+
+// ---- Aba "YouTube": navegador embutido pra escolher um vídeo ----
+// Pedido do usuário: abrir o YouTube DE VERDADE dentro do app (busca, home,
+// tudo), e quando ele entrar numa página de vídeo, oferecer "usar como
+// papel de parede" — que vira só mais um wallpaper tipo "url" (mesmo
+// pipeline do wallpaper "web" comum, via /embed/<id> da própria YouTube,
+// que é feito pra ser embutido — a página normal de assistir bloqueia
+// embed via X-Frame-Options). BrowserView de novo, pelo mesmo motivo do
+// wallpaper "web": sem o bug de sincronização que a <webview> tinha.
+let youtubeBrowseView = null;
+const YOUTUBE_VIDEO_ID_RE = /(?:\/watch\?(?:[^#]*&)?v=|\/shorts\/)([a-zA-Z0-9_-]{11})/;
+
+// Achado ao vivo (2026-07-21, 3a rodada): entrar num vídeo real do YouTube
+// dentro do navegador embutido faz ELE MESMO tocar ali (comportamento normal
+// do youtube.com) — ao mesmo tempo que o usuário quer que só toque "no
+// fundo" (como wallpaper). Suprime o <video> da própria página embutida
+// (muted+pause, reaplicado por um intervalo — o player do YouTube tenta
+// retomar sozinho) pra nunca haver reprodução dupla.
+function suppressInlinePlayback(view) {
+  view.webContents.executeJavaScript(`
+    (function() {
+      function suppress() { document.querySelectorAll('video').forEach(function(v){ v.muted = true; v.pause(); }); }
+      suppress();
+      if (!window.__ewSuppress) { window.__ewSuppress = setInterval(suppress, 300); }
+    })();
+  `).catch(() => {});
+}
+
+// Achado ao vivo (2026-07-21): apontar o wallpaper "web" DIRETO pra URL
+// /embed/<id> (como se fosse a página em si) dava "Erro 153 — erro de
+// configuração do player de vídeo" — o player do YouTube valida a origem
+// de quem carregou ele, e rejeita quando é uma navegação de topo sem
+// nenhuma página "pai" de verdade (não é assim que sites de verdade
+// embutem vídeo, eles sempre têm um <iframe> dentro da própria página).
+// Fix: embrulha o /embed/ dentro de uma paginazinha local (data: URL) com
+// um <iframe> de verdade — imita exatamente como um site real embutiria.
+function buildYoutubeEmbedSrc(videoId) {
+  const embedUrl = `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=0&loop=1&playlist=${videoId}&controls=0&modestbranding=1&rel=0&playsinline=1`;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden}iframe{position:fixed;inset:0;width:100%;height:100%;border:0}</style></head><body><iframe src="${embedUrl}" allow="autoplay; encrypted-media" allowfullscreen></iframe></body></html>`;
+  return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+}
+
+// Vídeo YouTube tocando "ao vivo" (streaming, via player oficial embutido —
+// não é o mesmo caminho do download em src/youtube-download.js) usa um id
+// determinístico (não Date.now()) de propósito: clicar de novo no mesmo
+// vídeo não cria uma entrada duplicada na biblioteca, só reaproveita a
+// mesma.
+function upsertYoutubeLiveEntry(videoId, title) {
+  const src = buildYoutubeEmbedSrc(videoId);
+  const id = 'youtube-live-' + videoId;
+  const wallpaper = { id, type: 'url', name: title, src };
+  const library = store.get('library') || [];
+  const idx = library.findIndex(w => w.id === id);
+  if (idx === -1) library.push(wallpaper); else library[idx] = wallpaper;
+  store.set('library', library);
+  return wallpaper;
+}
+
+let _lastAutoAppliedVideoId = null;
+
+function getOrCreateYoutubeBrowseView() {
+  if (youtubeBrowseView && !youtubeBrowseView.webContents.isDestroyed()) return youtubeBrowseView;
+  youtubeBrowseView = new BrowserView({
+    webPreferences: { nodeIntegration: false, contextIsolation: true },
+  });
+  youtubeBrowseView.webContents.loadURL('https://www.youtube.com');
+
+  const reportNavigation = () => {
+    if (!controlWin || controlWin.isDestroyed()) return;
+    suppressInlinePlayback(youtubeBrowseView);
+
+    const url = youtubeBrowseView.webContents.getURL();
+    const match = url.match(YOUTUBE_VIDEO_ID_RE);
+    if (!match) {
+      _lastAutoAppliedVideoId = null;
+      controlWin.webContents.send('youtube-video-detected', { videoId: null });
+      return;
+    }
+
+    const videoId = match[1];
+    const rawTitle = youtubeBrowseView.webContents.getTitle();
+    const title = rawTitle.replace(/\s*-\s*YouTube\s*$/i, '').trim() || 'Vídeo do YouTube';
+    const wallpaper = upsertYoutubeLiveEntry(videoId, title);
+    controlWin.webContents.send('youtube-video-detected', { videoId, title });
+
+    // Clicar no vídeo já toca no fundo, sem precisar de botão — só quando o
+    // vídeo muda de verdade (evita recarregar o wallpaper a cada "tick" de
+    // page-title-updated enquanto o título ainda tá carregando).
+    if (videoId !== _lastAutoAppliedVideoId) {
+      _lastAutoAppliedVideoId = videoId;
+      controlWin.webContents.send('youtube-auto-apply', wallpaper);
+    }
+  };
+  // YouTube é uma SPA — trocar de vídeo pela busca/relacionados quase nunca
+  // dispara uma navegação "cheia" (did-navigate), só muda a URL por dentro
+  // (did-navigate-in-page). O título do documento também muda um instante
+  // depois de carregar os dados do vídeo, daí escutar os três.
+  youtubeBrowseView.webContents.on('did-navigate', reportNavigation);
+  youtubeBrowseView.webContents.on('did-navigate-in-page', reportNavigation);
+  youtubeBrowseView.webContents.on('page-title-updated', reportNavigation);
+
+  return youtubeBrowseView;
+}
+
+ipcMain.on('youtube-panel-show', (event, bounds) => {
+  if (!controlWin || controlWin.isDestroyed()) return;
+  const view = getOrCreateYoutubeBrowseView();
+  controlWin.addBrowserView(view);
+  view.setBounds({ x: Math.round(bounds.x), y: Math.round(bounds.y), width: Math.round(bounds.width), height: Math.round(bounds.height) });
+});
+
+ipcMain.on('youtube-panel-hide', (event) => {
+  if (!controlWin || controlWin.isDestroyed() || !youtubeBrowseView) return;
+  controlWin.removeBrowserView(youtubeBrowseView);
+});
+
+// Baixar é uma ação SEPARADA e opcional (botão na aba) — clicar num vídeo já
+// toca ao vivo no fundo sozinho (ver upsertYoutubeLiveEntry acima); esse
+// handler é só para quando o usuário quer guardar uma cópia de verdade em
+// alta qualidade na biblioteca (yt-dlp + ffmpeg, ver src/youtube-download.js).
+ipcMain.handle('youtube-download-wallpaper', async (event, { videoId, title }) => {
+  const sendProgress = (data) => {
+    if (event.sender && !event.sender.isDestroyed()) event.sender.send('youtube-download-progress', data);
+  };
+  try {
+    const safeName = (title || 'video-youtube').replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 80) || 'video-youtube';
+    const dir = path.join(app.getPath('userData'), 'wallpapers', 'youtube');
+    fs.mkdirSync(dir, { recursive: true });
+    const outputBase = path.join(dir, `${Date.now()}-${safeName}`);
+
+    const finalPath = await youtubeDownload.downloadYoutubeVideo({
+      url: `https://www.youtube.com/watch?v=${videoId}`,
+      outputBasePath: outputBase,
+      onProgress: sendProgress,
+    });
+
+    const wallpaper = { type: 'video', name: title || 'Vídeo do YouTube', src: finalPath, id: Date.now().toString() };
+    const library = store.get('library') || [];
+    library.push(wallpaper);
+    store.set('library', library);
+    sendProgress({ phase: 'done' });
+    return { ok: true, wallpaper };
+  } catch (err) {
+    appLog.err(`youtube-download-wallpaper falhou: ${err.message}`);
+    sendProgress({ phase: 'error', message: err.message });
+    return { ok: false, error: err.message };
   }
 });
 
@@ -2823,6 +3119,20 @@ app.whenReady().then(async () => {
 
   createWallpaperWindows();
   _bootLog('createWallpaperWindows retornou');
+  if (!_isScreensaver) {
+    // Ctrl+Shift+I é o atalho de DevTools em praticamente todo app baseado
+    // em Chromium/Electron — bem provável de já estar pego por outro app
+    // rodando (register() falha em silêncio, devolve false, não lança erro).
+    // Ctrl+Alt+W é mais fácil de lembrar (W de "Wallpaper") e bem menos
+    // disputado. O item no menu da bandeja é o caminho garantido de
+    // qualquer forma, não depende de nenhum atalho funcionar.
+    try {
+      const ok = globalShortcut.register('CommandOrControl+Alt+W', toggleWallpaperInteractive);
+      if (!ok) appLog.warn('Atalho Ctrl+Alt+W do modo interativo do wallpaper não registrou (provavelmente já em uso por outro programa) — use o menu da bandeja em vez disso.');
+    } catch (err) {
+      appLog.warn('Não consegui registrar o atalho de modo interativo do wallpaper: ' + err.message);
+    }
+  }
   startAutomationEngine();
   if (!_isScreensaver) { startWorkerWWatchdog(); startRepaintNudge(); startNativeWallpaperRefresh(); checkConflictingWallpaperApps(); }
 
@@ -2874,6 +3184,7 @@ app.on('second-instance', () => {
 app.on('window-all-closed', (e) => e.preventDefault());
 app.on('before-quit', () => {
   tray?.destroy();
+  globalShortcut.unregisterAll();
   if (_engineTimer) clearInterval(_engineTimer);
   // Sempre devolve ícones/barra de tarefas ao sair, mesmo que a opção esteja
   // ligada — senão o usuário fica com o Windows "quebrado" (sem ícones/barra)

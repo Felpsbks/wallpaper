@@ -90,7 +90,110 @@ document.querySelectorAll('.nav-item').forEach(item => {
     if (item.dataset.panel === 'downloader') {
       window.EngineEditor?.init();
     }
+    if (item.dataset.panel === 'youtube') showYoutubePanel();
+    else hideYoutubePanel();
   });
+});
+
+// ---- Aba YouTube ----
+// O navegador embutido é um BrowserView (superfície nativa controlada pelo
+// main.js — ver 'youtube-panel-show' lá) posicionado por cima da div
+// #youtube-view-container. A janela do app não é redimensionável, então só
+// precisa calcular a posição uma vez, ao abrir a aba.
+let _youtubeDetectedVideo = null;
+function showYoutubePanel() {
+  const container = document.getElementById('youtube-view-container');
+  if (!container) return;
+  const r = container.getBoundingClientRect();
+  ipcRenderer.send('youtube-panel-show', { x: r.x, y: r.y, width: r.width, height: r.height });
+}
+function hideYoutubePanel() {
+  ipcRenderer.send('youtube-panel-hide');
+}
+ipcRenderer.on('youtube-video-detected', (_e, info) => {
+  _youtubeDetectedVideo = info.videoId ? info : null;
+  const idle = document.getElementById('youtube-status-idle');
+  const video = document.getElementById('youtube-status-video');
+  const titleEl = document.getElementById('youtube-apply-title');
+  if (!idle || !video || !titleEl) return;
+  if (_youtubeDetectedVideo) {
+    titleEl.textContent = _youtubeDetectedVideo.title;
+    idle.style.display = 'none';
+    video.style.display = 'flex';
+  } else {
+    idle.style.display = 'flex';
+    video.style.display = 'none';
+  }
+});
+
+// Clicar no vídeo já toca no fundo sozinho, sem precisar de botão — main.js
+// manda isso assim que detecta um vídeo novo (ver upsertYoutubeLiveEntry +
+// 'youtube-auto-apply' lá). O item já foi salvo na biblioteca do lado do
+// main.js; aqui só sincroniza o array local e aplica de fato via
+// setWallpaper (assim respeita "aplicar só nesse monitor" que a Biblioteca
+// já respeita — ver targetDisplayId).
+ipcRenderer.on('youtube-auto-apply', (_e, wallpaper) => {
+  const idx = library.findIndex(w => w.id === wallpaper.id);
+  if (idx === -1) library.push(wallpaper); else library[idx] = wallpaper;
+  renderLibrary();
+  setWallpaper(wallpaper);
+});
+
+// Download OPCIONAL — guarda uma cópia de verdade em alta qualidade na
+// biblioteca (yt-dlp + ffmpeg, até 4K), separado de tocar ao vivo (que já
+// acontece sozinho ao clicar). Reusa a mesma tela
+// cheia de progresso roxa (dl-loading-screen) que atualização/SteamCMD já
+// usam, então dá pra ver baixando as ferramentas (só na 1ª vez) e o vídeo.
+document.getElementById('youtube-apply-btn')?.addEventListener('click', async () => {
+  if (!_youtubeDetectedVideo) return;
+  const { title } = _youtubeDetectedVideo;
+
+  const dlScreen = document.getElementById('dl-loading-screen');
+  document.getElementById('dl-loading-title').textContent = 'Baixando vídeo do YouTube';
+  document.getElementById('dl-loading-subtitle').textContent = title;
+  document.getElementById('dl-progress-fill').style.width = '0%';
+  document.getElementById('dl-progress-text').textContent = 'Iniciando...';
+  const dlLog = document.getElementById('dl-log-lines');
+  if (dlLog) { dlLog.textContent = ''; dlLog.style.display = 'none'; }
+  dlScreen.classList.add('visible');
+
+  const result = await ipc('youtube-download-wallpaper', _youtubeDetectedVideo);
+
+  dlScreen.classList.remove('visible');
+  if (result && result.ok) {
+    library.push(result.wallpaper);
+    renderLibrary();
+    setWallpaper(result.wallpaper);
+  } else {
+    alert(`Não consegui baixar esse vídeo: ${(result && result.error) || 'erro desconhecido'}`);
+  }
+});
+
+ipcRenderer.on('youtube-download-progress', (_e, data) => {
+  const dlFill = document.getElementById('dl-progress-fill');
+  const dlText = document.getElementById('dl-progress-text');
+  if (!dlFill || !dlText) return;
+  if (data.phase === 'yt-dlp' || data.phase === 'ffmpeg') {
+    const label = data.phase === 'yt-dlp' ? 'Preparando ferramenta de download (só na 1ª vez)...' : 'Preparando conversor de vídeo (só na 1ª vez)...';
+    if (data.total) {
+      const pct = Math.round((data.received / data.total) * 100);
+      dlFill.style.width = pct + '%';
+      dlText.textContent = `${label} ${pct}% (${formatBytes(data.received)} / ${formatBytes(data.total)})`;
+    } else {
+      dlText.textContent = label;
+    }
+  } else if (data.phase === 'ffmpeg-extract') {
+    dlText.textContent = 'Extraindo conversor de vídeo...';
+  } else if (data.phase === 'video') {
+    dlFill.style.width = Math.round(data.pct || 0) + '%';
+    dlText.textContent = `Baixando vídeo... ${Math.round(data.pct || 0)}%`;
+  } else if (data.phase === 'merging') {
+    dlFill.style.width = '95%';
+    dlText.textContent = 'Juntando vídeo e áudio (ffmpeg)...';
+  } else if (data.phase === 'done') {
+    dlFill.style.width = '100%';
+    dlText.textContent = 'Concluído!';
+  }
 });
 
 // Por que uma cena caiu pro fallback de imagem estática em vez de renderizar
@@ -713,6 +816,56 @@ document.getElementById('btn-clear-monitor-target').addEventListener('click', ()
   renderMonitors();
   updateMonitorBar();
 });
+
+// Detecção automática de monitores: main.js manda essa mensagem sempre que
+// um monitor é conectado/desconectado/desabilitado com o app já aberto (ver
+// notifyDisplaysChanged em main.js) — sem depender de reiniciar o app pra
+// "Configurações > Monitores" refletir a realidade.
+ipcRenderer.on('displays-changed', (_e, displays) => {
+  const previousCount = allDisplays.length;
+  allDisplays = displays;
+  if (targetDisplayId && !displays.some(d => d.id === targetDisplayId)) targetDisplayId = null;
+  renderMonitors();
+  updateMonitorBar();
+
+  // Só avisa quando um monitor NOVO aparece (não no boot, não ao desconectar)
+  // — e só se já tinha pelo menos 1 antes, pra não disparar na primeira
+  // leitura antes do init() preencher allDisplays a primeira vez.
+  if (previousCount > 0 && displays.length > previousCount) {
+    showMonitorDetectedNotice(displays.length);
+  }
+});
+
+// Atalho global Ctrl+Alt+W (ou o item no menu da bandeja — ver
+// toggleWallpaperInteractive em main.js) liga/desliga o wallpaper aceitar
+// cliques (pra dar pra clicar em algo tipo um botão de configuração dentro
+// de um wallpaper "web") — esse toast é só feedback visual de qual dos
+// dois modos está ativo agora.
+ipcRenderer.on('wallpaper-interactive-changed', (_e, interactive) => {
+  let toast = document.getElementById('wallpaper-interactive-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'wallpaper-interactive-toast';
+    toast.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:9999;padding:10px 18px;border-radius:10px;font-size:13px;font-weight:600;color:#fff;box-shadow:0 6px 20px rgba(0,0,0,0.4);transition:opacity .2s;';
+    document.body.appendChild(toast);
+  }
+  toast.style.background = interactive ? '#6a32d6' : '#333';
+  toast.textContent = interactive
+    ? '🖱️ Wallpaper interativo LIGADO — dá pra clicar nele (Ctrl+Alt+W ou menu da bandeja pra desligar)'
+    : '🖱️ Wallpaper interativo desligado';
+  toast.style.opacity = '1';
+  clearTimeout(toast._hideTimer);
+  toast._hideTimer = setTimeout(() => { toast.style.opacity = '0'; }, 3500);
+});
+
+function showMonitorDetectedNotice(count) {
+  const banner = document.getElementById('monitor-detected-banner');
+  const textEl = document.getElementById('monitor-detected-text');
+  if (!banner || !textEl) return;
+  textEl.textContent = `Detectamos ${count} monitores. Vá em Configurações > Monitores para escolher um wallpaper diferente em cada um.`;
+  banner.style.display = 'flex';
+  document.getElementById('monitor-detected-dismiss').onclick = () => { banner.style.display = 'none'; };
+}
 
 // ---- App Rules ----
 let appRules = [];

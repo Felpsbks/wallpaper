@@ -2,7 +2,7 @@ const koffi = require('koffi');
 
 let user32 = null;
 let shell32 = null;
-let FindWindowA, FindWindowExA, SendMessageTimeoutA, SetParent, SetWindowPos, EnumWindows, EnumWindowsCb, SystemParametersInfoW, GetWindowLongA, SetWindowLongA, GetParent, IsIconic, IsWindowVisible, ShowWindow;
+let FindWindowA, FindWindowExA, SendMessageTimeoutA, SetParent, SetWindowPos, EnumWindows, EnumWindowsCb, SystemParametersInfoW, GetWindowLongA, SetWindowLongA, GetParent, IsIconic, IsWindowVisible, ShowWindow, PostMessageA;
 let SHAppBarMessage;
 
 // AppBar constants
@@ -56,6 +56,10 @@ const SPIF_SENDCHANGE      = 0x02;
 const SW_HIDE = 0;
 const SW_SHOW = 5;
 
+// WM_DISPLAYCHANGE broadcast (winuser.h) — see forceDisplayChangeBroadcast() below.
+const WM_DISPLAYCHANGE = 0x007E;
+const HWND_BROADCAST = 0xffff;
+
 function loadUser32() {
   if (user32) return true;
   try {
@@ -84,6 +88,10 @@ function loadUser32() {
     IsIconic = user32.func('bool IsIconic(void* hWnd)');
     IsWindowVisible = user32.func('bool IsWindowVisible(void* hWnd)');
     ShowWindow = user32.func('bool ShowWindow(void* hWnd, int nCmdShow)');
+    // Posted (not sent) so it never blocks waiting on every top-level window
+    // in the system to process it — same reasoning SendMessageTimeoutA above
+    // already uses a timeout for, just via the fire-and-forget API instead.
+    PostMessageA = user32.func('bool PostMessageA(void* hWnd, uint Msg, uintptr_t wParam, intptr_t lParam)');
 
     shell32 = koffi.load('shell32.dll');
     SHAppBarMessage = shell32.func('intptr_t SHAppBarMessage(uint32 dwMessage, APPBARDATA* pData)');
@@ -221,6 +229,58 @@ function embedBehindDesktop(hwndBuffer, bounds) {
     return true;
   } catch (err) {
     console.error('[workerw] Error:', err.message);
+    return false;
+  }
+}
+
+// Reverte embedBehindDesktop pra deixar o wallpaper clicável de verdade.
+// Achado ao vivo (2026-07-21): desligar ignoreMouseEvents sozinho não
+// bastava pra clicar num botão desenhado dentro de um wallpaper "web" —
+// causa real é que a janela fica embaixo do SHELLDLL_DefView (os ícones),
+// que cobre a área inteira do desktop e é sempre topo na ordem de
+// empilhamento; cliques em QUALQUER ponto do desktop vão pro DefView
+// primeiro e nunca chegam numa janela atrás dele, não importa a
+// configuração da própria janela. Só dá pra receber clique virando janela
+// de topo de novo (fora da árvore do Progman/WorkerW) — main.js chama isso
+// e depois levanta a janela na ordem normal (win.moveTop()); pra voltar ao
+// normal, embedBehindDesktop() de novo faz o caminho inverso.
+function detachFromDesktop(hwndBuffer) {
+  if (process.platform !== 'win32') return false;
+  if (!loadUser32()) return false;
+  try {
+    const hwnd = toHwnd(hwndBuffer);
+    const style = GetWindowLongA(hwnd, GWL_STYLE);
+    SetWindowLongA(hwnd, GWL_STYLE, style & ~WS_CHILD);
+    SetParent(hwnd, null);
+    return true;
+  } catch (err) {
+    console.error('[workerw] detachFromDesktop error:', err.message);
+    return false;
+  }
+}
+
+// Experimental (2026-07-21): real bug report from a second PC — on that
+// machine (same GPU-compositing-fully-disabled_software family documented
+// above), the wallpaper renders about one frame every 2+ minutes when only
+// ONE monitor is connected, but runs normally once a SECOND monitor is
+// plugged in. Physically connecting a monitor makes Windows broadcast
+// WM_DISPLAYCHANGE to every top-level window on the system — this function
+// sends that exact same broadcast on demand, without touching any real
+// display config, to test whether it's the broadcast itself (not anything
+// about having two monitors) that unsticks the frozen software-rendered
+// frame. NOT wired into any automatic loop yet — call manually (tray menu)
+// so we can watch the frozen wallpaper the moment it's sent and confirm the
+// theory before deciding whether to run this periodically.
+function forceDisplayChangeBroadcast() {
+  if (process.platform !== 'win32') return false;
+  if (!loadUser32()) return false;
+  try {
+    const { width, height } = require('electron').screen.getPrimaryDisplay().size;
+    const lParam = (height << 16) | (width & 0xffff);
+    PostMessageA(HWND_BROADCAST, WM_DISPLAYCHANGE, 32, lParam);
+    return true;
+  } catch (err) {
+    console.error('[workerw] forceDisplayChangeBroadcast error:', err.message);
     return false;
   }
 }
@@ -378,4 +438,4 @@ function setTaskbarVisible(visible) {
   }
 }
 
-module.exports = { embedBehindDesktop, setNativeWallpaper, logWindowState, isEmbeddedCorrectly, setDesktopIconsVisible, setTaskbarVisible };
+module.exports = { embedBehindDesktop, detachFromDesktop, setNativeWallpaper, logWindowState, isEmbeddedCorrectly, setDesktopIconsVisible, setTaskbarVisible, forceDisplayChangeBroadcast };
