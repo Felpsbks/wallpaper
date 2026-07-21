@@ -2049,11 +2049,11 @@ function httpDownload(url, destPath, onProgress) {
 }
 
 // ---- Checagem de atualização (GitHub Releases, sem infraestrutura nova) ----
-// Repositório público (Felpsbks/fynix-connect) — a API de releases da própria
+// Repositório público (Felpsbks/wallpaper) — a API de releases da própria
 // GitHub já dá tudo que precisa (tag/versão + link da página de download),
 // sem precisar hospedar um version.json à parte nem tocar no license-server.
 const APP_VERSION = require('./package.json').version;
-const UPDATE_CHECK_REPO = 'Felpsbks/fynix-connect';
+const UPDATE_CHECK_REPO = 'Felpsbks/wallpaper';
 let _pendingUpdateInfo = null;
 
 // Comparação simples de versão "x.y.z" — não é semver completo (sem
