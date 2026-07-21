@@ -337,10 +337,22 @@ app.commandLine.appendSwitch('disable-web-security');
 app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
 
 // ---- Wallpaper windows (one per display) ----
+// Confirmado ao vivo (2026-07-21): um PC com 2 monitores tinha o vídeo
+// completamente travado (mesmo sintoma investigado a fundo como "GPU
+// rejeitada" — só que era um bug diferente, isolado ao testar com 1
+// monitor só: funcionou perfeito, sem precisar de nenhuma das flags de GPU
+// tentadas antes). Suspeita: criar as 2 janelas de wallpaper (uma por
+// monitor) praticamente ao mesmo tempo faz as duas competirem pela
+// inicialização de composição/GPU do Chromium (processo de GPU é
+// compartilhado entre todas as janelas do app) e pelo encaixe via SetParent
+// no WorkerW quase simultâneo — uma atrapalha a outra. Espaçar a criação
+// evita a corrida: a primeira janela termina de inicializar e se encaixar
+// antes da segunda começar.
 function createWallpaperWindows() {
-  for (const display of screen.getAllDisplays()) {
-    spawnWallpaperWindow(display);
-  }
+  const displays = screen.getAllDisplays();
+  displays.forEach((display, i) => {
+    setTimeout(() => spawnWallpaperWindow(display), i * 800);
+  });
 
   screen.on('display-added', (_, display) => spawnWallpaperWindow(display));
   screen.on('display-removed', (_, display) => {
