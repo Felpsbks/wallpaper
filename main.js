@@ -19,8 +19,19 @@ app.commandLine.appendSwitch('disable-speech-api');
 app.commandLine.appendSwitch('disable-pdf-extension');
 app.commandLine.appendSwitch('disable-sync');
 app.commandLine.appendSwitch('disable-metrics');
-app.commandLine.appendSwitch('disable-logging');
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256');
+
+// TEMPORÁRIO — diagnóstico da falha real de inicialização de GPU (ver
+// memória video-congelado-workerw-repaint): 'disable-logging' de cima foi
+// removido e substituído por isso, só pra conseguir ver a mensagem de erro
+// verdadeira do Chromium (ex.: falha de D3D11CreateDevice) — normalmente
+// esse log não vai pra lugar nenhum num app empacotado. Reverter pra
+// 'disable-logging' de volta assim que a causa raiz for encontrada (escrita
+// constante em disco não combina com o objetivo de ficar leve do projeto).
+const gpuDebugLogPath = require('path').join(app.getPath('userData'), 'chromium-debug.log');
+app.commandLine.appendSwitch('enable-logging', 'file');
+app.commandLine.appendSwitch('log-file', gpuDebugLogPath);
+app.commandLine.appendSwitch('v', '1');
 
 // The wallpaper window is *always* occluded from the OS's point of view — it
 // permanently sits behind the desktop icons layer by design. Chromium's
