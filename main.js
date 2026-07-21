@@ -2554,6 +2554,18 @@ app.whenReady().then(async () => {
   } catch (err) {
     appLog.warn('[GPU] Não consegui ler getGPUFeatureStatus(): ' + err.message);
   }
+  // getGPUFeatureStatus() só diz O QUÊ está desligado — getGPUInfo('complete')
+  // traz o PORQUÊ (driver detectado, versão, e principalmente
+  // "auxAttributes"/mensagens de erro de inicialização da GPU), essencial
+  // depois de confirmar que nenhuma flag (blocklist, backgrounding,
+  // DirectComposition) mudou o resultado — sugere falha real de
+  // inicialização, não uma escolha do Chromium.
+  try {
+    const gpuInfo = await app.getGPUInfo('complete');
+    appLog(`[GPU-completo] ${JSON.stringify(gpuInfo)}`);
+  } catch (err) {
+    appLog.warn('[GPU-completo] Não consegui ler getGPUInfo(): ' + err.message);
+  }
 
   // Se a última atualização deixou um log pra trás (ver apply-update acima),
   // mostra ele agora na aba Log de verdade e apaga — só existe se um
