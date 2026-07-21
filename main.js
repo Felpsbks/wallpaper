@@ -186,10 +186,26 @@ function _nowTs() {
   return new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+// Confirmado ao vivo (2026-07-20): qualquer appLog/console.* chamado ANTES
+// de createControlWindow() terminar (boa parte do boot — GPU status, avisos
+// de dependência faltando, etc.) simplesmente sumia, sem nenhum aviso —
+// controlWin ainda não existe, então o `if` abaixo só descartava a
+// mensagem, pra sempre, sem guardar em lugar nenhum. Usuário reportou
+// especificamente não ver a linha "[GPU]" que eu tinha acabado de adicionar
+// bem cedo no boot — foi exatamente isso. Fila simples: guarda o que não
+// pôde ser entregue ainda, esvazia assim que a janela real existir.
+let _uiLogQueue = [];
 function _sendToUiLog(ts, msg, level) {
   if (controlWin && !controlWin.isDestroyed()) {
     controlWin.webContents.send('app-log', { ts, msg, level });
+  } else {
+    _uiLogQueue.push({ ts, msg, level });
   }
+}
+function _flushUiLogQueue() {
+  if (!_uiLogQueue.length || !controlWin || controlWin.isDestroyed()) return;
+  for (const entry of _uiLogQueue) controlWin.webContents.send('app-log', entry);
+  _uiLogQueue = [];
 }
 
 // JSON.stringify sozinho já rejeita referência circular direta (throw), mas
@@ -588,7 +604,7 @@ function createControlWindow() {
   // exatamente o carregamento trava na próxima vez que acontecer, em vez de
   // adivinhar de novo (ver _bootLog acima).
   controlWin.once('ready-to-show', () => { _bootLog('controlWin: ready-to-show'); controlWin.show(); });
-  controlWin.webContents.once('did-finish-load', () => _bootLog('controlWin: did-finish-load'));
+  controlWin.webContents.once('did-finish-load', () => { _bootLog('controlWin: did-finish-load'); _flushUiLogQueue(); });
   controlWin.webContents.once('dom-ready', () => _bootLog('controlWin: dom-ready'));
   controlWin.webContents.on('did-fail-load', (_e, code, desc) => _bootLog(`controlWin: did-fail-load code=${code} desc=${desc}`));
   controlWin.webContents.on('render-process-gone', (_e, details) => _bootLog(`controlWin: render-process-gone reason=${details.reason}`));
