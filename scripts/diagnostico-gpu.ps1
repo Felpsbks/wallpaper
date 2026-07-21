@@ -119,10 +119,50 @@ foreach ($g in $gpus) {
     Add ""
 }
 
-# --- 6. Versão do Windows ---
+# --- 6. Versão do Windows + CPU ---
 Add "--- 6. Sistema ---"
 $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
 Add "  $($os.Caption) — Build $($os.BuildNumber)"
+$cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue
+foreach ($c in $cpu) {
+    Add "  CPU: $($c.Name) — $($c.NumberOfCores) núcleos / $($c.NumberOfLogicalProcessors) threads @ $($c.MaxClockSpeed)MHz"
+}
+Add ""
+
+# --- 7. Preferência de GPU específica do Windows pra este app ---
+# O Windows deixa forçar um app a usar sempre a GPU integrada/economia de
+# energia em vez da dedicada, mesmo em PC sem GPU integrada nenhuma às vezes
+# fica um valor salvo de outro contexto. Fica gravado no Registro, por
+# caminho completo do .exe.
+Add "--- 7. Preferência de GPU do Windows para o app ---"
+if ($appDir) {
+    $regPath = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
+    $pref = $null
+    if (Test-Path $regPath) {
+        $pref = (Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue).$exePath
+    }
+    if ($pref) {
+        Add "  Encontrado: $pref"
+        if ($pref -match "GpuPreference=1") { Add "  (=1 significa 'Economia de energia' — pode estar forçando a GPU errada ou um modo mais fraco)" }
+        if ($pref -match "GpuPreference=2") { Add "  (=2 significa 'Alto desempenho' — forçando a GPU dedicada, não deveria ser o problema)" }
+    } else {
+        Add "  Nenhuma preferência específica salva (Windows decide sozinho — 'Automático')."
+    }
+} else {
+    Add "  (pulado — pasta do app não encontrada)"
+}
+Add ""
+
+# --- 8. Outros antivírus/segurança instalados (além do Defender) ---
+Add "--- 8. Produtos de antivírus registrados no Windows ---"
+try {
+    $avProducts = Get-CimInstance -Namespace "root/SecurityCenter2" -ClassName AntivirusProduct -ErrorAction Stop
+    foreach ($av in $avProducts) {
+        Add "  $($av.displayName)  (productState: $($av.productState))"
+    }
+} catch {
+    Add "  Não consegui consultar (comum em alguns Windows — não é erro grave)."
+}
 Add ""
 
 Add "=== FIM DO DIAGNÓSTICO ==="
