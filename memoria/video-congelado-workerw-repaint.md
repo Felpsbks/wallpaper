@@ -23,6 +23,14 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding');
 
 Flags padrão e bem documentadas do Chromium, comumente recomendadas pra apps Electron com gerenciamento de janela fora do comum (kiosk, menubar, background) que sofrem exatamente essa classe de problema.
 
-## Status
+## Status da tentativa de GPU/DirectComposition
 
-**NÃO confirmado ao vivo ainda.** Terceira tentativa de resolver esse bug (as duas anteriores, de sessões passadas, falharam). `node --check` limpo, rebuild completo rodou sem erro. Precisa do usuário testar no PC secundário e confirmar se o vídeo passa a animar de verdade.
+**NÃO confirmado ao vivo.** Testado no PC secundário depois de publicado (v1.0.2) e o vídeo continuou congelado — as flags de GPU/backgrounding sozinhas não resolveram.
+
+## Pista real encontrada (2026-07-20, mesma sessão) — reset desnecessário de `<webview>`
+
+O usuário reparou que o erro `Error occurred in handler for 'GUEST_VIEW_MANAGER_CALL': {"errno":-3,"code":"ERR_ABORTED","url":"about:blank"}` aparecia em **toda** troca de wallpaper nos logs, e perguntou se tinha a ver com "view". Rastreei até `wallpaper/wallpaper.js` — a função `hideAll()` (chamada em toda troca, não importa o tipo do wallpaper novo) fazia `webEl.src = 'about:blank'` incondicionalmente, resetando a `<webview>` interna (usada só pelos wallpapers tipo "web") mesmo quando nem o wallpaper antigo nem o novo eram desse tipo. Isso bate exatamente com a URL do erro (`about:blank`) e a consistência (toda vez, sem exceção).
+
+**Fix**: só reseta a webview se ela estava mesmo visível/em uso (`if (webEl.style.display !== 'none') webEl.src = 'about:blank';`). Hipótese: o erro repetido de guest-view pode estar corrompendo a composição da janela inteira nalgumas GPUs — o `<video>` sendo um elemento irmão na mesma página, se o processo de composição da página trava por causa da guest-view quebrada, o vídeo nunca chega a ser apresentado na tela mesmo continuando a decodificar por dentro.
+
+Publicado em v1.0.3, junto com a correção do updater travado. **Ainda não confirmado ao vivo** — essa é a hipótese mais forte até agora (bem mais específica que a teoria de GPU/DirectComposition), mas precisa do usuário testar de novo depois de atualizar.
