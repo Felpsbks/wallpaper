@@ -1,6 +1,6 @@
 {
   "name": "engine-wallpaper",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Live wallpaper engine for Windows",
   "main": "main.js",
   "scripts": {
@@ -8,14 +8,16 @@
     "pack": "node scripts/pack.js",
     "dev": "node scripts/dev.js",
     "icons": "node scripts/gen-icon.js",
-    "dist": "node scripts/gen-icon.js && node scripts/pack.js && node scripts/build-dist.js"
+    "dist": "node scripts/gen-icon.js && node scripts/pack.js && node scripts/build-dist.js",
+    "dist-installer": "node scripts/build-installer.js"
   },
   "dependencies": {
     "adm-zip": "^0.6.0",
     "koffi": "^2.8.0",
     "konva": "^10.3.0",
     "qrcode": "^1.5.4",
-    "three": "0.148.0"
+    "three": "0.148.0",
+    "uiohook-napi": "^1.5.5"
   },
   "devDependencies": {
     "electron-reload": "^2.0.0-alpha.1"

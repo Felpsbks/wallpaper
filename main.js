@@ -32,7 +32,36 @@ app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256');
 // ones play fine — same root cause class as the equivalent WebView2 fix
 // found during the (rolled-back) migration attempt, see
 // project_webview2_migration memory.
-app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+//
+// IMPORTANTE: appendSwitch('disable-features', X) chamado mais de uma vez
+// SUBSTITUI o valor anterior em vez de somar (base::CommandLine do Chromium
+// guarda por nome de switch, não uma lista) — por isso todo `disable-features`
+// deste app fica numa lista só, separada por vírgula, numa chamada única.
+//
+// CalculateNativeWinOcclusion + as duas flags de backgrounding logo abaixo
+// CONFIRMADO AO VIVO (2026-07-20) QUE NÃO RESOLVEM sozinhas — testado num PC
+// real (GPU AMD) com as três já ativas, e o vídeo continuou congelado num
+// frame só (readyState=4/currentTime avançando por dentro, tela nunca
+// repinta). Mantidas mesmo assim (não tem custo, são só mitigação de
+// sobrecarga desnecessária), mas não são a causa raiz sozinhas.
+//
+// DirectComposition: nova teoria, depois das de cima confirmadas
+// insuficientes — talvez não seja sobre PRIORIDADE (throttling), e sim sobre
+// a PRÓPRIA COMPOSIÇÃO da tela. É o mecanismo padrão do Chromium no Windows
+// pra apresentar frames renderizados por GPU na tela, e espera cooperação
+// normal do DWM (Desktop Window Manager) com a janela. Uma janela forçada a
+// virar filha de outro processo via SetParent (nosso truque de WorkerW) não
+// é um cenário que o DWM/DirectComposition foi desenhado pra lidar — pode
+// estar aceitando os frames novos internamente (por isso o <video> acha que
+// está tocando) sem nunca de fato apresentar/compor eles na tela. Desligar
+// força o Chromium a cair pro caminho de composição via software (mais
+// lento, mas não depende do DWM cooperar com essa situação incomum de
+// janela). AINDA NÃO CONFIRMADO — terceira tentativa depois de duas
+// anteriores (nudge de redraw manual, e as flags de backgrounding acima)
+// não terem resolvido.
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,DirectComposition');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
 
 // Without this, Windows identifies the process by its exe's own identity
 // (still literally called "electron.exe" in dev/autostart — see
@@ -54,6 +83,14 @@ if (args.find(a => a.startsWith('/p') || a.startsWith('-p'))) {
 // esse nome como o sinal "isto é uma build pra usuário final?", sem precisar
 // de nenhuma flag/config nova pra alternar manualmente.
 const _isEndUserBuild = require('path').basename(process.execPath).toLowerCase() !== 'electron.exe';
+
+// O instalador (Setup.exe, ver scripts/build-installer.js) é um SFX que
+// extrai a build inteira numa pasta temporária e roda o exe de lá — usa
+// esse detalhe como o sinal "isto é a primeira execução, ainda não
+// instalado de verdade", sem precisar de nenhuma flag nova: se o processo
+// está rodando de dentro da pasta temp do Windows, ainda não foi copiado
+// pro destino definitivo (ver runFirstRunInstall mais abaixo).
+const _isFirstRunInstall = process.execPath.toLowerCase().startsWith(require('os').tmpdir().toLowerCase());
 // electron-reload REMOVIDO: scripts/dev.js já tem seu próprio watcher
 // completo (mata o processo antigo -> reempacota o ASAR -> sobe um processo
 // novo) — ter os dois ativos ao mesmo tempo fazia cada salvamento de arquivo
@@ -735,6 +772,34 @@ function startRepaintNudge() {
 // the Startup folder has an explicit WorkingDirectory field, matching what
 // `scripts/dev.js` already does via `spawn(electronExe, [], { cwd: root })`.
 // See project_autostart_bug memory for the full investigation history.
+// Extraído de setAutostart (era só o bloco do .lnk) pra também ser usado
+// pelo instalador (runFirstRunInstall, ver mais abaixo) na criação do
+// atalho do Menu Iniciar — mesmo truque de sempre (WScript.Shell via .ps1
+// temporário), só que reutilizável pra qualquer alvo/caminho de atalho.
+function createShortcut(exePath, workDir, lnkPath) {
+  const psPath = path.join(os.tmpdir(), 'ew-mkshortcut-' + Date.now() + '.ps1');
+  const ps = [
+    '$s = New-Object -ComObject WScript.Shell',
+    `$sc = $s.CreateShortcut("${lnkPath}")`,
+    `$sc.TargetPath = "${exePath}"`,
+    `$sc.WorkingDirectory = "${workDir}"`,
+    `$sc.IconLocation = "${exePath}"`,
+    '$sc.Save()',
+  ].join('\r\n');
+
+  try {
+    fs.mkdirSync(path.dirname(lnkPath), { recursive: true });
+    fs.writeFileSync(psPath, ps, 'utf8');
+    execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psPath}"`, { windowsHide: true });
+    return true;
+  } catch (err) {
+    appLog.err('Erro criando atalho (' + lnkPath + '): ' + err.message);
+    return false;
+  } finally {
+    try { fs.unlinkSync(psPath); } catch {}
+  }
+}
+
 function setAutostart(enabled) {
   if (process.platform !== 'win32') return;
 
@@ -755,24 +820,79 @@ function setAutostart(enabled) {
     return;
   }
 
-  const psPath = path.join(os.tmpdir(), 'ew-mkshortcut.ps1');
-  const ps = [
-    '$s = New-Object -ComObject WScript.Shell',
-    `$sc = $s.CreateShortcut("${lnkPath}")`,
-    `$sc.TargetPath = "${exePath}"`,
-    `$sc.WorkingDirectory = "${workDir}"`,
-    '$sc.Save()',
-  ].join('\r\n');
+  if (createShortcut(exePath, workDir, lnkPath)) {
+    appLog.ok('Atalho de inicialização criado em ' + lnkPath);
+  }
+}
+
+// ---- Instalador (Setup.exe → primeira execução, ver _isFirstRunInstall) ----
+// Copia a build (já extraída pelo SFX numa pasta temp) pro destino
+// definitivo, mostrando uma tela própria com log ao vivo — nada de rede,
+// tudo já veio dentro do .exe baixado. Depois de copiado, cria o atalho no
+// Menu Iniciar e abre o app já a partir do destino definitivo.
+async function runFirstRunInstall() {
+  const sourceDir = path.dirname(process.execPath);
+  const targetDir = path.join(os.homedir(), 'AppData', 'Local', 'Engine Wallpaper');
+  const targetExe = path.join(targetDir, path.basename(process.execPath));
+
+  const win = new BrowserWindow({
+    width: 460, height: 440,
+    resizable: false, maximizable: false, fullscreenable: false,
+    frame: false, backgroundColor: '#090314',
+    webPreferences: { nodeIntegration: true, contextIsolation: false },
+  });
+  win.loadFile(path.join(__dirname, 'ui', 'installer.html'));
+
+  const send = (channel, data) => { if (!win.isDestroyed()) win.webContents.send(channel, data); };
+  const setProgress = (pct, subtitle, info) => send('install-progress', { pct, subtitle, info });
+  const log = (line) => send('install-log-line', line);
+
+  await new Promise((resolve) => win.webContents.once('did-finish-load', resolve));
 
   try {
-    fs.mkdirSync(startupDir, { recursive: true });
-    fs.writeFileSync(psPath, ps, 'utf8');
-    execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psPath}"`, { windowsHide: true });
-    appLog.ok('Atalho de inicialização criado em ' + lnkPath);
+    setProgress(0.05, 'Preparando...', 'Isso leva só alguns segundos');
+
+    // Lista tudo primeiro pra ter uma % real baseada em contagem de
+    // arquivos, em vez de um número inventado tipo o "50%" fixo que outros
+    // fluxos deste app usam quando não têm progresso de verdade.
+    const files = [];
+    (function walk(dir) {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(p);
+        else files.push(p);
+      }
+    })(sourceDir);
+
+    fs.mkdirSync(targetDir, { recursive: true });
+    for (let i = 0; i < files.length; i++) {
+      const rel = path.relative(sourceDir, files[i]);
+      const dest = path.join(targetDir, rel);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(files[i], dest);
+      log(rel);
+      setProgress(((i + 1) / files.length) * 0.9, 'Copiando arquivos...', `${i + 1}/${files.length}`);
+    }
+
+    setProgress(0.95, 'Criando atalho...', '');
+    const startMenuDir = path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+    if (createShortcut(targetExe, targetDir, path.join(startMenuDir, 'Engine Wallpaper.lnk'))) {
+      log('Atalho criado no Menu Iniciar.');
+    }
+
+    setProgress(1, 'Concluído!', 'Abrindo o app...');
+    log('Instalação concluída.');
+    await new Promise((r) => setTimeout(r, 700));
+
+    spawn(targetExe, [], { cwd: targetDir, detached: true, stdio: 'ignore' }).unref();
+    // Não tenta limpar sourceDir aqui — o processo já vai fechar (ver
+    // finally abaixo) antes de qualquer limpeza assíncrona rodar. O Windows
+    // limpa pastas temp velhas sozinho; não crítico deixar pra depois.
   } catch (err) {
-    appLog.err('Erro criando atalho de inicialização: ' + err.message);
+    log('ERRO: ' + err.message);
+    appLog.err('Falha na instalação: ' + err.message);
   } finally {
-    try { fs.unlinkSync(psPath); } catch {}
+    setTimeout(() => app.quit(), 800);
   }
 }
 
@@ -1834,9 +1954,30 @@ function importFromContentDir(contentDir, workshopId) {
   return null;
 }
 
-// SteamCMD REMOVIDO a pedido do usuário 2026-07-17 — já tinha dado problema
-// antes. Download volta a ser: inscrever via sessão web + esperar o Steam
-// Desktop baixar sozinho (mais lento, mas é o caminho pedido).
+// Quando importFromContentDir devolve null depois de um download com
+// sucesso do SteamCMD (arquivo chegou, mas não virou item na biblioteca),
+// "formato não reconhecido" era enganoso — na maioria das vezes é o item
+// sendo do tipo scene/web, filtrado de propósito em builds de usuário final
+// (ver _isEndUserBuild). Lê o project.json direto (mesma lógica de fallback
+// pra subpasta que importFromContentDir já usa) só pra dar um motivo real.
+function describeUnrecognizedDownload(contentDir) {
+  const tryRead = (dir) => {
+    const pf = path.join(dir, 'project.json');
+    if (!fs.existsSync(pf)) return null;
+    try { return JSON.parse(fs.readFileSync(pf, 'utf-8')); } catch { return null; }
+  };
+  let project = tryRead(contentDir);
+  if (!project) {
+    const subs = fs.readdirSync(contentDir).filter(f => fs.statSync(path.join(contentDir, f)).isDirectory());
+    if (subs.length) project = tryRead(path.join(contentDir, subs[0]));
+  }
+  if (!project) return 'o formato não foi reconhecido (sem project.json legível).';
+  const type = (project.type || '').toLowerCase();
+  if (_isEndUserBuild && type && type !== 'video') {
+    return `é do tipo "${type}" — esta versão só aceita vídeo (cenas/web não são suportadas no app final).`;
+  }
+  return `o formato não foi reconhecido (tipo "${type || 'desconhecido'}").`;
+}
 
 // Confirma se a conta Steam logada possui um app (ex: Wallpaper Engine, 431960),
 // usando o mesmo cookie de sessão do login web — sem precisar de API key nem
@@ -2058,7 +2199,15 @@ async function ensureSteamCmd() {
 // (validar login sozinho, ou validar+baixar). Só um processo por vez —
 // _steamCmdProc é compartilhado, é nele que os handlers de
 // provide-password/provide-guard-code escrevem.
-function runSteamCmd(exePath, args) {
+// `timeoutMs`: confirmado ao vivo (2026-07-20) que uma sessão em cache
+// INVÁLIDA (arquivo config.vdf existe, mas a Steam já revogou/expirou por
+// trás) ainda faz o SteamCMD tentar pedir senha/código — só que, como aqui
+// é tudo pipe (sem console real), esse pedido nunca chega até a gente (ver
+// runSteamCmdInteractive), e o processo fica parado pra sempre sem dar
+// nenhum sinal. Sem esse timeout, isso trava a tela pra sempre sem
+// explicação nenhuma pro usuário — com ele, o chamador consegue detectar
+// "não progrediu" e cair pra janela visível.
+function runSteamCmd(exePath, args, { timeoutMs = null } = {}) {
   return new Promise((resolve) => {
     const proc = spawn(exePath, args, { cwd: steamCmdDir, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     _steamCmdProc = proc;
@@ -2066,6 +2215,25 @@ function runSteamCmd(exePath, args) {
     let buf = '';
     let sawError = null;
     let sawLoginOk = false;
+    let settled = false;
+    let timer = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      _steamCmdProc = null;
+      resolve(result);
+    };
+
+    if (timeoutMs) {
+      timer = setTimeout(() => {
+        if (settled) return;
+        appLog.warn(`SteamCMD sem progresso por ${Math.round(timeoutMs / 1000)}s — provavelmente esperando um prompt que o pipe engasgou. Encerrando pra tentar de novo com a janela visível.`);
+        try { proc.kill(); } catch {}
+        finish({ code: -1, sawError: null, sawLoginOk: false, timedOut: true });
+      }, timeoutMs);
+    }
+
     const handleLine = (line) => {
       const trimmed = line.trim();
       if (!trimmed) return;
@@ -2099,14 +2267,8 @@ function runSteamCmd(exePath, args) {
     proc.stdout.on('data', onData);
     proc.stderr.on('data', onData);
 
-    proc.on('exit', (code) => {
-      _steamCmdProc = null;
-      resolve({ code, sawError, sawLoginOk });
-    });
-    proc.on('error', (err) => {
-      _steamCmdProc = null;
-      resolve({ code: -1, sawError: err.message, sawLoginOk: false });
-    });
+    proc.on('exit', (code) => finish({ code, sawError, sawLoginOk }));
+    proc.on('error', (err) => finish({ code: -1, sawError: err.message, sawLoginOk: false }));
   });
 }
 
@@ -2146,6 +2308,36 @@ function hasCachedSteamCmdSession() {
   return fs.existsSync(path.join(steamCmdDir, 'config', 'config.vdf'));
 }
 
+// Junta os dois pedaços: tenta o caminho rápido e escondido primeiro (pula
+// a janela se já tem cache — caso comum, sem nenhuma janela aparecendo).
+// Confirmado ao vivo que isso quebra quando o cache existe mas está
+// INVÁLIDO (expirou do lado da Steam) — o processo escondido trava
+// esperando um prompt que o pipe nunca deixa a gente ver (ver runSteamCmd).
+// Esse helper detecta esse travamento pelo timeout e refaz sozinho via
+// janela visível, sem precisar que o usuário perceba/reporte de novo.
+async function runSteamCmdWithFallback(exePath, args, username) {
+  if (hasCachedSteamCmdSession()) {
+    const result = await runSteamCmd(exePath, args, { timeoutMs: 15000 });
+    if (!result.timedOut) return result;
+    appLog.warn('Sessão salva do SteamCMD parece inválida — reautenticando com a janela visível.');
+  }
+
+  if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'need-interactive-login' });
+  await runSteamCmdInteractive(exePath, ['+login', username, '+quit']);
+
+  // Mesmo depois da janela visível, ainda pode travar de novo — confirmado
+  // ao vivo (2026-07-20): a janela fechou (login OK), mas essa segunda
+  // tentativa escondida travou do mesmo jeito, sem nenhuma proteção. Dando
+  // timeout aqui também, em vez de ficar esperando pra sempre uma segunda
+  // vez, devolve um erro claro pro usuário em vez de travar a tela de novo.
+  const retryResult = await runSteamCmd(exePath, args, { timeoutMs: 20000 });
+  if (retryResult.timedOut) {
+    appLog.err('SteamCMD travou de novo mesmo depois do login pela janela visível.');
+    return { ...retryResult, sawError: 'Travou de novo mesmo depois do login. Tenta de novo — se persistir, pode ser a sessão da Steam com problema.' };
+  }
+  return retryResult;
+}
+
 // Só confirma se usuário/senha (e Steam Guard, se pedir) estão corretos —
 // não baixa nada. Pedido explícito do usuário: validar antes de tentar
 // baixar um item, em vez de descobrir que a senha está errada só depois.
@@ -2164,13 +2356,8 @@ ipcMain.handle('steamcmd-validate-login', async (_, { username }) => {
   }
 
   appLog(`Validando login Steam (${username}) via SteamCMD...`);
-  if (!hasCachedSteamCmdSession()) {
-    if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'need-interactive-login' });
-    await runSteamCmdInteractive(exePath, ['+login', username, '+quit']);
-  }
-
   if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'validating' });
-  const { sawError, sawLoginOk } = await runSteamCmd(exePath, ['+login', username, '+quit']);
+  const { sawError, sawLoginOk } = await runSteamCmdWithFallback(exePath, ['+login', username, '+quit'], username);
   if (sawLoginOk && !sawError) {
     store.set('steamCmdUsername', username);
     appLog.ok('Login Steam validado com sucesso via SteamCMD.');
@@ -2203,17 +2390,12 @@ ipcMain.handle('steamcmd-download-item', async (_, { username, workshopId }) => 
   }
 
   appLog(`Iniciando download via SteamCMD do item ${id}...`);
-  if (!hasCachedSteamCmdSession()) {
-    if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'need-interactive-login' });
-    await runSteamCmdInteractive(exePath, ['+login', username, '+quit']);
-  }
-
   if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'starting' });
-  const { code, sawError } = await runSteamCmd(exePath, [
+  const { code, sawError } = await runSteamCmdWithFallback(exePath, [
     '+login', username,
     '+workshop_download_item', '431960', id, 'validate',
     '+quit',
-  ]);
+  ], username);
 
   const contentDir = path.join(steamCmdDir, 'steamapps', 'workshop', 'content', '431960', id);
   if (fs.existsSync(contentDir) && fs.readdirSync(contentDir).length > 0) {
@@ -2223,9 +2405,10 @@ ipcMain.handle('steamcmd-download-item', async (_, { username, workshopId }) => 
       if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'completed', wallpaper: wpItem });
       return { ok: true, wallpaper: wpItem };
     }
-    appLog.err('SteamCMD baixou os arquivos, mas o formato não foi reconhecido.');
-    if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'error', msg: 'Formato não reconhecido.' });
-    return { ok: false, msg: 'Formato não reconhecido.' };
+    const unrecognizedMsg = describeUnrecognizedDownload(contentDir);
+    appLog.err('SteamCMD baixou os arquivos, mas ' + unrecognizedMsg);
+    if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'error', msg: unrecognizedMsg });
+    return { ok: false, msg: unrecognizedMsg };
   }
   const msg = sawError || `SteamCMD encerrou (código ${code}) sem baixar o item.`;
   appLog.err('Download via SteamCMD falhou: ' + msg);
@@ -2271,6 +2454,25 @@ ipcMain.handle('install-screensaver', async () => {
 // ---- Boot ----
 _bootLog('app.whenReady() disparado');
 app.whenReady().then(async () => {
+  if (_isFirstRunInstall) {
+    _bootLog('dentro do callback de whenReady, _isFirstRunInstall=true, chamando runFirstRunInstall');
+    await runFirstRunInstall();
+    return;
+  }
+
+  // Diagnóstico real do estado da GPU/composição, pra investigar o bug do
+  // vídeo congelando num frame só sob WorkerW (ver memória
+  // video-congelado-workerw-repaint) sem depender só de chute — se
+  // "gpu_compositing" ou "video_decode" aparecerem como
+  // "disabled_software"/"unavailable_software" nesse PC específico, isso já
+  // aponta direto pra causa, em vez de testar flag por flag às cegas.
+  try {
+    const gpuStatus = app.getGPUFeatureStatus();
+    appLog(`[GPU] ${JSON.stringify(gpuStatus)}`);
+  } catch (err) {
+    appLog.warn('[GPU] Não consegui ler getGPUFeatureStatus(): ' + err.message);
+  }
+
   _bootLog('dentro do callback de whenReady, chamando License.checkLicense');
   const licenseStatus = await License.checkLicense(store);
   _bootLog(`License.checkLicense retornou: ok=${licenseStatus.ok}`);

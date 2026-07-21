@@ -1042,6 +1042,13 @@ function setWsStatus(text, detail = '', pct = null, color = 'var(--accent)') {
   wsStatusDetail.textContent = detail;
   wsProgressFill.style.width = pct !== null ? Math.min(100, Math.round(pct * 100)) + '%' : '0%';
 }
+// #ws-status-bar não existe mais no HTML atual (removido numa reforma
+// anterior da UI) — wsStatus fica sempre null. setWsStatus() já se protegia
+// pra isso, mas vários pontos espalhados faziam `wsStatus.style...` direto,
+// sem checar null, e quebravam com "Cannot read properties of null"
+// (confirmado ao vivo, main.js/app.js:1513). Helper seguro pra esconder,
+// reusado em todos esses pontos.
+function hideWsStatus() { if (wsStatus) wsStatus.style.display = 'none'; }
 
 
 const WA_TYPE_LABELS = {
@@ -1209,6 +1216,16 @@ function initHeaderAndSystemPanel() {
     });
   }
 
+  // Ícone de Log no cabeçalho — mesmo padrão do Configurações. O painel
+  // (#panel-logs) já existia no HTML, mas não tinha nenhum jeito de abrir.
+  const logsBtn = document.getElementById('btn-header-logs');
+  if (logsBtn) {
+    logsBtn.addEventListener('click', () => {
+      const logsNav = document.querySelector('.nav-item[data-panel="logs"]');
+      if (logsNav) logsNav.click();
+    });
+  }
+
   // Clicar no nome/avatar do usuário na sidebar também abre Configurações.
   const sidebarUser = document.querySelector('.sidebar-user');
   if (sidebarUser) {
@@ -1316,7 +1333,7 @@ document.getElementById('btn-steam-web-login').addEventListener('click', async (
   const result = await ipc('steam-web-login');
   if (result.ok) {
     setWsStatus('✅ Login Steam realizado com sucesso!', 'Inscrições invisíveis habilitadas.', 1, '#4caf50');
-    setTimeout(() => { wsStatus.style.display = 'none'; }, 4000);
+    setTimeout(() => { hideWsStatus(); }, 4000);
     closeModal('modal-steam-login');
     
     // Se tinha um download pendente, tenta baixar de novo agora que tem cookies
@@ -1325,7 +1342,7 @@ document.getElementById('btn-steam-web-login').addEventListener('click', async (
     }
   } else {
     setWsStatus('❌ ' + (result.msg || 'Login cancelado/falhou.'), '', null, '#c0392b');
-    setTimeout(() => { wsStatus.style.display = 'none'; }, 4000);
+    setTimeout(() => { hideWsStatus(); }, 4000);
   }
 });
 
@@ -1490,6 +1507,9 @@ async function startSteamCmdDirect(workshopId, title) {
   document.getElementById('dl-loading-subtitle').textContent = displayTitle;
   document.getElementById('dl-progress-fill').style.width = '0%';
   document.getElementById('dl-progress-text').textContent = 'Iniciando...';
+  const dlLog = document.getElementById('dl-log-lines');
+  dlLog.textContent = '';
+  dlLog.style.display = 'none';
   dlScreen.classList.add('visible');
   setWsStatus(`⏳ ${displayTitle}`);
 
@@ -1497,7 +1517,7 @@ async function startSteamCmdDirect(workshopId, title) {
   if (!result || !result.ok) {
     dlScreen.classList.remove('visible');
     setWsStatus('❌ ' + (result && result.msg ? result.msg : 'Falha no download.'), '', null, '#c0392b');
-    setTimeout(() => { wsStatus.style.display = 'none'; }, 5000);
+    setTimeout(() => { hideWsStatus(); }, 5000);
   }
 }
 
@@ -1590,7 +1610,18 @@ ipcRenderer.on('steamcmd-need-guard-code', () => {
 
 // Linha crua do SteamCMD (mesmo texto que vai pra aba Log) — mostrada
 // também aqui dentro do modal, pra não parecer travado numa espera longa.
-ipcRenderer.on('steamcmd-log-line', (_, line) => _scmdLog(line));
+ipcRenderer.on('steamcmd-log-line', (_, line) => {
+  _scmdLog(line);
+  // Também mostra na tela cheia de download (clique direto em "Aplicar
+  // Wallpaper" nunca abre o modal do SteamCMD, então sem isso não tinha
+  // NENHUM jeito de ver o que estava acontecendo enquanto travado).
+  const dlLog = document.getElementById('dl-log-lines');
+  if (dlLog) {
+    dlLog.style.display = 'block';
+    dlLog.textContent += (dlLog.textContent ? '\n' : '') + line;
+    dlLog.scrollTop = dlLog.scrollHeight;
+  }
+});
 
 ipcRenderer.on('steamcmd-status', (_, data) => {
   // Espelha o mesmo status na barra flutuante de sempre (setWsStatus) e,
@@ -1626,7 +1657,7 @@ ipcRenderer.on('steamcmd-status', (_, data) => {
       // sido fechado, pra ficar óbvio que terminou e o quê aconteceu.
       setWallpaper(wp).catch((err) => console.error('[steamcmd-auto-aplicar]', err));
       setWsStatus('✅ Baixado via SteamCMD e aplicado!', wp.name || '', 1, '#4caf50');
-      setTimeout(() => { wsStatus.style.display = 'none'; }, 5000);
+      setTimeout(() => { hideWsStatus(); }, 5000);
     }
     if (dlActive) {
       document.getElementById('dl-loading-title').textContent = 'Concluído!';
@@ -1682,7 +1713,7 @@ ipcRenderer.on('download-progress', async (_, data) => {
     dlText.textContent = 'Instalando wallpaper...';
 
     setWsStatus('✅ Download concluído!', 'Wallpaper adicionado à biblioteca.', 1, '#4caf50');
-    setTimeout(() => { wsStatus.style.display = 'none'; }, 5000);
+    setTimeout(() => { hideWsStatus(); }, 5000);
     _slPending = null;
     const wp = data.wallpaper;
     if (wp && !library.some(w => w.id === wp.id)) {
@@ -1701,7 +1732,7 @@ ipcRenderer.on('download-progress', async (_, data) => {
   } else if (data.state === 'needs-login') {
     disarmDlUnstickButton();
     dlScreen.classList.remove('visible');
-    wsStatus.style.display = 'none';
+    hideWsStatus();
     _slPending = { workshopId: data.workshopId, name: data.name, previewUrl: data.previewUrl };
     const previewImg  = document.getElementById('sl-preview-img');
     const previewWrap = document.getElementById('sl-preview-wrap');
@@ -1723,7 +1754,7 @@ ipcRenderer.on('download-progress', async (_, data) => {
     disarmDlUnstickButton();
     document.getElementById('dl-loading-screen').classList.remove('visible');
     setWsStatus('❌ ' + data.msg, '', null, '#f44336');
-    setTimeout(() => { wsStatus.style.display = 'none'; }, 8000);
+    setTimeout(() => { hideWsStatus(); }, 8000);
   }
 });
 
