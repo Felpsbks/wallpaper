@@ -30,13 +30,21 @@ app.commandLine.appendSwitch('disable-logging');
 // "porquê" por aí.
 //
 // use-angle=d3d9 foi tentado em seguida e REVERTIDO NO MESMO DIA: quebrou o
-// PC principal, que tinha funcionado perfeitamente a sessão inteira até
-// então (regressão confirmada pelo usuário — "nem no meu está funcionado"
-// logo depois de instalar essa versão). Esse PC certamente estava indo bem
-// com o backend padrão (d3d11, escolhido automaticamente) — forçar d3d9
-// nele quebrou algo que já funcionava, sem consertar nada no PC com
-// problema. Não forçar mais nenhum backend específico do ANGLE; deixar o
-// Chromium escolher sozinho.
+// PC principal (Windows 11), que tinha funcionado perfeitamente a sessão
+// inteira até então. Só que essa reversão foi rápida demais — nunca chegou
+// a ser confirmado se a flag ajudava ou não no PC com problema (Windows
+// 10), só que quebrava o outro. Novo dado mudou o quadro: o Lively
+// Wallpaper, rodando nesse MESMO PC com problema, carrega d3d9.dll,
+// d3d11.dll e dxgi.dll sem erro nenhum — o DirectX funciona normal no nível
+// do sistema, então d3d9 especificamente é um caminho que já se prova
+// funcional nessa máquina. Testando de novo, mas agora só no Windows 10 —
+// deixa o Windows 11 (onde já sabemos que essa flag quebra) com o
+// comportamento automático de sempre.
+const _winBuildNum = process.platform === 'win32' ? parseInt((require('os').release() || '').split('.')[2], 10) || 0 : 0;
+const _isWindows10OrOlder = process.platform === 'win32' && _winBuildNum > 0 && _winBuildNum < 22000;
+if (_isWindows10OrOlder) {
+  app.commandLine.appendSwitch('use-angle', 'd3d9');
+}
 
 // The wallpaper window is *always* occluded from the OS's point of view — it
 // permanently sits behind the desktop icons layer by design. Chromium's
@@ -2604,6 +2612,7 @@ app.whenReady().then(async () => {
   // "gpu_compositing" ou "video_decode" aparecerem como
   // "disabled_software"/"unavailable_software" nesse PC específico, isso já
   // aponta direto pra causa, em vez de testar flag por flag às cegas.
+  appLog(`[GPU-config] build=${_winBuildNum} use-angle-d3d9-forcado=${_isWindows10OrOlder}`);
   try {
     const gpuStatus = app.getGPUFeatureStatus();
     appLog(`[GPU] ${JSON.stringify(gpuStatus)}`);
