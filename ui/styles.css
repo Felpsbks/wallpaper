@@ -562,6 +562,36 @@ body::after {
 .hero-section:hover .hero-image { transform: scale(1.03); }
 .hero-image-wrap::after { content: ''; position: absolute; inset: 0; background: linear-gradient(to right, var(--bg2) 0%, transparent 40%); }
 
+/* Card de acesso ao YouTube ao vivo, dentro do Descobrir */
+.youtube-promo-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: linear-gradient(90deg, rgba(255, 0, 0, 0.12), var(--bg2) 55%);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.youtube-promo-banner:hover { border-color: rgba(255, 0, 0, 0.4); }
+.youtube-promo-icon {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: rgba(255, 0, 0, 0.15);
+  color: #ff3b3b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.youtube-promo-text { flex: 1; min-width: 0; }
+.youtube-promo-text h3 { font-size: 14px; font-weight: 700; margin-bottom: 2px; }
+.youtube-promo-text p { color: var(--text2); font-size: 12px; }
+.youtube-promo-btn { flex: 0 0 auto; padding: 8px 16px; border-radius: 10px; font-size: 12px; }
+
 /* Section Titles */
 .section-title-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .section-title-row h3 { font-size: 14px; font-weight: 700; }

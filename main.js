@@ -2426,6 +2426,9 @@ ipcMain.handle('get-workshop-details', async (_, ids) => {
     const items = (details.response?.publishedfiledetails || []).map(d => {
       const tags = (d.tags || []).map(t => t.tag);
       const waType = inferWaType(tags);
+      // Build pro usuário final: 'scene' some completamente daqui também, não
+      // só do scan local (ver parseSingleWorkshopItem) — mesmo critério.
+      if (_isEndUserBuild && waType === 'scene') return null;
       return {
         workshopId: d.publishedfileid,
         title: d.title || 'Sem título',
@@ -2440,7 +2443,7 @@ ipcMain.handle('get-workshop-details', async (_, ids) => {
         waType,
         compatible: waType === 'video' || waType === 'web' || waType === 'scene',
       };
-    });
+    }).filter(Boolean);
     return { items };
   } catch (e) {
     return { items: [], error: e.message };
@@ -2483,6 +2486,9 @@ async function fetchWorkshopPage({ sort, search, page, tag }) {
   const items = (details.response?.publishedfiledetails || []).map(d => {
     const tags = (d.tags || []).map(t => t.tag);
     const waType = inferWaType(tags);
+    // Build pro usuário final: não mostra 'scene' nem na busca (mesmo
+    // critério do scan local em parseSingleWorkshopItem) — só video/web.
+    if (_isEndUserBuild && waType === 'scene') return null;
     return {
       workshopId: d.publishedfileid,
       title: d.title || 'Sem título',
@@ -2499,7 +2505,7 @@ async function fetchWorkshopPage({ sort, search, page, tag }) {
       // instead of the animated proprietary scene (see wallpaper.js fallback).
       compatible: waType === 'video' || waType === 'web' || waType === 'scene',
     };
-  });
+  }).filter(Boolean);
 
   return { items, total: items.length };
 }

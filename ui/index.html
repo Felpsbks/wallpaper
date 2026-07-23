@@ -39,7 +39,12 @@
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
         Descobrir
       </div>
-      <div class="nav-item" data-panel="youtube">
+      <!-- YouTube não aparece mais como item próprio na barra lateral (ficava
+           deslocado sozinho ali) — agora é acessado pelo card em destaque
+           dentro do Descobrir (#discover-youtube-banner). O item continua no
+           DOM, só oculto, porque o clique nele é quem já sabe abrir o painel
+           certo (ver listener em app.js). -->
+      <div class="nav-item" data-panel="youtube" style="display:none">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22.54 6.42a2.78 2.78 0 0 0-1.94-2C18.88 4 12 4 12 4s-6.88 0-8.6.46a2.78 2.78 0 0 0-1.94 2A29 29 0 0 0 1 11.75a29 29 0 0 0 .46 5.33A2.78 2.78 0 0 0 3.4 19c1.72.46 8.6.46 8.6.46s6.88 0 8.6-.46a2.78 2.78 0 0 0 1.94-2 29 29 0 0 0 .46-5.25 29 29 0 0 0-.46-5.33z"></path><polygon points="9.75 15.02 15.5 11.75 9.75 8.48 9.75 15.02"></polygon></svg>
         YouTube
       </div>
@@ -198,6 +203,20 @@
           <div class="hero-image-wrap">
             <img src="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=1000&auto=format&fit=crop" class="hero-image" />
           </div>
+        </div>
+
+        <!-- Card de acesso ao YouTube ao vivo — substitui o item que ficava
+             sozinho na barra lateral. Clicar aqui aciona o mesmo listener do
+             item de navegação (ver app.js), então não duplica lógica. -->
+        <div class="youtube-promo-banner" id="discover-youtube-banner">
+          <div class="youtube-promo-icon">
+            <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2"><path d="M22.54 6.42a2.78 2.78 0 0 0-1.94-2C18.88 4 12 4 12 4s-6.88 0-8.6.46a2.78 2.78 0 0 0-1.94 2A29 29 0 0 0 1 11.75a29 29 0 0 0 .46 5.33A2.78 2.78 0 0 0 3.4 19c1.72.46 8.6.46 8.6.46s6.88 0 8.6-.46a2.78 2.78 0 0 0 1.94-2 29 29 0 0 0 .46-5.25 29 29 0 0 0-.46-5.33z"></path><polygon points="9.75 15.02 15.5 11.75 9.75 8.48 9.75 15.02"></polygon></svg>
+          </div>
+          <div class="youtube-promo-text">
+            <h3>Wallpaper ao vivo do YouTube</h3>
+            <p>Pesquise um vídeo e aplique direto na área de trabalho, sem baixar nada.</p>
+          </div>
+          <button class="btn btn-secondary youtube-promo-btn">Abrir YouTube</button>
         </div>
 
         <!-- Populares -->

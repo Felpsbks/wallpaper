@@ -95,6 +95,13 @@ document.querySelectorAll('.nav-item').forEach(item => {
   });
 });
 
+// Card de acesso ao YouTube dentro do Descobrir — clique aciona o mesmo
+// nav-item (agora oculto na barra lateral), reaproveitando 100% da lógica
+// de troca de painel já existente acima.
+document.getElementById('discover-youtube-banner')?.addEventListener('click', () => {
+  document.querySelector('.nav-item[data-panel="youtube"]')?.click();
+});
+
 // ---- Aba YouTube ----
 // O navegador embutido é um BrowserView (superfície nativa controlada pelo
 // main.js — ver 'youtube-panel-show' lá) posicionado por cima da div
