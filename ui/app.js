@@ -2952,6 +2952,31 @@ function showUpdateBanner(info) {
 ipcRenderer.on('update-available', (_e, info) => showUpdateBanner(info));
 ipc('get-update-info').then(showUpdateBanner);
 
+// Status da checagem de atualização, visível na tela "Sobre" — sem isso, uma
+// checagem quebrada (repo errado, rede fora, API do GitHub com problema) fica
+// invisível pra sempre na build empacotada, que não tem console visível.
+function refreshUpdateCheckStatus() {
+  const statusEl = document.getElementById('about-update-status');
+  if (!statusEl) return;
+  ipc('get-update-check-status').then((status) => {
+    if (!status || !status.time) { statusEl.textContent = 'Ainda não checou nesta sessão'; return; }
+    const when = new Date(status.time).toLocaleString('pt-BR');
+    statusEl.textContent = status.ok
+      ? `OK — última checagem em ${when} (${status.repo})`
+      : `Falhou em ${when}: ${status.error} (${status.repo})`;
+  });
+}
+refreshUpdateCheckStatus();
+document.getElementById('btn-check-updates-now')?.addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  btn.textContent = 'Checando...';
+  await ipc('force-check-updates');
+  refreshUpdateCheckStatus();
+  btn.disabled = false;
+  btn.textContent = 'Checar agora';
+});
+
 // "O que mudou" desde a última vez que o usuário abriu o app — pedido
 // explícito pra não deixar mudanças acontecendo "caladas". Só aparece uma
 // vez por versão (main.js já filtra instalação nova e versão já vista).

@@ -12,6 +12,40 @@ const tmpSrc = path.join(os.tmpdir(), 'ew_app_src');
 const resDir = path.join(root, 'bin', 'resources');
 const outAsar = path.join(resDir, 'app.asar');
 
+// Guarda contra a causa exata do bug do v1.0.20/v1.0.21: UPDATE_CHECK_REPO em
+// main.js é uma string solta, sem nenhuma ligação com o remoto real do git —
+// ficou apontando pro nome antigo do repositório (fynix-connect) por quem
+// sabe quantas releases, e nenhum release "quebrado" assim nunca falha visivelmente:
+// o app só nunca detecta a própria atualização, silenciosamente, pra sempre.
+// Falhar o build aqui, comparando contra o remoto real, é o único jeito de
+// pegar esse tipo de desvio ANTES de publicar, em vez de descobrir meses
+// depois que ninguém recebeu updates.
+(function checkUpdateRepoMatchesGitRemote() {
+  let remoteUrl;
+  try {
+    remoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8' }).trim();
+  } catch (err) {
+    console.warn('[pack] Não consegui ler o remoto do git — pulando checagem do UPDATE_CHECK_REPO.');
+    return;
+  }
+  const remoteMatch = remoteUrl.match(/github\.com[:/]([^/]+\/[^/]+?)(\.git)?$/i);
+  if (!remoteMatch) return;
+  const realRepo = remoteMatch[1];
+
+  const mainJs = fs.readFileSync(path.join(root, 'main.js'), 'utf8');
+  const constMatch = mainJs.match(/UPDATE_CHECK_REPO\s*=\s*['"]([^'"]+)['"]/);
+  if (!constMatch) {
+    console.error('[pack] UPDATE_CHECK_REPO não encontrado em main.js — build abortado.');
+    process.exit(1);
+  }
+  const configuredRepo = constMatch[1];
+
+  if (configuredRepo.toLowerCase() !== realRepo.toLowerCase()) {
+    console.error(`[pack] UPDATE_CHECK_REPO ('${configuredRepo}') não bate com o remoto real do git ('${realRepo}'). O checador de atualização ficaria quebrado silenciosamente nesta build. Corrija main.js antes de empacotar.`);
+    process.exit(1);
+  }
+})();
+
 console.log('Preparing source...');
 if (fs.existsSync(tmpSrc)) fs.rmSync(tmpSrc, { recursive: true });
 fs.mkdirSync(path.join(tmpSrc, 'node_modules'), { recursive: true });

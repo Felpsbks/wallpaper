@@ -1570,6 +1570,51 @@ ipcMain.on('wallpaper-set-attempt', (event, info) => {
 // Wallpaper tipo "web": renderizado via BrowserView (ver comentário acima de
 // wallpaperWebViews) em vez da tag <webview>, que tem um bug de sincronização
 // de tamanho não contornável nesta versão do Electron.
+const YOUTUBE_WATCH_RE = /^https:\/\/(www\.)?youtube\.com\/watch\?/i;
+
+// Esconde o cabeçalho/sidebar/comentários/dialogs de consentimento da página
+// normal de assistir do YouTube e estica o player pra tela cheia, deixando só
+// o vídeo visível — troca pelo /embed/ (ver buildYoutubeEmbedSrc acima) fazia
+// isso "de graça" (o iframe só tinha o player), mas caía no Erro 153 pra
+// vídeos com incorporação desativada. insertCSS fica como regra de stylesheet
+// de verdade, não toque pontual em elemento — sobrevive a re-renders da SPA
+// do YouTube sem precisar reaplicar em loop.
+function injectYoutubeWatchCleanup(view) {
+  view.webContents.insertCSS(`
+    html, body { background: #000 !important; overflow: hidden !important; }
+    #masthead-container, ytd-masthead, #secondary, #comments, ytd-comments,
+    #related, ytd-watch-metadata, #below, tp-yt-paper-dialog,
+    ytd-consent-bail-out-renderer, ytd-popup-container, #chat, #panels,
+    .ytp-chrome-top, .ytp-gradient-top, .ytp-watermark, .ytp-pause-overlay,
+    .ytp-ce-element, ytd-mealbar-promo-renderer, #chips-wrapper {
+      display: none !important;
+    }
+    ytd-app, #content, #page-manager, ytd-watch-flexy, #primary,
+    #primary-inner, #player-container-outer, #player-container-inner,
+    #player, #movie_player, #movie_player video, .html5-video-container {
+      position: fixed !important; inset: 0 !important;
+      width: 100vw !important; height: 100vh !important;
+      max-width: none !important; max-height: none !important;
+      margin: 0 !important; padding: 0 !important;
+    }
+  `).catch(() => {});
+
+  // Alguns mercados mostram um banner de consentimento de cookies que
+  // BLOQUEIA o vídeo até clicar em "Aceitar" — CSS sozinho não basta aqui
+  // porque a própria página impede a reprodução até o clique real acontecer.
+  view.webContents.executeJavaScript(`
+    (function() {
+      let tries = 0;
+      const t = setInterval(function() {
+        tries++;
+        const btn = document.querySelector('ytd-consent-bail-out-renderer button, tp-yt-paper-dialog button[aria-label*="Aceitar" i], tp-yt-paper-dialog button[aria-label*="Accept" i]');
+        if (btn) btn.click();
+        if (tries > 15) clearInterval(t);
+      }, 1000);
+    })();
+  `).catch(() => {});
+}
+
 ipcMain.on('web-wallpaper-show', (event, { src, options, properties }) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win || win.isDestroyed()) return;
@@ -1581,6 +1626,8 @@ ipcMain.on('web-wallpaper-show', (event, { src, options, properties }) => {
   view.webContents.loadURL(src);
 
   const injectBridge = () => {
+    if (YOUTUBE_WATCH_RE.test(src)) injectYoutubeWatchCleanup(view);
+
     view.webContents.executeJavaScript(`
       window.wallpaperRegisterAudioListener = function(cb) { window._weAudioCallback = cb; };
     `).catch(() => {});
@@ -1680,17 +1727,24 @@ function suppressInlinePlayback(view) {
 }
 
 // Achado ao vivo (2026-07-21): apontar o wallpaper "web" DIRETO pra URL
-// /embed/<id> (como se fosse a página em si) dava "Erro 153 — erro de
-// configuração do player de vídeo" — o player do YouTube valida a origem
-// de quem carregou ele, e rejeita quando é uma navegação de topo sem
-// nenhuma página "pai" de verdade (não é assim que sites de verdade
-// embutem vídeo, eles sempre têm um <iframe> dentro da própria página).
-// Fix: embrulha o /embed/ dentro de uma paginazinha local (data: URL) com
-// um <iframe> de verdade — imita exatamente como um site real embutiria.
+// /embed/<id> dava "Erro 153". A correção tentada (embrulhar o /embed/ num
+// <iframe> dentro de uma data: URL local, imitando como um site de verdade
+// embutiria) NÃO resolveu de verdade — confirmado ao vivo de novo (2026-07-22)
+// que o erro persiste. Duas causas prováveis, nenhuma resolvível ficando no
+// /embed/: (1) uma data: URL tem origem opaca/nula, e o validador de origem
+// do player do YouTube pode rejeitar isso do mesmo jeito que rejeitava a
+// navegação direta; (2) mais provável ainda — vídeos com "incorporação
+// desativada pelo dono" (comum em clipes de música/TV) dão Erro 153 em
+// QUALQUER truque de /embed/, sem exceção, o único jeito de tocar é a própria
+// página normal de assistir.
+//
+// Fix definitivo: carrega a PÁGINA REAL de assistir (youtube.com/watch), a
+// mesma que abriria clicando o link — funciona pra qualquer vídeo, sem
+// restrição de incorporação nenhuma. injectYoutubeWatchCleanup() (chamada no
+// handler 'web-wallpaper-show') esconde o cabeçalho/sidebar/comentários via
+// CSS e estica o player pra tela cheia, deixando só o vídeo visível.
 function buildYoutubeEmbedSrc(videoId) {
-  const embedUrl = `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=0&loop=1&playlist=${videoId}&controls=0&modestbranding=1&rel=0&playsinline=1`;
-  const html = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden}iframe{position:fixed;inset:0;width:100%;height:100%;border:0}</style></head><body><iframe src="${embedUrl}" allow="autoplay; encrypted-media" allowfullscreen></iframe></body></html>`;
-  return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+  return `https://www.youtube.com/watch?v=${videoId}&autoplay=1`;
 }
 
 // Vídeo YouTube tocando "ao vivo" (streaming, via player oficial embutido —
@@ -2055,6 +2109,11 @@ function httpDownload(url, destPath, onProgress) {
 const APP_VERSION = require('./package.json').version;
 const UPDATE_CHECK_REPO = 'Felpsbks/wallpaper';
 let _pendingUpdateInfo = null;
+// Última tentativa de checagem, sucesso ou erro — exibido na tela "Sobre" das
+// Configurações. Sem isso, uma checagem quebrada (rede, API do GitHub fora do
+// ar, repo errado como já aconteceu) fica invisível pra sempre: o app
+// empacotado não tem console visível, só um console.warn que ninguém vê.
+let _lastUpdateCheckStatus = { time: null, ok: null, error: null, repo: UPDATE_CHECK_REPO };
 
 // Comparação simples de versão "x.y.z" — não é semver completo (sem
 // pre-release/build metadata), mas é tudo que este projeto usa.
@@ -2072,6 +2131,10 @@ async function checkForUpdates() {
   try {
     const raw = await httpGet(`https://api.github.com/repos/${UPDATE_CHECK_REPO}/releases/latest`);
     const data = JSON.parse(raw);
+    // A partir daqui a requisição em si funcionou — marca sucesso já aqui,
+    // não só quando existe atualização, senão o caso comum ("checou, tá tudo
+    // atualizado") nunca fica registrado como um sucesso de verdade.
+    _lastUpdateCheckStatus = { time: Date.now(), ok: true, error: null, repo: UPDATE_CHECK_REPO };
     if (!data || !data.tag_name) return;
     const remoteVersion = String(data.tag_name).replace(/^v/i, '');
     if (!isNewerVersion(remoteVersion, APP_VERSION)) return;
@@ -2093,10 +2156,15 @@ async function checkForUpdates() {
   } catch (err) {
     // Sem rede, GitHub fora do ar, ou repositório momentaneamente sem
     // releases — nunca deve incomodar o usuário nem travar nada, só não
-    // mostra o aviso desta vez.
+    // mostra o aviso desta vez. O erro ainda fica salvo em
+    // _lastUpdateCheckStatus pra aparecer na tela "Sobre", em vez de só
+    // sumir num console que ninguém vê na build empacotada.
     console.warn('[main] checkForUpdates falhou:', err.message);
+    _lastUpdateCheckStatus = { time: Date.now(), ok: false, error: err.message, repo: UPDATE_CHECK_REPO };
   }
 }
+ipcMain.handle('get-update-check-status', () => _lastUpdateCheckStatus);
+ipcMain.handle('force-check-updates', () => { checkForUpdates(); return true; });
 
 // Renderer também pode puxar sob demanda (ex: se a checagem já rodou antes
 // da janela de controle terminar de carregar e o webContents.send perdeu a
@@ -2114,7 +2182,7 @@ ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedU
 // não tem "novidade" pra quem tá abrindo o app pela primeira vez.
 const WHATS_NEW = {
   version: APP_VERSION,
-  text: 'Nova seção "YouTube" na barra lateral: pesquise dentro do app e o vídeo já vira papel de parede de fundo automaticamente, com opção de baixar em alta qualidade (até 4K) separada. Wallpapers "web" agora também aceitam clique em elementos internos (botões/config) e têm áudio/volume sincronizado.',
+  text: 'Corrigido o "Erro 153" do papel de parede ao vivo do YouTube — agora usa a página real de assistir em vez do player incorporado (funciona em qualquer vídeo) e some a logo do YouTube. Também corrigimos o checador de atualização, que estava quebrado silenciosamente.',
 };
 ipcMain.handle('get-whats-new', () => {
   if (store.get('lastSeenWhatsNewVersion') === WHATS_NEW.version) return null;
