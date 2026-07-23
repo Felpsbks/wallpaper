@@ -236,11 +236,31 @@ function recreateVideoElements() {
   videoEl = fresh;
 }
 
+// Caminhos locais de wallpaper vêm como path bruto do Windows (ex:
+// "C:\Users\...\video.mp4"), nunca uma URL — sob o Electron isso funciona
+// porque a própria página é servida via file://, e o resolvedor de URL do
+// Chromium aceita um path com letra de unidade de boa nesse caso. Debaixo do
+// WebView2 (MainForm.cs), a shell é servida via https://wallpaper.local — um
+// path bruto vira uma URL relativa inválida ali, o <video> nunca carrega nada
+// e a tela fica preta sólida (sem nenhum erro visível). MainForm.cs já mapeia
+// cada letra de unidade como https://localfs-<letra>/ especificamente pra
+// isso — só faltava alguém converter o path antes de atribuir a .src.
+function toPlayableSrc(rawSrc) {
+  if (!rawSrc) return rawSrc;
+  if (/^[a-z]+:\/\//i.test(rawSrc)) return rawSrc; // já é uma URL (http(s)/file/etc)
+  if (!hostBridge.isWebView2) return rawSrc; // Electron: path bruto já funciona como está
+  const m = rawSrc.match(/^([A-Za-z]):[\\/](.*)$/);
+  if (!m) return rawSrc;
+  const drive = m[1].toLowerCase();
+  const rest = m[2].split(/[\\/]/).map(encodeURIComponent).join('/');
+  return `https://localfs-${drive}/${rest}`;
+}
+
 function showVideo(wallpaper) {
   hideAll();
   recreateVideoElements();
   videoEl.style.display = 'block';
-  videoEl.src = wallpaper.src;
+  videoEl.src = toPlayableSrc(wallpaper.src);
   savedVolume = (wallpaper.volume ?? 50) / 100;
   videoEl.volume = savedVolume;
   videoEl.loop = true;
@@ -274,7 +294,13 @@ function showVideo(wallpaper) {
 function showImage(wallpaper) {
   hideAll();
   const src = wallpaper.src;
-  imageEl.src = src.match(/^[a-z]+:\/\//i) ? src : 'file:///' + src.replace(/\\/g, '/');
+  // file:/// funciona sob o Electron, mas o WebView2 bloqueia como mixed
+  // content vindo de https://wallpaper.local (ver comentário de
+  // toPlayableSrc acima) — mesma conversão pro caso de imagem cair aqui como
+  // fallback (ex: erro ao renderizar cena WE) mesmo no modo de compatibilidade.
+  imageEl.src = hostBridge.isWebView2
+    ? toPlayableSrc(src)
+    : (src.match(/^[a-z]+:\/\//i) ? src : 'file:///' + src.replace(/\\/g, '/'));
   imageEl.style.display = 'block';
 }
 

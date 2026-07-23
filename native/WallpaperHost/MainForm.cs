@@ -129,18 +129,20 @@ public class MainForm : Form
         // lives at arbitrary absolute paths on disk. The page is served from
         // https://wallpaper.local/, so a raw file:// src is cross-origin
         // mixed content and WebView2 (real Chromium) blocks it silently —
-        // <img>/<video> just never load, with no visible error. Map each
-        // drive root to its own virtual hostname so main.js can address any
-        // local file as https://localfs-<drive>/<rest of path>; only C: and
-        // D: for now (covers the default Windows/Steam-library locations —
-        // extend here if a wallpaper on another drive needs it).
-        foreach (var drive in new[] { "C", "D" })
+        // <img>/<video> just never load, with no visible error (confirmed
+        // live: solid black screen, no exception anywhere — wallpaper.js's
+        // toPlayableSrc() is the piece on the page side that actually turns a
+        // raw Windows path into one of these URLs). Map every drive that
+        // actually exists (Steam libraries commonly live on a dedicated
+        // drive, not just C:/D:) so main.js can address any local file as
+        // https://localfs-<drive>/<rest of path>.
+        foreach (var letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
         {
-            var root = $"{drive}:\\";
+            var root = $"{letter}:\\";
             if (Directory.Exists(root))
             {
                 _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
-                    $"localfs-{drive.ToLowerInvariant()}", root, Microsoft.Web.WebView2.Core.CoreWebView2HostResourceAccessKind.Allow);
+                    $"localfs-{char.ToLowerInvariant(letter)}", root, Microsoft.Web.WebView2.Core.CoreWebView2HostResourceAccessKind.Allow);
             }
         }
 
