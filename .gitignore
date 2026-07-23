@@ -6,4 +6,6 @@ bin/
 license-server/.env
 license-server/.env.local
 license-server/.vercel
+native/WallpaperHost/obj/
+native/WallpaperHost/bin/
 

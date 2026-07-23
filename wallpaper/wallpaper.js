@@ -1,5 +1,8 @@
-const { ipcRenderer } = require('electron');
-const path = require('path');
+// Transport-agnostic: works under both the Electron BrowserWindow host (today's
+// production path) and the native WallpaperHost.exe (WebView2 compat mode, see
+// project_workerw_fragility memory) via window.hostBridge (host-bridge.js,
+// loaded before this file — see wallpaper/index.html). Never touch ipcRenderer
+// or window.chrome.webview directly from this file again.
 
 let videoEl      = document.getElementById('video-layer');
 const imageEl    = document.getElementById('image-layer');
@@ -12,6 +15,8 @@ let currentScene   = null;
 let currentWeScene  = null;
 let savedVolume = 0.5;
 // Wallpaper tipo "web" (BrowserView, controlado pelo main.js — ver showWeb).
+// Só existe no host Electron; no WallpaperHost.exe (WebView2), type:'url' é
+// interceptado e tratado inteiramente do lado nativo, sem nunca chegar aqui.
 let _webWallpaperActive = false;
 
 // Diagnostic: proves whether this renderer's JS is still executing when the
@@ -19,7 +24,7 @@ let _webWallpaperActive = false;
 // refreshing — two very different bugs with different fixes. Forwarded to
 // main.js -> the app's own log tab, no separate devtools window needed.
 setInterval(() => {
-  ipcRenderer.send('wallpaper-heartbeat', { display: `${window.innerWidth}x${window.innerHeight}`, ts: Date.now() });
+  hostBridge.send('wallpaper-heartbeat', { display: `${window.innerWidth}x${window.innerHeight}`, ts: Date.now() });
 }, 5000);
 
 // FPS real deste wallpaper (contagem de frames via requestAnimationFrame,
@@ -32,7 +37,7 @@ function _fpsTick() {
   const now = performance.now();
   const elapsed = now - _fpsLastReport;
   if (elapsed >= 1000) {
-    ipcRenderer.send('wallpaper-fps', { fps: Math.round((_fpsFrameCount * 1000) / elapsed) });
+    hostBridge.send('wallpaper-fps', { fps: Math.round((_fpsFrameCount * 1000) / elapsed) });
     _fpsFrameCount = 0;
     _fpsLastReport = now;
   }
@@ -47,7 +52,7 @@ requestAnimationFrame(_fpsTick);
 // are landing on us instead of passing through, which could plausibly
 // trigger whatever is freezing the render.
 window.addEventListener('mousedown', (e) => {
-  ipcRenderer.send('wallpaper-click-received', { x: e.clientX, y: e.clientY, ts: Date.now() });
+  hostBridge.send('wallpaper-click-received', { x: e.clientX, y: e.clientY, ts: Date.now() });
 });
 
 // Diagnostic: Chromium has its own internal "is this page visible/occluded"
@@ -57,7 +62,7 @@ window.addEventListener('mousedown', (e) => {
 // we're now a real WS_CHILD sibling of the icons layer), this would fire and
 // would explain a freeze that isn't a JS hang and isn't a re-embed.
 document.addEventListener('visibilitychange', () => {
-  ipcRenderer.send('wallpaper-visibility-change', { hidden: document.hidden, state: document.visibilityState, ts: Date.now() });
+  hostBridge.send('wallpaper-visibility-change', { hidden: document.hidden, state: document.visibilityState, ts: Date.now() });
 });
 
 let audioContext = null;
@@ -66,7 +71,7 @@ let dataArray = null;
 
 async function initAudioVisualizer() {
   try {
-    const sourceId = await ipcRenderer.invoke('get-desktop-audio-source');
+    const sourceId = await hostBridge.invoke('get-desktop-audio-source');
     if (!sourceId) return;
 
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -82,10 +87,10 @@ async function initAudioVisualizer() {
     audioContext = new AudioContext();
     const source = audioContext.createMediaStreamSource(stream);
     analyser = audioContext.createAnalyser();
-    
-    analyser.fftSize = 256; 
+
+    analyser.fftSize = 256;
     analyser.smoothingTimeConstant = 0.5;
-    
+
     source.connect(analyser);
     dataArray = new Uint8Array(analyser.frequencyBinCount);
 
@@ -106,7 +111,7 @@ function updateAudioData() {
       weArray[i + 64] = val;
     }
 
-    ipcRenderer.send('web-wallpaper-audio-data', weArray);
+    hostBridge.send('web-wallpaper-audio-data', weArray);
   }
   requestAnimationFrame(updateAudioData);
 }
@@ -166,7 +171,7 @@ function applyClockOverlay(cfg) {
   }
 }
 
-ipcRenderer.invoke('get-settings').then(s => {
+hostBridge.invoke('get-settings').then(s => {
   if (s && s.audioReactive) initAudioVisualizer();
   if (s && s.clockOverlay) applyClockOverlay(s.clockOverlay);
 });
@@ -184,10 +189,11 @@ function hideAll() {
   videoEl.removeAttribute('src');
   videoEl.load();
   // Só esconde/reseta o BrowserView do wallpaper "web" se ele estava mesmo
-  // em uso — mesma cautela que já existia com a antiga <webview>.
+  // em uso — mesma cautela que já existia com a antiga <webview>. No modo
+  // WebView2, _webWallpaperActive nunca fica true (showWeb não roda lá).
   if (_webWallpaperActive) {
     _webWallpaperActive = false;
-    ipcRenderer.send('web-wallpaper-hide');
+    hostBridge.send('web-wallpaper-hide');
   }
   if (currentScene)   { currentScene.destroy();   currentScene = null; }
   if (currentWeScene) { currentWeScene.destroy(); currentWeScene = null; }
@@ -199,7 +205,7 @@ function attachVideoDiagnostics(el) {
   // via the element's own 'error' event instead.
   el.addEventListener('error', () => {
     const err = el.error;
-    ipcRenderer.send('wallpaper-video-error', {
+    hostBridge.send('wallpaper-video-error', {
       stage: 'load', code: err?.code, message: err?.message, src: el.src, ts: Date.now(),
     });
   });
@@ -239,7 +245,7 @@ function showVideo(wallpaper) {
   videoEl.volume = savedVolume;
   videoEl.loop = true;
   videoEl.play().catch((err) => {
-    ipcRenderer.send('wallpaper-video-error', { stage: 'play', message: err.message, src: videoEl.src, ts: Date.now() });
+    hostBridge.send('wallpaper-video-error', { stage: 'play', message: err.message, src: videoEl.src, ts: Date.now() });
   });
 
   // Diagnostic: some failures (this app's "7ucky's" repro) show the correct
@@ -251,7 +257,7 @@ function showVideo(wallpaper) {
   const snapshotSrc = videoEl.src;
   setTimeout(() => {
     if (videoEl.src !== snapshotSrc) return; // switched again since, stale
-    ipcRenderer.send('wallpaper-video-state', {
+    hostBridge.send('wallpaper-video-state', {
       src: videoEl.src,
       paused: videoEl.paused,
       ended: videoEl.ended,
@@ -279,18 +285,34 @@ function showImage(wallpaper) {
 // travando a altura da página em 150px mesmo com o host do tamanho certo.
 // BrowserView é a superfície nativa que a própria Electron recomenda no
 // lugar de <webview> justamente por causa desse tipo de bug.
+// Só roda debaixo do Electron — no host WebView2 (WallpaperHost.exe), type
+// 'url' nunca chega até aqui: é interceptado e tratado direto do lado nativo
+// (ShowWebWallpaper em MainForm.cs), antes de repassar qualquer coisa pra
+// esta página.
 function showWeb(wallpaper) {
   hideAll();
   _webWallpaperActive = true;
-  ipcRenderer.send('web-wallpaper-show', { src: wallpaper.src, options: wallpaper.options, properties: wallpaper.properties });
+  hostBridge.send('web-wallpaper-show', { src: wallpaper.src, options: wallpaper.options, properties: wallpaper.properties });
 }
 
 function showScene(wallpaper) {
   hideAll();
+  // require() só existe sob o Electron (nodeIntegration) — cenas/partículas
+  // continuam exclusivas desse host por enquanto. O toggle "Modo de
+  // compatibilidade (WebView2)" nas Configurações troca TODAS as janelas de
+  // wallpaper pro WallpaperHost.exe, não só as de vídeo/YouTube — se o
+  // usuário tiver esse modo ligado e escolher uma cena mesmo assim, falha
+  // limpo aqui em vez de estourar um ReferenceError não tratado.
+  if (typeof require !== 'function') {
+    console.warn('[wallpaper] Cenas não são suportadas no Modo de compatibilidade (WebView2).');
+    hostBridge.send('we-scene-issue', { label: wallpaper.name || wallpaper.id, message: 'cenas não são suportadas no Modo de compatibilidade (WebView2) — troque pra vídeo/YouTube ou desligue o modo nas Configurações.' });
+    return;
+  }
   canvasEl.style.display = 'block';
   canvasEl.width  = window.innerWidth;
   canvasEl.height = window.innerHeight;
 
+  const path = require('path');
   const sceneMap = {
     particles:  'scenes/particles.js',
     waves:      'scenes/waves.js',
@@ -306,10 +328,21 @@ function showScene(wallpaper) {
 
 // Renders a real, unpacked Wallpaper Engine Workshop scene (background image
 // + live clock/date/day text objects) instead of falling back to a frozen
-// preview image. See we-scene-render.js.
+// preview image. See we-scene-render.js. Electron-only, same reasoning as
+// showScene above.
 function showWeScene(wallpaper) {
   hideAll();
+  // Mesmo motivo do guard em showScene acima — sem require() debaixo do
+  // WebView2 (Modo de compatibilidade), falha limpo pro fallback de preview
+  // em vez de estourar um ReferenceError não tratado.
+  if (typeof require !== 'function') {
+    console.warn('[wallpaper] Cenas WE não são suportadas no Modo de compatibilidade (WebView2).');
+    hostBridge.send('we-scene-issue', { label: wallpaper.name || wallpaper.workshopId, message: 'cenas WE não são suportadas no Modo de compatibilidade (WebView2) — troque pra vídeo/YouTube ou desligue o modo nas Configurações.' });
+    showImage(wallpaper);
+    return;
+  }
   weSceneEl.style.display = 'block';
+  const path = require('path');
   const { WeScene } = require(path.join(__dirname, 'we-scene-render.js'));
 
   // Effective General Properties: each property's own default `value`,
@@ -326,7 +359,7 @@ function showWeScene(wallpaper) {
     currentWeScene.start();
   } catch (err) {
     console.warn('[wallpaper] we-scene render failed, falling back to preview image:', err.message);
-    ipcRenderer.send('we-scene-issue', { label, message: `cena não renderizou, caiu pro preview estático: ${err.message}` });
+    hostBridge.send('we-scene-issue', { label, message: `cena não renderizou, caiu pro preview estático: ${err.message}` });
     showImage(wallpaper);
   }
 }
@@ -346,7 +379,7 @@ function applyWallpaperNow(wallpaper) {
   _currentRenderType = renderType;
   applyClockOverlay(_clockConfig); // re-avalia visibilidade pro novo renderType
 
-  ipcRenderer.send('wallpaper-set-attempt', {
+  hostBridge.send('wallpaper-set-attempt', {
     id: wallpaper.id, name: wallpaper.name, type: wallpaper.type, renderType, src: wallpaper.src, ts: Date.now(),
   });
 
@@ -383,14 +416,14 @@ function setWallpaper(wallpaper) {
   }, TRANSITION_MS);
 }
 
-ipcRenderer.on('set-wallpaper',    (_, w) => setWallpaper(w));
-ipcRenderer.on('stop',             ()     => { hideAll(); });
-ipcRenderer.on('unstop',           ()     => { if (_activeWallpaper) setWallpaper(_activeWallpaper); });
-ipcRenderer.on('pause',            ()     => { videoEl.pause(); });
-ipcRenderer.on('resume',           ()     => { videoEl.play().catch(() => {}); });
-ipcRenderer.on('mute',             ()     => { videoEl.volume = 0; });
-ipcRenderer.on('unmute',           (_, v) => { savedVolume = v / 100; videoEl.volume = savedVolume; });
-ipcRenderer.on('update-settings',  (_, s) => {
+hostBridge.on('set-wallpaper',    (w) => setWallpaper(w));
+hostBridge.on('stop',             ()  => { hideAll(); });
+hostBridge.on('unstop',           ()  => { if (_activeWallpaper) setWallpaper(_activeWallpaper); });
+hostBridge.on('pause',            ()  => { videoEl.pause(); });
+hostBridge.on('resume',           ()  => { videoEl.play().catch(() => {}); });
+hostBridge.on('mute',             ()  => { videoEl.volume = 0; });
+hostBridge.on('unmute',           (v) => { savedVolume = v / 100; videoEl.volume = savedVolume; });
+hostBridge.on('update-settings',  (s) => {
   if (s.volume !== undefined) { savedVolume = s.volume / 100; videoEl.volume = savedVolume; }
   if (s.audioReactive !== undefined) {
     if (s.audioReactive && !audioContext) initAudioVisualizer();
@@ -408,13 +441,13 @@ ipcRenderer.on('update-settings',  (_, s) => {
 async function exitWeSceneEditAndSave() {
   if (!currentWeScene || !currentWeScene.editing || !_activeWallpaper) return;
   const overrides = currentWeScene.exitEditMode();
-  await ipcRenderer.invoke('we-scene-save-overrides', { wallpaperId: _activeWallpaper.id, overrides });
+  await hostBridge.invoke('we-scene-save-overrides', { wallpaperId: _activeWallpaper.id, overrides });
 }
 
 // Wallpaper windows are `focusable: false` on purpose (never steal focus from
 // normal desktop use), so they never receive keydown — exiting edit mode has
 // to be a mouse click, handled by the on-screen button (see we-scene-render.js).
-ipcRenderer.on('we-scene-enter-edit', () => {
+hostBridge.on('we-scene-enter-edit', () => {
   if (currentWeScene) currentWeScene.enterEditMode(exitWeSceneEditAndSave);
 });
 

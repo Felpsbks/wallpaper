@@ -30,6 +30,13 @@ public class MainForm : Form
     private readonly object _pendingLock = new();
     private bool _pageReady = false;
 
+    // type:'url' (hoje só YouTube ao vivo) é tratado inteiramente aqui, sem
+    // nunca repassar a mensagem pra shell (wallpaper.js) — ver HandleHostMessage
+    // e ShowWebWallpaper abaixo. _lastMuted guarda o último estado pra reaplicar
+    // se o próprio processo do YouTube for recriado por uma navegação.
+    private bool _webMode = false;
+    private bool _lastMuted = false;
+
     public MainForm(string contentDir, Rectangle bounds, string? testMediaPath = null, bool testClock = false)
     {
         _contentDir = contentDir;
@@ -104,6 +111,10 @@ public class MainForm : Form
         };
         var env = await Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(null, null, envOptions);
         await _webView.EnsureCoreWebView2Async(env);
+
+        // Filtros de bloqueio de anúncio do YouTube ficam ativos pro processo
+        // inteiro (não atrapalham a shell/vídeo — só casam domínio de anúncio).
+        YoutubeWallpaperController.EnsureAdBlock(_webView.CoreWebView2);
 
         // Serve the wallpaper folder under a virtual hostname so relative
         // <script src="wallpaper.js"> references resolve like a normal
@@ -221,18 +232,114 @@ public class MainForm : Form
     // message to this process's stdin (matching the {channel, data} shape
     // host-bridge.js expects) instead of a named pipe/socket — simplest
     // transport child_process already gives us for free.
+    //
+    // Reads via a manually-built StreamReader(Console.OpenStandardInput(),
+    // Encoding.UTF8) instead of Console.In/Console.In.ReadLineAsync() —
+    // Console.In's decoding follows Console.InputEncoding, which for a
+    // redirected pipe on a WinExe (no real console attached) falls back to
+    // the system's default codepage, not UTF-8. main.js (Node) always writes
+    // plain UTF-8 with no BOM, so any accented character (wallpaper name,
+    // file path, YouTube title) decoded under a different codepage garbles
+    // silently — confirmed live: a stray 0xC3 byte broke JSON parsing on the
+    // very first message sent through a mismatched encoding. Explicitly
+    // setting Console.InputEncoding itself was tried first and is WRONG here
+    // — it throws (`Identificador inválido` / invalid handle) because that
+    // setter needs a real attached console, which a redirected pipe doesn't
+    // have; reading the raw stream ourselves sidesteps that entirely.
     private void StartStdinBridge()
     {
         _ = Task.Run(async () =>
         {
+            using var reader = new StreamReader(Console.OpenStandardInput(), System.Text.Encoding.UTF8);
             string? line;
-            while ((line = await Console.In.ReadLineAsync()) != null)
+            while ((line = await reader.ReadLineAsync()) != null)
             {
                 var toSend = line;
                 if (string.IsNullOrWhiteSpace(toSend)) continue;
-                BeginInvoke(() => PostOrQueue(toSend));
+                BeginInvoke(() => HandleHostMessage(toSend));
             }
         });
+    }
+
+    // Intercepta duas coisas antes de deixar o resto seguir pro caminho normal
+    // (PostOrQueue -> shell/wallpaper.js via hostBridge): (1) set-wallpaper com
+    // type:'url' (YouTube ao vivo hoje) nunca chega na shell — troca a
+    // navegação do próprio WebView2 pra URL real; (2) mute/unmute enquanto em
+    // modo YouTube vira CoreWebView2.IsMuted em vez de postMessage (a página
+    // crua do YouTube não tem o listener do hostBridge).
+    private void HandleHostMessage(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var channel = root.TryGetProperty("channel", out var chEl) ? chEl.GetString() : null;
+
+            if (channel == "set-wallpaper" && root.TryGetProperty("data", out var dataEl))
+            {
+                var type = dataEl.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : null;
+                if (type == "url" && dataEl.TryGetProperty("src", out var srcEl))
+                {
+                    var muted = dataEl.TryGetProperty("muted", out var mutedEl) && mutedEl.ValueKind == JsonValueKind.True;
+                    _lastMuted = muted;
+                    _webMode = true;
+                    ShowWebWallpaper(srcEl.GetString() ?? "", muted);
+                    return;
+                }
+
+                if (_webMode)
+                {
+                    // Saindo do YouTube pra vídeo/imagem/etc — reencaixa a
+                    // shell e só então repassa esta mesma mensagem (fica na
+                    // fila de _pendingMessages até o NavigationCompleted
+                    // principal, em InitializeWebViewAsync, marcar
+                    // _pageReady=true de novo).
+                    _webMode = false;
+                    _pageReady = false;
+                    _webView.CoreWebView2.Navigate("https://wallpaper.local/index.html");
+                    PostOrQueue(json);
+                    return;
+                }
+            }
+
+            if ((channel == "mute" || channel == "unmute") && _webMode)
+            {
+                _lastMuted = channel == "mute";
+                _webView.CoreWebView2.IsMuted = _lastMuted;
+                return;
+            }
+
+            PostOrQueue(json);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[bridge] HandleHostMessage error: {ex.Message}");
+        }
+    }
+
+    // Navega o WebView2 direto pra URL real do YouTube (sem passar pela
+    // shell/wallpaper.js) e aplica bloqueio de anúncio + limpeza de página já
+    // registrados globalmente (EnsureAdBlock, chamado uma vez em
+    // InitializeWebViewAsync). Mesma técnica confirmada funcionando no lado
+    // Electron: carregar a página real de assistir (não /embed/), porque
+    // /embed/ falha (Erro 153) pra vídeos com incorporação desativada.
+    private void ShowWebWallpaper(string url, bool muted)
+    {
+        if (string.IsNullOrEmpty(url)) return;
+        _webView.CoreWebView2.IsMuted = muted;
+
+        void OnNavCompleted(object? sender, Microsoft.Web.WebView2.Core.CoreWebView2NavigationCompletedEventArgs e)
+        {
+            _webView.CoreWebView2.NavigationCompleted -= OnNavCompleted;
+            if (!e.IsSuccess) return;
+            if (YoutubeWallpaperController.WatchUrlRegex.IsMatch(url))
+            {
+                _ = YoutubeWallpaperController.InjectWatchCleanup(_webView.CoreWebView2);
+            }
+        }
+
+        _webView.CoreWebView2.NavigationCompleted += OnNavCompleted;
+        _webView.CoreWebView2.Navigate(url);
     }
 
     private void OnWebMessageReceived(object? sender, Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs e)

@@ -362,6 +362,10 @@ function toggleWallpaperInteractive() {
   const { detachFromDesktop } = require('./src/workerw');
 
   for (const win of wallpaperWindows.values()) {
+    // Modo interativo é só pra scenes/puppets/We-editor — sem sentido pro
+    // WallpaperHost.exe (só mostra vídeo/YouTube) e ele não tem essas
+    // funções de BrowserWindow de qualquer forma.
+    if (win.isWebView2Host) continue;
     if (win.isDestroyed() || _isScreensaver) continue;
     if (_wallpaperInteractive) {
       detachFromDesktop(win.getNativeWindowHandle());
@@ -433,21 +437,61 @@ function notifyDisplaysChanged() {
   controlWin.webContents.send('displays-changed', displays);
 }
 
+// "Modo de compatibilidade (WebView2)" — settings.webview2CompatMode. Quando
+// ligado, spawna native/WallpaperHost/WallpaperHost.exe (C#/WebView2) em vez
+// da janela Electron normal, um processo por monitor. Existe pra PCs onde o
+// Chromium do Electron recusa GPU (disabled_software) e o wallpaper trava em
+// ~1 frame a cada alguns minutos — o WebView2 nunca sofre desse bug porque
+// nunca é reparentado via SetParent depois de já existir (ver memória
+// project_workerw_fragility). Só cobre vídeo e YouTube ao vivo; qualquer
+// outro tipo continua exigindo o caminho Electron.
+function spawnWallpaperWindowOrHost(display) {
+  const settings = store.get('settings') || {};
+  if (settings.webview2CompatMode && process.platform === 'win32' && !_isScreensaver && !_isConfigMode) {
+    const { spawnWallpaperHostProcess } = require('./src/wallpaper-host-process');
+    const contentDir = path.join(__dirname, 'wallpaper');
+    const proc = spawnWallpaperHostProcess(display, contentDir, () => !!store.get('wallpaperMuted'));
+    if (proc) {
+      wallpaperWindows.set(display.id, proc);
+      const displayWallpapers = store.get('displayWallpapers') || {};
+      const current = displayWallpapers[display.id] || store.get('current');
+      if (current) proc.webContents.send('set-wallpaper', current);
+      return;
+    }
+    // WallpaperHost.exe não publicado ainda (dev) — cai pro caminho Electron
+    // normal em vez de deixar o monitor sem nenhum wallpaper.
+    console.error('[main] Modo de compatibilidade (WebView2) ligado, mas WallpaperHost.exe não foi encontrado — usando o caminho Electron normal.');
+  }
+  spawnWallpaperWindow(display);
+}
+
+let _displayListenersRegistered = false;
 function createWallpaperWindows() {
   const displays = screen.getAllDisplays();
   displays.forEach((display, i) => {
-    setTimeout(() => spawnWallpaperWindow(display), i * 800);
+    setTimeout(() => spawnWallpaperWindowOrHost(display), i * 800);
   });
 
+  // recreateWallpaperWindows() (chamado quando webview2CompatMode muda nas
+  // Configurações) reusa createWallpaperWindows() pra respawnar — sem essa
+  // guarda, os listeners de display-added/removed seriam registrados de novo
+  // a cada troca de configuração, empilhando handlers duplicados.
+  if (_displayListenersRegistered) return;
+  _displayListenersRegistered = true;
+
   screen.on('display-added', (_, display) => {
-    spawnWallpaperWindow(display);
+    spawnWallpaperWindowOrHost(display);
     notifyDisplaysChanged();
   });
   screen.on('display-removed', (_, display) => {
     const win = wallpaperWindows.get(display.id);
-    if (win && !win.isDestroyed()) {
-      wallpaperWebViews.delete(win.id);
-      win.destroy();
+    if (win) {
+      if (win.isWebView2Host) {
+        win.kill();
+      } else if (!win.isDestroyed()) {
+        wallpaperWebViews.delete(win.id);
+        win.destroy();
+      }
     }
     wallpaperWindows.delete(display.id);
     // Sem isso, um wallpaper específico ficava "preso" num monitor que não
@@ -461,6 +505,23 @@ function createWallpaperWindows() {
     }
     notifyDisplaysChanged();
   });
+}
+
+// Chamado quando settings.webview2CompatMode muda em runtime (ver handler
+// set-settings) — destrói tudo que existe (janelas Electron ou processos
+// WallpaperHost.exe, dependendo do que estava ativo antes) e recria do zero
+// com o backend certo.
+function recreateWallpaperWindows() {
+  for (const win of wallpaperWindows.values()) {
+    if (win.isWebView2Host) {
+      win.kill();
+    } else if (!win.isDestroyed()) {
+      wallpaperWebViews.delete(win.id);
+      win.destroy();
+    }
+  }
+  wallpaperWindows.clear();
+  createWallpaperWindows();
 }
 
 function spawnWallpaperWindow(display) {
@@ -745,7 +806,10 @@ function updateNativeWallpaperSnapshot(wallpaper) {
   // do conteúdo novo (vídeo/cena) carregar antes da captura.
   setTimeout(async () => {
     try {
-      const win = [...wallpaperWindows.values()].find(w => !w.isDestroyed());
+      // WallpaperHost.exe (WebView2) não expõe capturePage() pro processo
+      // principal — sem equivalente nesse modo por enquanto, é só a rede de
+      // segurança do fallback nativo, não a renderização real do wallpaper.
+      const win = [...wallpaperWindows.values()].find(w => !w.isWebView2Host && !w.isDestroyed());
       if (!win) return;
       const image = await win.webContents.capturePage();
       const dir = path.join(app.getPath('userData'), 'native-wallpaper-snapshot');
@@ -967,6 +1031,11 @@ function startWorkerWWatchdog() {
     // reencaixava sozinho ~1s depois e desfazia isso a cada tick.
     if (_watchdogPaused) return;
     for (const win of wallpaperWindows.values()) {
+      // WallpaperHost.exe (Modo de compatibilidade WebView2) cuida do próprio
+      // reencaixe atrás do desktop sozinho (watchdog interno em
+      // MainForm.cs/DesktopEmbedder.cs) — nem tem getNativeWindowHandle()
+      // pra chamar aqui, é um processo separado, não uma BrowserWindow.
+      if (win.isWebView2Host) continue;
       if (win.isDestroyed()) continue;
       const hwnd = win.getNativeWindowHandle();
 
@@ -1269,7 +1338,7 @@ ipcMain.handle('toggle-favorite', (_, item) => {
 });
 ipcMain.handle('get-current',          () => store.get('current') || null);
 const DEFAULT_CLOCK_OVERLAY = { enabled: false, position: 'top-left', format24h: true, showSeconds: false, showDate: true, showDayName: true, color: '#ffffff', fontSize: 48 };
-ipcMain.handle('get-settings',         () => store.get('settings') || { volume: 50, pauseOnFullscreen: true, performanceModeFullscreen: false, muteOnFullscreen: false, startWithWindows: true, audioReactive: false, hideTaskbarAndIcons: true, clockOverlay: DEFAULT_CLOCK_OVERLAY });
+ipcMain.handle('get-settings',         () => store.get('settings') || { volume: 50, pauseOnFullscreen: true, performanceModeFullscreen: false, muteOnFullscreen: false, startWithWindows: true, audioReactive: false, hideTaskbarAndIcons: true, webview2CompatMode: false, clockOverlay: DEFAULT_CLOCK_OVERLAY });
 ipcMain.handle('get-displays',         () => screen.getAllDisplays().map(d => ({ id: d.id, bounds: d.bounds, label: d.label || null })));
 ipcMain.handle('get-display-wallpapers', () => store.get('displayWallpapers') || {});
 
@@ -1443,6 +1512,9 @@ ipcMain.handle('we-scene-enter-edit', () => {
   // way so the user can actually see and drag the wallpaper's text objects.
   if (controlWin && !controlWin.isDestroyed()) controlWin.minimize();
   for (const win of wallpaperWindows.values()) {
+    // Edição de layout de cena não existe no WallpaperHost.exe (só cobre
+    // vídeo/YouTube) e ele não tem setIgnoreMouseEvents (não é BrowserWindow).
+    if (win.isWebView2Host) continue;
     if (!win.isDestroyed()) {
       win.setIgnoreMouseEvents(false);
       win.webContents.send('we-scene-enter-edit');
@@ -1465,6 +1537,7 @@ ipcMain.handle('we-scene-save-overrides', (_, { wallpaperId, overrides }) => {
     if (current && current.id === wallpaperId) store.set('current', library[idx]);
   }
   for (const win of wallpaperWindows.values()) {
+    if (win.isWebView2Host) continue;
     if (!win.isDestroyed()) win.setIgnoreMouseEvents(_isScreensaver ? false : !_wallpaperInteractive);
   }
   if (controlWin && !controlWin.isDestroyed()) { controlWin.restore(); controlWin.focus(); }
@@ -1932,10 +2005,16 @@ ipcMain.handle('get-desktop-audio-source', async () => {
 });
 
 ipcMain.handle('set-settings', (_, settings) => {
+  const prevCompatMode = !!(store.get('settings') || {}).webview2CompatMode;
   store.set('settings', settings);
   sendToAllWallpapers('update-settings', settings);
   setAutostart(!!settings.startWithWindows);
   applyTaskbarIconsVisibility(settings);
+  // Muda o backend de renderização em runtime — precisa destruir e recriar
+  // as janelas/processos de wallpaper com o tipo certo, não só avisar via IPC.
+  if (!!settings.webview2CompatMode !== prevCompatMode && !_isScreensaver && !_isConfigMode) {
+    recreateWallpaperWindows();
+  }
   return true;
 });
 
@@ -3319,6 +3398,11 @@ app.on('before-quit', () => {
   tray?.destroy();
   globalShortcut.unregisterAll();
   if (_engineTimer) clearInterval(_engineTimer);
+  // Processos WallpaperHost.exe (Modo de compatibilidade WebView2) não somem
+  // sozinhos quando o Electron fecha — são processos separados.
+  for (const win of wallpaperWindows.values()) {
+    if (win.isWebView2Host) win.kill();
+  }
   // Sempre devolve ícones/barra de tarefas ao sair, mesmo que a opção esteja
   // ligada — senão o usuário fica com o Windows "quebrado" (sem ícones/barra)
   // depois de fechar o app.

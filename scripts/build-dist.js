@@ -65,6 +65,29 @@ if (!fs.existsSync(rcedit)) {
   }
 }
 
+// --- 4. Publish + bundle WallpaperHost.exe (Modo de compatibilidade WebView2) ---
+// Fica FORA do app.asar, ao lado do exe principal — é um runtime .NET
+// self-contained próprio (não faz sentido empacotar isso dentro do asar,
+// que é pro código JS do app). src/wallpaper-host-process.js's
+// getWallpaperHostExePath() procura exatamente nesse caminho relativo ao exe
+// empacotado. Melhor esforço: se o SDK do .NET não estiver instalado nesta
+// máquina de build, avisa e segue sem essa feature — não trava o dist inteiro
+// por causa de uma feature experimental opcional.
+const whHostRoot = path.join(root, 'native', 'WallpaperHost');
+const whPublishSrc = path.join(whHostRoot, 'bin', 'Release', 'net8.0-windows', 'win-x64', 'publish');
+const whDistDir = path.join(distApp, 'wallpaperhost');
+console.log('\nPublishing WallpaperHost.exe (Modo de compatibilidade WebView2)...');
+const dotnetResult = spawnSync('dotnet', ['publish', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true'], {
+  cwd: whHostRoot, stdio: 'inherit', shell: true,
+});
+if (dotnetResult.status !== 0 || !fs.existsSync(path.join(whPublishSrc, 'WallpaperHost.exe'))) {
+  console.warn('dotnet publish falhou ou não encontrado — pulando WallpaperHost.exe. "Modo de compatibilidade (WebView2)" não vai funcionar neste pacote (o toggle aparece, mas cai no aviso de "executável não encontrado").');
+} else {
+  fs.mkdirSync(whDistDir, { recursive: true });
+  spawnSync('xcopy', [`"${whPublishSrc}"`, `"${whDistDir}"`, '/E', '/I', '/Q'], { shell: true });
+  console.log('WallpaperHost.exe empacotado em dist/Engine Wallpaper/wallpaperhost/');
+}
+
 // --- Done ---
 const size = dirSizeMB(distApp);
 console.log(`\nDone!  dist/Engine Wallpaper/  (${size} MB)`);

@@ -742,6 +742,7 @@ const setVolumeV = document.getElementById('set-volume-val');
 const setPauseFs = document.getElementById('set-pause-fs');
 const setPerfModeFs = document.getElementById('set-performance-mode-fs');
 const setMuteFs  = document.getElementById('set-mute-fs');
+const setWebview2Compat = document.getElementById('set-webview2-compat');
 const setStartup = document.getElementById('set-startup');
 const setHideTaskbar = document.getElementById('set-hide-taskbar');
 const setAudioRe = document.getElementById('set-audio-reactive');
@@ -769,6 +770,7 @@ async function saveSettings() {
     pauseOnFullscreen: setPauseFs.checked,
     performanceModeFullscreen: setPerfModeFs.checked,
     muteOnFullscreen: setMuteFs.checked,
+    webview2CompatMode: setWebview2Compat.checked,
     startWithWindows: setStartup.checked,
     hideTaskbarAndIcons: setHideTaskbar.checked,
     audioReactive: setAudioRe.checked,
@@ -785,7 +787,7 @@ async function saveSettings() {
   };
   await ipc('set-settings', settings);
 }
-[setVolume, setPauseFs, setPerfModeFs, setMuteFs, setStartup, setHideTaskbar, setAudioRe,
+[setVolume, setPauseFs, setPerfModeFs, setMuteFs, setWebview2Compat, setStartup, setHideTaskbar, setAudioRe,
  clockEnabled, clockPosition, clockFormat24h, clockSeconds, clockDate, clockDayName, clockColor, clockFontSize
 ].forEach(el => el.addEventListener('change', saveSettings));
 
@@ -2844,6 +2846,7 @@ async function init() {
     setPauseFs.checked = settings.pauseOnFullscreen ?? true;
     setPerfModeFs.checked = settings.performanceModeFullscreen ?? false;
     setMuteFs.checked  = settings.muteOnFullscreen  ?? false;
+    setWebview2Compat.checked = settings.webview2CompatMode ?? false;
     setStartup.checked = settings.startWithWindows  ?? true;
     setHideTaskbar.checked = settings.hideTaskbarAndIcons ?? true;
     setAudioRe.checked = settings.audioReactive     ?? false;
