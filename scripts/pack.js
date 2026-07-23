@@ -68,8 +68,18 @@ for (const mod of fs.readdirSync(nmSrc)) {
 }
 
 fs.mkdirSync(resDir, { recursive: true });
-console.log('Packing ASAR (native addons unpacked)...');
-execSync(`npx @electron/asar pack "${tmpSrc}" "${outAsar}" --unpack "**/*.node"`, { stdio: 'inherit' });
+console.log('Packing ASAR (native addons + wallpaper/ unpacked)...');
+// wallpaper/ precisa ficar fora do .asar (não só .node) — é o contentDir que
+// main.js passa pro WallpaperHost.exe (Modo de compatibilidade WebView2) via
+// SetVirtualHostNameToFolderMapping do WebView2. Esse processo é nativo, sem
+// nenhuma noção do formato .asar (só o próprio Electron sabe ler de dentro de
+// um .asar de forma transparente) — apontar pra um caminho asar-interno
+// falhava ao vivo com "O sistema não pode encontrar o caminho especificado"
+// (0x80070003) assim que o toggle era ligado, confirmado pelo usuário no PC
+// real. --unpack-dir deixa uma cópia de verdade em app.asar.unpacked/wallpaper/,
+// no mesmo lugar de sempre relativo a process.resourcesPath, tanto em dev
+// quanto no pacote final — ver getWallpaperContentDir() em main.js.
+execSync(`npx @electron/asar pack "${tmpSrc}" "${outAsar}" --unpack "**/*.node" --unpack-dir "wallpaper"`, { stdio: 'inherit' });
 fs.rmSync(tmpSrc, { recursive: true });
 
 const size = fs.statSync(outAsar).size;

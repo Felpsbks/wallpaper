@@ -445,11 +445,26 @@ function notifyDisplaysChanged() {
 // nunca é reparentado via SetParent depois de já existir (ver memória
 // project_workerw_fragility). Só cobre vídeo e YouTube ao vivo; qualquer
 // outro tipo continua exigindo o caminho Electron.
+// WallpaperHost.exe é um processo nativo separado, sem noção nenhuma do
+// formato .asar (só o próprio Electron sabe ler de dentro de um .asar de
+// forma transparente) — path.join(__dirname, 'wallpaper') aponta pra dentro
+// do app.asar quando empacotado/rodando via bin/electron.exe, um caminho que
+// não existe de verdade no disco pra qualquer outro processo. Confirmado ao
+// vivo (2026-07-23): passar isso pro WallpaperHost.exe quebrava na hora com
+// "O sistema não pode encontrar o caminho especificado" assim que o toggle
+// era ligado. scripts/pack.js agora roda `asar pack --unpack-dir wallpaper`,
+// deixando uma cópia de verdade em app.asar.unpacked/wallpaper — sempre no
+// mesmo lugar relativo a process.resourcesPath, tanto em dev quanto no
+// pacote final.
+function getWallpaperContentDir() {
+  return path.join(process.resourcesPath, 'app.asar.unpacked', 'wallpaper');
+}
+
 function spawnWallpaperWindowOrHost(display) {
   const settings = store.get('settings') || {};
   if (settings.webview2CompatMode && process.platform === 'win32' && !_isScreensaver && !_isConfigMode) {
     const { spawnWallpaperHostProcess } = require('./src/wallpaper-host-process');
-    const contentDir = path.join(__dirname, 'wallpaper');
+    const contentDir = getWallpaperContentDir();
     const proc = spawnWallpaperHostProcess(display, contentDir, () => !!store.get('wallpaperMuted'));
     if (proc) {
       wallpaperWindows.set(display.id, proc);
