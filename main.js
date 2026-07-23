@@ -1,4 +1,4 @@
-const { app, BrowserWindow, BrowserView, ipcMain, Tray, Menu, dialog, screen, nativeImage, desktopCapturer, globalShortcut } = require('electron');
+const { app, BrowserWindow, BrowserView, ipcMain, Tray, Menu, dialog, screen, nativeImage, desktopCapturer, globalShortcut, session } = require('electron');
 
 // ---- Trava de instância única ----
 // Sem isso, cada relançamento (recarregamento automático do modo dev,
@@ -1570,6 +1570,30 @@ ipcMain.on('wallpaper-set-attempt', (event, info) => {
 // Wallpaper tipo "web": renderizado via BrowserView (ver comentário acima de
 // wallpaperWebViews) em vez da tag <webview>, que tem um bug de sincronização
 // de tamanho não contornável nesta versão do Electron.
+// Bloqueio de anúncios do YouTube (rede) — mesma lista de domínios que
+// extensões de adblock usadas costumam filtrar. Pego no nível de
+// session.defaultSession (compartilhada por toda BrowserView/BrowserWindow do
+// app), então cobre tanto o wallpaper ao vivo quanto o painel de navegação.
+// Não é 100% (parte do anúncio em vídeo hoje em dia vem embutido no mesmo
+// manifest do conteúdo, sem request separado pra bloquear) — a limpeza de
+// DOM em injectYoutubeWatchCleanup() cobre esse resto, pulando/acelerando
+// qualquer anúncio que passe por aqui mesmo assim.
+const YOUTUBE_AD_BLOCK_PATTERNS = [
+  '*://*.doubleclick.net/*',
+  '*://*.googlesyndication.com/*',
+  '*://*.googleadservices.com/*',
+  '*://googleads.g.doubleclick.net/*',
+  '*://*.google.com/pagead/*',
+  '*://*.youtube.com/api/stats/ads*',
+  '*://*.youtube.com/pagead/*',
+  '*://*.youtube.com/ptracking*',
+];
+function setupYoutubeAdBlock() {
+  session.defaultSession.webRequest.onBeforeRequest({ urls: YOUTUBE_AD_BLOCK_PATTERNS }, (_details, callback) => {
+    callback({ cancel: true });
+  });
+}
+
 const YOUTUBE_WATCH_RE = /^https:\/\/(www\.)?youtube\.com\/watch\?/i;
 
 // Esconde o cabeçalho/sidebar/comentários/dialogs de consentimento da página
@@ -1586,7 +1610,10 @@ function injectYoutubeWatchCleanup(view) {
     #related, ytd-watch-metadata, #below, tp-yt-paper-dialog,
     ytd-consent-bail-out-renderer, ytd-popup-container, #chat, #panels,
     .ytp-chrome-top, .ytp-gradient-top, .ytp-watermark, .ytp-pause-overlay,
-    .ytp-ce-element, ytd-mealbar-promo-renderer, #chips-wrapper {
+    .ytp-ce-element, ytd-mealbar-promo-renderer, #chips-wrapper,
+    .ytp-ad-overlay-container, .ytp-ad-overlay-slot, .ytp-ad-image-overlay,
+    .ytp-ad-text-overlay, .video-ads, .ytp-ad-progress-list, .ytp-ad-player-overlay,
+    .ytp-ad-message-container {
       display: none !important;
     }
     ytd-app, #content, #page-manager, ytd-watch-flexy, #primary,
@@ -1602,14 +1629,30 @@ function injectYoutubeWatchCleanup(view) {
   // Alguns mercados mostram um banner de consentimento de cookies que
   // BLOQUEIA o vídeo até clicar em "Aceitar" — CSS sozinho não basta aqui
   // porque a própria página impede a reprodução até o clique real acontecer.
+  // O mesmo loop também cuida de qualquer anúncio que passe pelo filtro de
+  // rede (setupYoutubeAdBlock): parte do anúncio em vídeo hoje vem embutido
+  // no mesmo manifest do conteúdo, sem request separado pra bloquear — aqui
+  // clica em "Pular" assim que aparece, ou pula direto pro fim se não for
+  // pulável ainda.
   view.webContents.executeJavaScript(`
     (function() {
       let tries = 0;
       const t = setInterval(function() {
         tries++;
-        const btn = document.querySelector('ytd-consent-bail-out-renderer button, tp-yt-paper-dialog button[aria-label*="Aceitar" i], tp-yt-paper-dialog button[aria-label*="Accept" i]');
-        if (btn) btn.click();
-        if (tries > 15) clearInterval(t);
+        const consentBtn = document.querySelector('ytd-consent-bail-out-renderer button, tp-yt-paper-dialog button[aria-label*="Aceitar" i], tp-yt-paper-dialog button[aria-label*="Accept" i]');
+        if (consentBtn) consentBtn.click();
+
+        const player = document.getElementById('movie_player');
+        if (player && player.classList.contains('ad-showing')) {
+          const skipBtn = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button');
+          if (skipBtn) skipBtn.click();
+          else {
+            const adVideo = player.querySelector('video');
+            if (adVideo && isFinite(adVideo.duration)) adVideo.currentTime = adVideo.duration;
+          }
+        }
+
+        if (tries > 600) clearInterval(t); // ~10min, mais que suficiente pra um vídeo já carregado
       }, 1000);
     })();
   `).catch(() => {});
@@ -1624,6 +1667,10 @@ ipcMain.on('web-wallpaper-show', (event, { src, options, properties }) => {
   view.setBounds({ x: 0, y: 0, width: bounds.width, height: bounds.height });
   view.setAutoResize({ width: true, height: true });
   view.webContents.loadURL(src);
+  // Cada loadURL() é uma BrowserView "nova" pro Chromium — o mudo não
+  // sobrevive sozinho de um vídeo pro outro, precisa reaplicar a preferência
+  // salva toda vez que troca de wallpaper/vídeo.
+  view.webContents.setAudioMuted(!!store.get('wallpaperMuted'));
 
   const injectBridge = () => {
     if (YOUTUBE_WATCH_RE.test(src)) injectYoutubeWatchCleanup(view);
@@ -1676,6 +1723,16 @@ ipcMain.on('web-wallpaper-show', (event, { src, options, properties }) => {
     }, 2000);
   };
   view.webContents.once('dom-ready', injectBridge);
+});
+
+ipcMain.handle('get-wallpaper-muted', () => !!store.get('wallpaperMuted'));
+ipcMain.handle('set-wallpaper-muted', (_e, muted) => {
+  store.set('wallpaperMuted', !!muted);
+  for (const view of wallpaperWebViews.values()) {
+    if (!view.webContents.isDestroyed()) view.webContents.setAudioMuted(!!muted);
+  }
+  sendToAllWallpapers(muted ? 'mute' : 'unmute');
+  return true;
 });
 
 ipcMain.on('web-wallpaper-hide', (event) => {
@@ -2182,7 +2239,7 @@ ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedU
 // não tem "novidade" pra quem tá abrindo o app pela primeira vez.
 const WHATS_NEW = {
   version: APP_VERSION,
-  text: 'Corrigido o "Erro 153" do papel de parede ao vivo do YouTube — agora usa a página real de assistir em vez do player incorporado (funciona em qualquer vídeo) e some a logo do YouTube. Também corrigimos o checador de atualização, que estava quebrado silenciosamente.',
+  text: 'Bloqueio de anúncios no papel de parede do YouTube (rede + pular automático) e novo botão "Sem áudio" no painel do YouTube, independente do volume global.',
 };
 ipcMain.handle('get-whats-new', () => {
   if (store.get('lastSeenWhatsNewVersion') === WHATS_NEW.version) return null;
@@ -3114,6 +3171,8 @@ app.whenReady().then(async () => {
     await runFirstRunInstall();
     return;
   }
+
+  setupYoutubeAdBlock();
 
   // Diagnóstico real do estado da GPU/composição, pra investigar o bug do
   // vídeo congelando num frame só sob WorkerW (ver memória

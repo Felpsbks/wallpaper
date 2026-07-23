@@ -139,6 +139,21 @@ ipcRenderer.on('youtube-auto-apply', (_e, wallpaper) => {
   setWallpaper(wallpaper);
 });
 
+// Mudo do wallpaper do YouTube — independente do volume global (Configurações
+// > Volume do vídeo), preferência persistida e reaplicada a cada vídeo novo
+// direto no main.js (ver 'set-wallpaper-muted'/'get-wallpaper-muted').
+const youtubeMuteBtn = document.getElementById('youtube-mute-btn');
+function updateYoutubeMuteBtnLabel(muted) {
+  if (youtubeMuteBtn) youtubeMuteBtn.textContent = muted ? 'Com áudio' : 'Sem áudio';
+}
+ipc('get-wallpaper-muted').then(updateYoutubeMuteBtnLabel);
+youtubeMuteBtn?.addEventListener('click', async () => {
+  const currentlyMuted = youtubeMuteBtn.textContent === 'Com áudio';
+  const next = !currentlyMuted;
+  await ipc('set-wallpaper-muted', next);
+  updateYoutubeMuteBtnLabel(next);
+});
+
 // Download OPCIONAL — guarda uma cópia de verdade em alta qualidade na
 // biblioteca (yt-dlp + ffmpeg, até 4K), separado de tocar ao vivo (que já
 // acontece sozinho ao clicar). Reusa a mesma tela
