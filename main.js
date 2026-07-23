@@ -2239,7 +2239,7 @@ ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedU
 // não tem "novidade" pra quem tá abrindo o app pela primeira vez.
 const WHATS_NEW = {
   version: APP_VERSION,
-  text: 'Bloqueio de anúncios no papel de parede do YouTube (rede + pular automático) e novo botão "Sem áudio" no painel do YouTube, independente do volume global.',
+  text: 'YouTube agora tem um card de acesso rápido dentro do Descobrir, e cenas incompatíveis não aparecem mais nos resultados de busca da Workshop (só vídeo e web).',
 };
 ipcMain.handle('get-whats-new', () => {
   if (store.get('lastSeenWhatsNewVersion') === WHATS_NEW.version) return null;
