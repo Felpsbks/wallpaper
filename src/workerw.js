@@ -321,27 +321,6 @@ function isEmbeddedCorrectly(hwndBuffer) {
   }
 }
 
-// Diagnostic-only: logs the wallpaper window's real, current OS-level state
-// (parent, WS_CHILD bit, visible/minimized) so we can see exactly what Win+D
-// actually changes, instead of guessing at another fix blind. Call this from
-// the watchdog every tick — the log around the moment Win+D is pressed is
-// what we need to see.
-function logWindowState(hwndBuffer, label) {
-  if (process.platform !== 'win32') return;
-  if (!loadUser32()) return;
-  try {
-    const hwnd = toHwnd(hwndBuffer);
-    const parent = GetParent(hwnd);
-    const style = GetWindowLongA(hwnd, GWL_STYLE);
-    const hasChildStyle = (style & WS_CHILD) !== 0;
-    const minimized = IsIconic(hwnd);
-    const visible = IsWindowVisible(hwnd);
-    console.log(`[workerw][diag] ${label} parent=${parent} WS_CHILD=${hasChildStyle} minimized=${minimized} visible=${visible}`);
-  } catch (err) {
-    console.error('[workerw][diag] error:', err.message);
-  }
-}
-
 // Acha a ListView real dos ícones da área de trabalho (SysListView32, dentro
 // de SHELLDLL_DefView). Reaproveita a mesma dualidade "desktop normal vs
 // raised desktop" já documentada em embedBehindDesktop, mas usando o loop
@@ -438,4 +417,4 @@ function setTaskbarVisible(visible) {
   }
 }
 
-module.exports = { embedBehindDesktop, detachFromDesktop, setNativeWallpaper, logWindowState, isEmbeddedCorrectly, setDesktopIconsVisible, setTaskbarVisible, forceDisplayChangeBroadcast };
+module.exports = { embedBehindDesktop, detachFromDesktop, setNativeWallpaper, isEmbeddedCorrectly, setDesktopIconsVisible, setTaskbarVisible, forceDisplayChangeBroadcast };

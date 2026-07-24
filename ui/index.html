@@ -580,7 +580,11 @@
           <label class="toggle"><input type="checkbox" id="set-mute-fs" /><div class="toggle-slider"></div></label>
         </div>
         <div class="setting-row">
-          <div><div class="setting-label">Modo de compatibilidade (WebView2)</div><div class="setting-desc">Experimental — usa um motor de renderização alternativo (WebView2) em vez do padrão. Ajuda em PCs onde o wallpaper trava/pisca (a GPU é recusada pelo Chromium). Só cobre wallpaper de vídeo e YouTube ao vivo; imagem/cena/puppet continuam exigindo o modo padrão.</div></div>
+          <div>
+            <div class="setting-label">Modo de compatibilidade (WebView2)</div>
+            <div class="setting-desc">Experimental — usa um motor de renderização alternativo (WebView2) em vez do padrão. Ajuda em PCs onde o wallpaper trava/pisca (a GPU é recusada pelo Chromium). Só cobre wallpaper de vídeo e YouTube ao vivo; imagem/cena/puppet continuam exigindo o modo padrão.</div>
+            <div class="setting-desc" id="webview2-install-status" style="display:none;color:var(--accent)"></div>
+          </div>
           <label class="toggle"><input type="checkbox" id="set-webview2-compat" /><div class="toggle-slider"></div></label>
         </div>
         <div class="setting-row">

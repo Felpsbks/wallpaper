@@ -19,9 +19,15 @@ const { spawn } = require('child_process');
 const { app } = require('electron');
 
 const YTDLP_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe';
-// Build "latest" da BtbN (CI atualiza o asset dessa mesma tag continuamente)
-// — link estável, não precisa saber a versão exata na hora de baixar.
-const FFMPEG_ZIP_URL = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip';
+// Trocado de BtbN (nightly "latest" da CI, hash NOVO a cada build — nunca
+// acumula reputação nenhuma nos sistemas de reputação do Windows) pro
+// gyan.dev (achado real 2026-07-24): a mesma build "essentials" oficialmente
+// linkada na página de download do próprio ffmpeg.org, hash estável entre um
+// lançamento e outro, usada por muito mais gente — chance real (não
+// garantida) de passar no Smart App Control por reputação, ao contrário de
+// um build que muda todo santo dia. Ver ffmpegWorks() abaixo pro fallback
+// que cobre o caso de ainda assim ser bloqueado.
+const FFMPEG_ZIP_URL = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip';
 
 function toolsDir() {
   return path.join(app.getPath('userData'), 'tools');
@@ -92,9 +98,30 @@ async function ensureYtDlp(onProgress) {
   return dest;
 }
 
-async function ensureFfmpeg(onProgress) {
-  const existing = findFileRecursive(ffmpegDir(), 'ffmpeg.exe');
-  if (existing) return existing;
+// Testa se o ffmpeg baixado REALMENTE consegue rodar. Achado real (2026-07-24,
+// reproduzido ao vivo): o Controle de Aplicativo do Windows pode bloquear um
+// .exe não assinado baixado de terceiros (mesma família de bloqueio que já
+// tinha matado o instalador com auto-run, ver project_styled_installer) —
+// nesse caso o yt-dlp nem consegue detectar o ffmpeg ("ffmpeg is not
+// installed"), o merge nunca roda, e sobram só os arquivos de vídeo/áudio
+// separados no disco, sem nenhum .mp4 final. Só existir no disco não prova
+// que o Windows deixa executá-lo.
+function ffmpegWorks(ffmpegPath) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (ok) => { if (!settled) { settled = true; resolve(ok); } };
+    try {
+      const proc = spawn(ffmpegPath, ['-version'], { windowsHide: true });
+      proc.on('error', () => done(false));
+      proc.on('close', (code) => done(code === 0));
+      setTimeout(() => done(false), 5000);
+    } catch {
+      done(false);
+    }
+  });
+}
+
+async function downloadAndExtractFfmpeg(onProgress) {
   fs.mkdirSync(ffmpegDir(), { recursive: true });
   const zipPath = path.join(toolsDir(), 'ffmpeg.zip');
   await httpDownload(FFMPEG_ZIP_URL, zipPath, (received, total) => {
@@ -109,28 +136,55 @@ async function ensureFfmpeg(onProgress) {
   return exe;
 }
 
+async function ensureFfmpeg(onProgress) {
+  const existing = findFileRecursive(ffmpegDir(), 'ffmpeg.exe');
+  if (existing) {
+    // Instalações antigas podem ter em cache o build da BtbN (trocado nesta
+    // versão, ver comentário do FFMPEG_ZIP_URL) — se ele não roda de verdade
+    // nesta máquina (bloqueado), descarta e baixa o build novo em vez de
+    // ficar preso pra sempre no mesmo binário quebrado.
+    if (await ffmpegWorks(existing)) return existing;
+    fs.rmSync(ffmpegDir(), { recursive: true, force: true });
+  }
+  return downloadAndExtractFfmpeg(onProgress);
+}
+
 // outputBasePath: caminho SEM extensão — o yt-dlp escolhe/escreve a
-// extensão final (forçamos mp4 via --merge-output-format, então na prática
-// sempre vai ser "<outputBasePath>.mp4").
+// extensão final (forçamos mp4 via --merge-output-format quando dá pra
+// mesclar, então na prática sempre vai ser "<outputBasePath>.mp4").
 async function downloadYoutubeVideo({ url, outputBasePath, onProgress }) {
   const ytDlp = await ensureYtDlp(onProgress);
   const ffmpeg = await ensureFfmpeg(onProgress);
-  const ffmpegLocation = path.dirname(ffmpeg);
+  const canMerge = await ffmpegWorks(ffmpeg);
 
   // Pedido do usuário: qualidade alta de verdade, não travado em 1080p —
   // pega a melhor combinação de vídeo+áudio disponível até 4K (a maioria
   // dos vídeos nem chega nisso, então na prática já pega o teto real de
   // cada um). O app já toca vídeo 4K sem problema (video wallpapers normais
-  // já rodam nessa resolução).
-  const args = [
-    '-f', 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]/best[height<=2160]/best',
-    '--merge-output-format', 'mp4',
-    '--ffmpeg-location', ffmpegLocation,
-    '--no-playlist',
-    '--newline',
-    '-o', `${outputBasePath}.%(ext)s`,
-    url,
-  ];
+  // já rodam nessa resolução). Isso exige juntar streams separados via
+  // ffmpeg — se ele não roda de verdade nesta máquina, cai pra um formato
+  // "progressivo" (vídeo+áudio já combinados pelo próprio YouTube, sem
+  // precisar de merge nenhum): teto de qualidade menor, mas garante que o
+  // download sempre termina com um arquivo de verdade em vez de sobrar só
+  // fragmentos soltos no disco.
+  const args = canMerge
+    ? [
+      '-f', 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]/best[height<=2160]/best',
+      '--merge-output-format', 'mp4',
+      '--ffmpeg-location', path.dirname(ffmpeg),
+      '--no-playlist',
+      '--newline',
+      '-o', `${outputBasePath}.%(ext)s`,
+      url,
+    ]
+    : [
+      '-f', 'best[ext=mp4]/best',
+      '--no-playlist',
+      '--newline',
+      '-o', `${outputBasePath}.%(ext)s`,
+      url,
+    ];
+  if (!canMerge && onProgress) onProgress({ phase: 'quality-limited' });
 
   return new Promise((resolve, reject) => {
     const proc = spawn(ytDlp, args, { windowsHide: true });

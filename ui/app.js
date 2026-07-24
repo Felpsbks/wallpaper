@@ -212,6 +212,11 @@ ipcRenderer.on('youtube-download-progress', (_e, data) => {
   } else if (data.phase === 'merging') {
     dlFill.style.width = '95%';
     dlText.textContent = 'Juntando vídeo e áudio (ffmpeg)...';
+  } else if (data.phase === 'quality-limited') {
+    // O Windows bloqueou o ffmpeg baixado nesta máquina — segue o download
+    // normalmente, só que num teto de qualidade menor (formato já vem
+    // pronto do YouTube, sem precisar juntar vídeo+áudio separado).
+    dlText.textContent = 'Baixando em qualidade padrão (conversor de vídeo bloqueado pelo Windows nesta máquina)...';
   } else if (data.phase === 'done') {
     dlFill.style.width = '100%';
     dlText.textContent = 'Concluído!';
@@ -366,12 +371,18 @@ function renderLibrary() {
       ? SCENE_FALLBACK_MESSAGES[w.weSceneFallbackReason] || SCENE_FALLBACK_MESSAGES.default
       : '';
 
+    const isFav = isFavorited(w);
+    const favHeartIcon = isFav
+      ? '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>'
+      : '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>';
+
     card.innerHTML = `
       <div class="card-active-badge">ATIVO</div>
       <div class="card-thumb-wrap">
         ${thumbHtml}
         <div class="card-type-badge">${typeIcon(w.type, w.scene)} ${typeName(w.type, w.scene)}</div>
         ${sceneFallback ? `<div class="card-scene-fallback-badge" title="${sceneFallbackMsg}">🚧 Cena parcial</div>` : ''}
+        <button class="card-fav-heart-lib${isFav ? ' favorited' : ''}" title="${isFav ? 'Remover dos favoritos' : 'Favoritar'}">${favHeartIcon}</button>
         <button class="card-menu-btn" title="Mais opções">⋮</button>
         <div class="card-menu-dropdown">
           ${hasProps ? '<div class="card-menu-item props">⚙ Propriedades</div>' : ''}
@@ -392,10 +403,31 @@ function renderLibrary() {
       if (!wasOpen) { menuDropdown.classList.add('open'); menuBtn.classList.add('menu-open'); }
     });
 
+    // Favoritar de verdade a partir da Biblioteca: normaliza o formato local
+    // (w.name/w.preview = path em disco) pro mesmo formato que a aba
+    // Favoritos/o modal já esperam (title/preview = URL exibível), senão o
+    // item favoritado aparece quebrado lá (sem título, imagem não carrega).
+    const favBtn = card.querySelector('.card-fav-heart-lib');
+    favBtn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const favItem = {
+        id: w.id,
+        workshopId: w.workshopId || null,
+        title: w.name,
+        preview: w.preview ? toFileUrl(w.preview) : (w.thumbnail || ''),
+        waType: w.type,
+        tags: w.tags || [],
+        subscribers: w.subscribers || 0,
+        views: w.views || 0,
+      };
+      await toggleFavorite(favItem);
+      renderLibrary();
+    });
+
     card.addEventListener('click', e => {
       if (e.target.classList.contains('delete')) { removeWallpaper(w.id); return; }
       if (e.target.classList.contains('props'))  { openProps(w); return; }
-      if (e.target.closest('.card-menu-dropdown') || e.target.closest('.card-menu-btn')) return;
+      if (e.target.closest('.card-menu-dropdown') || e.target.closest('.card-menu-btn') || e.target.closest('.card-fav-heart-lib')) return;
       setWallpaper(w);
     });
 
@@ -790,6 +822,31 @@ async function saveSettings() {
 [setVolume, setPauseFs, setPerfModeFs, setMuteFs, setWebview2Compat, setStartup, setHideTaskbar, setAudioRe,
  clockEnabled, clockPosition, clockFormat24h, clockSeconds, clockDate, clockDayName, clockColor, clockFontSize
 ].forEach(el => el.addEventListener('change', saveSettings));
+
+// O componente WallpaperHost.exe não vem mais no instalador padrão (ver
+// scripts/build-dist.js) — main.js's ensureWallpaperHostInstalled() baixa
+// sob demanda na primeira vez que este toggle liga, e manda o progresso
+// disso por aqui. Sem isso, ligar o toggle pareceria não fazer nada por
+// alguns segundos (ou minutos, dependendo da conexão) enquanto baixa.
+const webview2InstallStatus = document.getElementById('webview2-install-status');
+ipcRenderer.on('wallpaperhost-install-progress', (_e, data) => {
+  if (!webview2InstallStatus) return;
+  setWebview2Compat.disabled = data.status === 'downloading' || data.status === 'extracting';
+  if (data.status === 'downloading') {
+    webview2InstallStatus.style.display = 'block';
+    const pct = data.pct !== null && data.pct !== undefined ? `${Math.round(data.pct * 100)}%` : '...';
+    webview2InstallStatus.textContent = `Baixando componente necessário (${pct})`;
+  } else if (data.status === 'extracting') {
+    webview2InstallStatus.style.display = 'block';
+    webview2InstallStatus.textContent = 'Instalando componente...';
+  } else if (data.status === 'done') {
+    webview2InstallStatus.textContent = 'Componente instalado.';
+    setTimeout(() => { webview2InstallStatus.style.display = 'none'; }, 3000);
+  } else if (data.status === 'error') {
+    webview2InstallStatus.textContent = 'Falha ao baixar o componente — usando o modo padrão por enquanto. Tente ligar de novo mais tarde.';
+    setTimeout(() => { webview2InstallStatus.style.display = 'none'; }, 6000);
+  }
+});
 
 if (btnInstallScr) {
   btnInstallScr.addEventListener('click', async () => {
@@ -2155,9 +2212,13 @@ async function loadDiscoverFeed(page = 1, append = false) {
     
     // Na primeira página, ignoramos os primeiros que talvez já estejam lá em cima (opcional para mostrecent, mas mantemos por segurança)
     let itemsToRender = res.items || [];
-    
-    // Steam as vezes retorna 28, 29 ou 30. Se vier menos que 10, consideramos que acabou.
-    discoverFeedHasMore = (res.items && res.items.length >= 10);
+
+    // hasMore vem calculado no main.js a partir do tamanho da página CRUA da
+    // Steam, não da quantidade de itens já filtrada aqui — uma página com
+    // muita cena filtrada (comum, ver project_workshop_search_completeness)
+    // ainda pode ter mais vídeo/web nas páginas seguintes, mesmo que esta
+    // página em si tenha rendido poucos itens depois do filtro.
+    discoverFeedHasMore = !!res.hasMore;
     renderDiscoverGrid(feedGrid, itemsToRender, append);
     
     feedFooter.textContent = discoverFeedHasMore ? '' : 'Fim dos resultados.';
@@ -2221,7 +2282,8 @@ function renderDiscoverGrid(container, items, append = false) {
 }
 
 function isFavorited(item) {
-  return favorites.some(f => f.workshopId === item.workshopId);
+  const key = item.workshopId || item.id;
+  return favorites.some(f => (f.workshopId || f.id) === key);
 }
 
 // Compara por workshopId (string), não por objeto — a mesma cena aparece
@@ -2273,7 +2335,7 @@ function renderFavoritesGrid() {
       <div class="empty-state" id="favorites-empty">
         <div class="empty-icon">🤍</div>
         <p>Nenhum favorito ainda</p>
-        <small>Clique em "Favoritar" num wallpaper da Oficina para ele aparecer aqui</small>
+        <small>Clique no coração de um wallpaper na Biblioteca ou na Oficina para ele aparecer aqui</small>
       </div>
     `;
     return;

@@ -698,7 +698,10 @@ body::after {
 
 /* Library Grid — mesmo tamanho de card compacto da aba Descobrir (.wp-card),
    em vez dos cards grandes de antes que só cabiam 1 por linha. */
-#wallpaper-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--lib-card-min, 150px), 1fr)); gap: 16px; padding: 20px 24px; align-content: start; }
+/* Largura fixa (não 1fr) — cartões não devem crescer/encolher pra preencher
+   a linha; ficam sempre no mesmo tamanho, com espaço sobrando à direita nas
+   linhas incompletas, em vez de "esticar" conforme muda a quantidade de itens. */
+#wallpaper-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, var(--lib-card-min, 150px)); gap: 16px; padding: 20px 24px; align-content: start; }
 .wallpaper-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; position: relative; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s; }
 .wallpaper-card:hover { transform: scale(1.04); box-shadow: 0 8px 24px rgba(124, 58, 237, 0.25); border-color: var(--accent); }
 .wallpaper-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
@@ -712,6 +715,14 @@ body::after {
 .card-type-badge { position: absolute; bottom: 8px; left: 8px; background: rgba(0,0,0,0.65); backdrop-filter: blur(4px); color: #fff; font-size: 9px; font-weight: 600; padding: 3px 7px; border-radius: 6px; z-index: 2; }
 .card-info { padding: 10px 12px; }
 .card-name { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-fav-heart-lib {
+  position: absolute; top: 8px; right: 40px; z-index: 3; width: 24px; height: 24px; border-radius: 6px;
+  background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); color: #fff; border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; opacity: 0; transition: background 0.2s, opacity 0.2s, color 0.2s;
+}
+.wallpaper-card:hover .card-fav-heart-lib, .card-fav-heart-lib.favorited { opacity: 1; }
+.card-fav-heart-lib:hover { background: var(--accent); }
+.card-fav-heart-lib.favorited { color: #ff4d6d; }
 .card-menu-btn {
   position: absolute; top: 8px; right: 8px; z-index: 3; width: 24px; height: 24px; border-radius: 6px;
   background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); color: #fff; border: none; cursor: pointer;

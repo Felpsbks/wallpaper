@@ -19,14 +19,6 @@ let savedVolume = 0.5;
 // interceptado e tratado inteiramente do lado nativo, sem nunca chegar aqui.
 let _webWallpaperActive = false;
 
-// Diagnostic: proves whether this renderer's JS is still executing when the
-// visual content looks frozen, vs. JS running fine but paint/composite not
-// refreshing — two very different bugs with different fixes. Forwarded to
-// main.js -> the app's own log tab, no separate devtools window needed.
-setInterval(() => {
-  hostBridge.send('wallpaper-heartbeat', { display: `${window.innerWidth}x${window.innerHeight}`, ts: Date.now() });
-}, 5000);
-
 // FPS real deste wallpaper (contagem de frames via requestAnimationFrame,
 // não um número inventado) — mandado pro painel de controle mostrar no
 // bloco de sistema.

@@ -86,7 +86,6 @@ function reconcilePlaybackControls(store, sendToAllWallpapers, context, manualPa
   _appState = rulesActive;
 }
 
-function getAppState() { return _appState; }
 function setAppStatePause(pause) { _appState.pause = pause; }
 
-module.exports = { reconcilePlaybackControls, appRulesNeedProcesses, getAppState, setAppStatePause };
+module.exports = { reconcilePlaybackControls, appRulesNeedProcesses, setAppStatePause };

@@ -167,7 +167,7 @@ const _isFirstRunInstall = process.execPath.toLowerCase().startsWith(require('os
 const path       = require('path');
 const fs         = require('fs');
 const os         = require('os');
-const { execSync, exec, spawn } = require('child_process');
+const { execSync, exec, spawn, spawnSync } = require('child_process');
 const Store      = require('./src/store');
 const License    = require('./src/license');
 const RoutineEngine = require('./src/routines/engine');
@@ -472,6 +472,64 @@ function getWallpaperContentDir() {
   return path.join(process.resourcesPath, 'app.asar.unpacked', 'wallpaper');
 }
 
+// O instalador padrão NÃO traz o WallpaperHost.exe (runtime .NET self-
+// contained, ~80MB) — só quem liga o toggle experimental "Modo de
+// compatibilidade (WebView2)" precisa dele (ver scripts/build-dist.js).
+// Baixa e extrai sob demanda, reusando o mesmo asset "wallpaperhost.zip" e
+// os mesmos helpers (httpGet/httpDownload, UPDATE_CHECK_REPO) já usados
+// pelo auto-update leve (checkForUpdates/apply-update, mais abaixo neste
+// arquivo — ver memória project_update_checker). onProgress opcional, pra
+// UI mostrar "Baixando... X%" no toggle enquanto isso acontece.
+async function ensureWallpaperHostInstalled(onProgress) {
+  const wallpaperhostDir = path.join(path.dirname(process.execPath), 'wallpaperhost');
+  const exePath = path.join(wallpaperhostDir, 'WallpaperHost.exe');
+  if (fs.existsSync(exePath)) return { ok: true };
+  if (process.platform !== 'win32') return { ok: false, reason: 'unsupported-platform' };
+
+  try {
+    const raw = await httpGet(`https://api.github.com/repos/${UPDATE_CHECK_REPO}/releases/latest`);
+    const data = JSON.parse(raw);
+    const asset = Array.isArray(data.assets) ? data.assets.find(a => /^wallpaperhost\.zip$/i.test(a.name)) : null;
+    if (!asset) return { ok: false, reason: 'no-asset' };
+
+    const tmpDir = path.join(app.getPath('temp'), 'engine-wallpaper-wh-install');
+    if (fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const zipPath = path.join(tmpDir, 'wallpaperhost.zip');
+
+    appLog(`Baixando componente do Modo de compatibilidade (WebView2)...`);
+    onProgress?.({ status: 'downloading', pct: 0 });
+    await httpDownload(asset.browser_download_url, zipPath, (received, total) => {
+      onProgress?.({ status: 'downloading', pct: total ? received / total : null, received, total });
+    });
+
+    const dlSize = fs.statSync(zipPath).size;
+    if (!dlSize || (asset.size && dlSize !== asset.size)) {
+      throw new Error('Download incompleto ou corrompido.');
+    }
+
+    onProgress?.({ status: 'extracting' });
+    fs.mkdirSync(wallpaperhostDir, { recursive: true });
+    const psResult = spawnSync('powershell', [
+      '-NoProfile', '-Command',
+      `Expand-Archive -Path '${zipPath}' -DestinationPath '${wallpaperhostDir}' -Force`,
+    ], { windowsHide: true });
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+
+    if (psResult.status !== 0 || !fs.existsSync(exePath)) {
+      throw new Error('Falha ao extrair o componente baixado.');
+    }
+
+    appLog.ok('Componente do Modo de compatibilidade (WebView2) instalado.');
+    onProgress?.({ status: 'done' });
+    return { ok: true };
+  } catch (err) {
+    appLog.err('Falha ao instalar componente WallpaperHost.exe: ' + err.message);
+    onProgress?.({ status: 'error', message: err.message });
+    return { ok: false, reason: 'error', message: err.message };
+  }
+}
+
 function spawnWallpaperWindowOrHost(display) {
   const settings = store.get('settings') || {};
   if (settings.webview2CompatMode && process.platform === 'win32' && !_isScreensaver && !_isConfigMode) {
@@ -662,26 +720,40 @@ function applyAudioToWebWallpaperViews(channel, args) {
 // de foco/click-through) e distribuir isso por IPC. Manda coordenada
 // normalizada (0-1) relativa aos limites de CADA janela de wallpaper (cada
 // monitor tem sua própria janela cobrindo a tela inteira dele).
-setInterval(() => {
-  if (wallpaperWindows.size === 0) return;
-  const pt = screen.getCursorScreenPoint();
-  for (const win of wallpaperWindows.values()) {
-    if (win.isDestroyed()) continue;
-    const b = win.getBounds();
-    const x = (pt.x - b.x) / b.width;
-    const y = (pt.y - b.y) / b.height;
-    win.webContents.send('cursor-position', { x, y, inBounds: x >= 0 && x <= 1 && y >= 0 && y <= 1 });
-  }
-}, 33);
+//
+// Só vídeo/imagem/YouTube nunca leem 'cursor-position' — isso é usado
+// exclusivamente por objetos interativos de cena WE (xray/depthparallax).
+// Rodar isso o tempo todo (30x/seg, com syscall nativo + IPC por janela)
+// mesmo com um wallpaper de vídeo tocando é desperdício puro — start/stop
+// reais em vez de um setInterval incondicional, ligados por
+// recomputeInteractiveHooks() sempre que o wallpaper ativo muda.
+let _cursorBroadcastTimer = null;
+function startCursorBroadcast() {
+  if (_cursorBroadcastTimer) return;
+  _cursorBroadcastTimer = setInterval(() => {
+    if (wallpaperWindows.size === 0) return;
+    const pt = screen.getCursorScreenPoint();
+    for (const win of wallpaperWindows.values()) {
+      if (win.isDestroyed()) continue;
+      const b = win.getBounds();
+      const x = (pt.x - b.x) / b.width;
+      const y = (pt.y - b.y) / b.height;
+      win.webContents.send('cursor-position', { x, y, inBounds: x >= 0 && x <= 1 && y >= 0 && y <= 1 });
+    }
+  }, 33);
+}
+function stopCursorBroadcast() {
+  if (_cursorBroadcastTimer) { clearInterval(_cursorBroadcastTimer); _cursorBroadcastTimer = null; }
+}
 
 // Cliques reais no wallpaper — mesma razão do polling de posição acima
 // (janela sempre click-through, `ignoreMouseEvents`, nunca recebe um
 // mousedown de verdade do próprio Chromium). uiohook-napi já é dependência
 // do projeto (usada no fluxo do screensaver) — aqui liga um hook global
-// leve, sempre ativo enquanto existir pelo menos uma janela de wallpaper,
-// só pra destravar os scripts reais de cursor (cursorDown/cursorClick) da
-// Wallpaper Engine em objetos "solid" (ex.: botões de play/pause/skip do
-// media player). Broadcast pro mesmo formato normalizado do cursor-position.
+// leve, só pra destravar os scripts reais de cursor (cursorDown/cursorClick)
+// da Wallpaper Engine em objetos "solid" (ex.: botões de play/pause/skip do
+// media player) — como cursor-position acima, só cenas WE usam isso.
+// Liga/desliga junto do broadcast de posição via recomputeInteractiveHooks().
 let _uiohookStarted = false;
 function ensureClickBroadcast() {
   if (_uiohookStarted) return;
@@ -715,8 +787,13 @@ function ensureClickBroadcast() {
     console.warn('[main] uiohook indisponível — cursorDown/cursorClick dos scripts reais da WE não vão funcionar:', err.message);
   }
 }
-// Chamada real fica lá embaixo, dentro de app.whenReady().then(...), depois
-// de createWallpaperWindows() — ver comentário lá pra saber por quê.
+function stopClickBroadcast() {
+  if (!_uiohookStarted) return;
+  _uiohookStarted = false;
+  try { require('uiohook-napi').uIOhook.stop(); } catch {}
+}
+// Chamada real fica dentro de recomputeInteractiveHooks(), acionado sempre
+// que o wallpaper ativo muda — ver definição mais abaixo.
 
 // ---- Integração real de media (Now Playing do Windows) ----
 // Confirmado ao vivo 2026-07-18 contra uma aba real do YouTube tocando no
@@ -776,15 +853,46 @@ function ensureMediaSessionPoll() {
       }
     });
     _mediaSessionProc.on('exit', (code) => {
-      appLog.warn(`media-session-poll.ps1 saiu (code ${code}) — integração de mídia parada até o app reiniciar.`);
+      if (_mediaSessionProc) appLog.warn(`media-session-poll.ps1 saiu (code ${code}) — integração de mídia parada até o próximo wallpaper de cena WE.`);
       _mediaSessionProc = null;
     });
   } catch (err) {
     console.warn('[main] Falha ao iniciar integração de media session:', err.message);
   }
 }
-// Chamada real fica lá embaixo, dentro de app.whenReady().then(...), depois
-// de createWallpaperWindows() — ver comentário lá pra saber por quê.
+function stopMediaSessionPoll() {
+  if (!_mediaSessionProc) return;
+  const proc = _mediaSessionProc;
+  _mediaSessionProc = null; // limpa antes de matar, pro listener 'exit' acima não logar como se fosse inesperado
+  try { proc.kill(); } catch {}
+}
+// Liga cursor-position/click/media-session só enquanto pelo menos UM
+// monitor estiver mostrando uma cena WE (o único tipo que realmente lê
+// esses três) — chamado a cada tick do motor de automação (2s, já existe,
+// ver startAutomationEngine) em vez de tentar interceptar cada lugar do
+// código que troca de wallpaper (são vários: broadcast pra todos, troca só
+// de um monitor, rotação de playlist, auto-apply do YouTube...). 2s de
+// atraso pra ligar/desligar é imperceptível; ler duas chaves da store a
+// cada tick é ordens de magnitude mais barato que manter os três sempre
+// ativos.
+let _interactiveHooksActive = false;
+function recomputeInteractiveHooks() {
+  const displayWallpapers = store.get('displayWallpapers') || {};
+  const current = store.get('current');
+  const active = [...Object.values(displayWallpapers), current].filter(Boolean);
+  const needed = active.some(w => w.type === 'scene');
+  if (needed === _interactiveHooksActive) return;
+  _interactiveHooksActive = needed;
+  if (needed) {
+    startCursorBroadcast();
+    ensureClickBroadcast();
+    ensureMediaSessionPoll();
+  } else {
+    stopCursorBroadcast();
+    stopClickBroadcast();
+    stopMediaSessionPoll();
+  }
+}
 
 // O Windows desenha o efeito de vidro fosco (Mica/Acrylic) atrás da barra de
 // tarefas olhando pro wallpaper REAL registrado no sistema — não pro que
@@ -1079,27 +1187,6 @@ function startWorkerWWatchdog() {
   }, 1000);
 }
 
-// Tried two nudge strategies here (resize +1px, then hide()+showInactive())
-// to work around the wallpaper going visually stale when embedded as a
-// WS_CHILD under Progman. Neither actually fixed it, and hide()+show caused
-// a visible flicker of its own — worse than the problem. Removed pending a
-// real fix; see project_workerw_fragility.md memory for the current theory
-// (Electron's Chromium top-level window may not tolerate being forced into
-// a foreign process's window tree the way a plain native window hosting a
-// WebView2 *child control* — what Lively actually does — would).
-//
-// Terceira tentativa (2026-07-20): webContents.invalidate() a cada 200ms.
-// REVERTIDA NO MESMO DIA — confirmado ao vivo que piorou o PC afetado (tela
-// ficou preta, antes pelo menos mostrava um frame estático/avançando
-// devagar). Suspeita: invalidate() força um repaint completo que, numa
-// janela transparent:true + gpu_compositing desligada, perde a composição
-// de transparência que deixa o vídeo aparecer através da janela
-// reparentada — pinta preto sólido em vez de deixar o conteúdo por trás
-// aparecer. Não tentar de novo sem entender melhor essa interação.
-function startRepaintNudge() {
-  // intentionally a no-op for now
-}
-
 // ---- Autostart (Startup-folder .lnk, not the Registry Run key) ----
 // The Registry Run-key mechanism (Electron's own `setLoginItemSettings`) has
 // no "start in" concept — it launches bin\electron.exe with no working
@@ -1327,7 +1414,22 @@ async function buildEngineContext(restrictedMode) {
 
 function startAutomationEngine() {
   _engineTimer = setInterval(async () => {
+    recomputeInteractiveHooks();
+
     const restrictedMode = _isScreensaver || _isConfigMode;
+    // Nada configurado (sem App Rules, sem pausa/mudo em fullscreen, sem
+    // Rotinas, sem Playlists) = nada pra reconciliar ou tickar. Comportamento
+    // do modo screensaver/config fica intocado (sempre tickava, continua
+    // tickando) — essa checagem só evita trabalho à toa no modo normal.
+    if (!restrictedMode) {
+      const settings = store.get('settings') || {};
+      const hasAnyAutomation = (settings.appRules || []).length > 0
+        || settings.pauseOnFullscreen || settings.muteOnFullscreen
+        || (store.get('routines') || []).length > 0
+        || (store.get('smartPlaylists') || []).length > 0;
+      if (!hasAnyAutomation) return;
+    }
+
     const context = await buildEngineContext(restrictedMode);
     if (!restrictedMode) reconcilePlaybackControls(store, sendToAllWallpapers, context, _manualPause);
     routineEngine.tick(context);
@@ -1353,7 +1455,11 @@ ipcMain.handle('get-library', () => {
 ipcMain.handle('get-favorites',        () => store.get('favorites') || []);
 ipcMain.handle('toggle-favorite', (_, item) => {
   const favorites = store.get('favorites') || [];
-  const idx = favorites.findIndex(f => f.workshopId === item.workshopId);
+  // Itens da Workshop têm workshopId; itens adicionados direto na Biblioteca
+  // (vídeo/imagem/URL local) não têm — usa item.id como identidade nesse
+  // caso, senão todo item local sem workshopId colidiria com "undefined".
+  const key = item.workshopId || item.id;
+  const idx = favorites.findIndex(f => (f.workshopId || f.id) === key);
   let added;
   if (idx >= 0) {
     favorites.splice(idx, 1);
@@ -1459,16 +1565,6 @@ ipcMain.handle('set-routine-enabled', (_, routineId, enabled) => {
   const routines = store.get('routines') || [];
   const idx = routines.findIndex(r => r.id === routineId);
   if (idx !== -1) { routines[idx].enabled = !!enabled; store.set('routines', routines); }
-  return true;
-});
-
-ipcMain.handle('reorder-routines', (_, orderedIds) => {
-  const routines = store.get('routines') || [];
-  orderedIds.forEach((id, i) => {
-    const idx = routines.findIndex(r => r.id === id);
-    if (idx !== -1) routines[idx].priority = (orderedIds.length - i) * 10;
-  });
-  store.set('routines', routines);
   return true;
 });
 
@@ -1589,19 +1685,8 @@ ipcMain.on('update-native-prop', (_, data) => {
   }
 });
 
-// Diagnostic: if this stops appearing while the wallpaper looks frozen, the
-// renderer's JS itself has stopped (crash/hang/suspended process). If it
-// keeps appearing on schedule while the screen still looks frozen, the JS is
-// fine and it's specifically the paint/composite step that isn't refreshing
-// — most likely suspect right now: WS_EX_LAYERED (added for "raised desktop"
-// mode) fighting with Electron's own `transparent: true` compositing.
-ipcMain.on('wallpaper-heartbeat', (_event, _info) => {
-  // Silenced — was flooding the terminal every 5s. Uncomment the line below
-  // if chasing the frozen-paint bug described above again.
-  // console.log(`[heartbeat] wallpaper renderer alive — ${_info.display} at ${new Date(_info.ts).toLocaleTimeString('pt-BR')}`);
-});
-
-// Mesma técnica de diagnóstico do heartbeat acima, agora pra JANELA DE
+// Mesma técnica de diagnóstico do heartbeat de wallpaper (removido — ficava
+// mandando IPC a cada 5s sem nenhum consumidor real), agora pra JANELA DE
 // CONTROLE — investigando um travamento real relatado pelo usuário logo
 // após abrir o app (modal de aviso aparece, botão fica clicável, mas depois
 // disso nada mais responde a clique nenhum, nem os botões da própria
@@ -1986,6 +2071,9 @@ ipcMain.on('youtube-panel-hide', (event) => {
 // alta qualidade na biblioteca (yt-dlp + ffmpeg, ver src/youtube-download.js).
 ipcMain.handle('youtube-download-wallpaper', async (event, { videoId, title }) => {
   const sendProgress = (data) => {
+    if (data.phase === 'quality-limited') {
+      appLog.warn('youtube-download-wallpaper: ffmpeg não pôde ser executado nesta máquina (bloqueado pelo Controle de Aplicativo do Windows ou similar) — baixando em qualidade progressiva, sem merge.');
+    }
     if (event.sender && !event.sender.isDestroyed()) event.sender.send('youtube-download-progress', data);
   };
   try {
@@ -2033,7 +2121,7 @@ ipcMain.handle('get-desktop-audio-source', async () => {
   return sources[0]?.id;
 });
 
-ipcMain.handle('set-settings', (_, settings) => {
+ipcMain.handle('set-settings', async (_, settings) => {
   const prevCompatMode = !!(store.get('settings') || {}).webview2CompatMode;
   store.set('settings', settings);
   sendToAllWallpapers('update-settings', settings);
@@ -2042,6 +2130,18 @@ ipcMain.handle('set-settings', (_, settings) => {
   // Muda o backend de renderização em runtime — precisa destruir e recriar
   // as janelas/processos de wallpaper com o tipo certo, não só avisar via IPC.
   if (!!settings.webview2CompatMode !== prevCompatMode && !_isScreensaver && !_isConfigMode) {
+    // Ligando pela primeira vez: o componente pode não estar instalado ainda
+    // (não vem mais no instalador padrão, ver ensureWallpaperHostInstalled)
+    // — baixa antes de recriar as janelas, senão a primeira tentativa de
+    // spawn falha e cai no fallback Electron sem o usuário entender por quê.
+    if (settings.webview2CompatMode) {
+      const result = await ensureWallpaperHostInstalled((progress) => {
+        if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('wallpaperhost-install-progress', progress);
+      });
+      if (!result.ok) {
+        appLog.warn('Modo de compatibilidade (WebView2) ligado, mas o componente não pôde ser instalado — ' + (result.reason || result.message || 'motivo desconhecido') + '. Caindo no motor de renderização padrão.');
+      }
+    }
     recreateWallpaperWindows();
   }
   return true;
@@ -2059,11 +2159,6 @@ function applyTaskbarIconsVisibility(settings) {
 }
 
 ipcMain.handle('open-file-dialog', async (_, options) => dialog.showOpenDialog(controlWin, options));
-
-ipcMain.handle('open-in-steam', (_, workshopId) => {
-  const { shell } = require('electron');
-  shell.openExternal(`steam://url/CommunityFilePage/${workshopId}`);
-});
 
 ipcMain.handle('window-minimize', () => controlWin?.minimize());
 ipcMain.handle('window-close',    () => controlWin?.close());
@@ -2357,7 +2452,7 @@ ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedU
 // não tem "novidade" pra quem tá abrindo o app pela primeira vez.
 const WHATS_NEW = {
   version: APP_VERSION,
-  text: 'YouTube agora tem um card de acesso rápido dentro do Descobrir, e cenas incompatíveis não aparecem mais nos resultados de busca da Workshop (só vídeo e web).',
+  text: 'Corrigido: download em alta qualidade do YouTube (ffmpeg bloqueado pelo Windows em algumas máquinas) e busca da Workshop mostrando poucos resultados de vídeo/web. Novo botão de favoritar na Biblioteca e cards com tamanho fixo.',
 };
 ipcMain.handle('get-whats-new', () => {
   if (store.get('lastSeenWhatsNewVersion') === WHATS_NEW.version) return null;
@@ -2633,7 +2728,7 @@ async function fetchWorkshopPage({ sort, search, page, tag }) {
 
   if (idList.length === 0) {
     appLog.warn(`browse-workshop (sort=${sort || 'trend'}, tag=${tag || '-'}, page=${page || 1}): scrape retornou 0 IDs (html length=${html.length}). Steam pode ter bloqueado/mudado a página.`);
-    return { items: [], total: 0 };
+    return { items: [], total: 0, rawCount: 0 };
   }
 
   // Step 2: Get full details via Steam public API (no key needed)
@@ -2675,18 +2770,36 @@ async function fetchWorkshopPage({ sort, search, page, tag }) {
     };
   }).filter(Boolean);
 
-  return { items, total: items.length };
+  // rawCount = quantos IDs a Steam devolveu NESTA página ANTES de filtrarmos
+  // 'scene' pro usuário final — usado por quem chama pra decidir se ainda
+  // tem mais páginas (uma página cheia de verdade da Steam sempre tem por
+  // volta de 30 IDs, mesmo que a maioria vire 'scene' e seja descartada
+  // depois; usar o total PÓS-filtro pra essa decisão faz a paginação parar
+  // cedo demais sempre que uma página tem muita cena, mesmo com mais
+  // vídeo/web disponível nas páginas seguintes — bug real encontrado
+  // 2026-07-24, ver project_workshop_search_completeness).
+  return { items, total: items.length, rawCount: idList.length };
 }
+
+// Uma página "cheia" da Steam tem por volta de 30 IDs — usamos uma margem
+// (25) em vez de exigir exatamente 30 porque a Steam às vezes devolve 28/29
+// numa página que ainda tem próxima (compressão/dedup da própria scrape).
+const STEAM_FULL_PAGE_THRESHOLD = 25;
 
 ipcMain.handle('browse-workshop', async (_, { sort, search, page, tag }) => {
   try {
     // Achado ao vivo (2026-07-21): a maioria do conteúdo da Workshop é do
     // tipo "Scene" (motor proprietário da WE, só mostramos como preview
     // estático) ou "Application" (não suportado) — só vídeo e web tocam de
-    // verdade hoje. O feed padrão (sem busca nem tag escolhida pelo usuário)
-    // busca "Video" e "Web" separadamente e intercala, em vez de depender da
-    // sorte do mix genérico que a Steam devolve.
-    if (!tag && !search) {
+    // verdade hoje. Sem uma tag específica escolhida pelo usuário (feed
+    // padrão OU busca por texto sem tag), busca "Video" e "Web"
+    // separadamente e intercala, em vez de depender da sorte do mix
+    // genérico que a Steam devolve — achado ao vivo 2026-07-24: pra uma
+    // busca de texto tipo "spy family", o mix genérico só trazia 10
+    // vídeos numa página de 30 (o resto era 'scene', descartado); buscar
+    // só com tag=Video pro MESMO texto traz uma página CHEIA de 30 vídeos —
+    // ou seja, o mix genérico escondia a maior parte do conteúdo real.
+    if (!tag) {
       const [videoRes, webRes] = await Promise.all([
         fetchWorkshopPage({ sort, search, page, tag: 'Video' }),
         fetchWorkshopPage({ sort, search, page, tag: 'Web' }),
@@ -2699,12 +2812,18 @@ ipcMain.handle('browse-workshop', async (_, { sort, search, page, tag }) => {
         if (a[i] && !seen.has(a[i].workshopId)) { merged.push(a[i]); seen.add(a[i].workshopId); }
         if (b[i] && !seen.has(b[i].workshopId)) { merged.push(b[i]); seen.add(b[i].workshopId); }
       }
-      return { items: merged, total: merged.length };
+      // "Tem mais?" precisa olhar pro tamanho da página CRUA da Steam (antes
+      // do nosso filtro de compatibilidade), não pro total já filtrado —
+      // senão uma página com muita 'scene' filtrada faz a paginação parar
+      // cedo demais mesmo havendo mais vídeo/web nas páginas seguintes.
+      const hasMore = videoRes.rawCount >= STEAM_FULL_PAGE_THRESHOLD || webRes.rawCount >= STEAM_FULL_PAGE_THRESHOLD;
+      return { items: merged, total: merged.length, hasMore };
     }
-    return await fetchWorkshopPage({ sort, search, page, tag });
+    const res = await fetchWorkshopPage({ sort, search, page, tag });
+    return { ...res, hasMore: res.rawCount >= STEAM_FULL_PAGE_THRESHOLD };
   } catch (e) {
     console.error('[browse-workshop]', e.message);
-    return { items: [], total: 0, error: e.message };
+    return { items: [], total: 0, hasMore: false, error: e.message };
   }
 });
 
@@ -3435,7 +3554,7 @@ app.whenReady().then(async () => {
     }
   }
   startAutomationEngine();
-  if (!_isScreensaver) { startWorkerWWatchdog(); startRepaintNudge(); startNativeWallpaperRefresh(); checkConflictingWallpaperApps(); }
+  if (!_isScreensaver) { startWorkerWWatchdog(); startNativeWallpaperRefresh(); checkConflictingWallpaperApps(); }
 
   // Adicionados 2026-07-18 (hook global de clique + integração de media
   // session) — DEPOIS que o wallpaper já existe de propósito. Achado real:
@@ -3447,10 +3566,10 @@ app.whenReady().then(async () => {
   // inteiro, que nem chegava a ser criado. Agora essas duas coisas nunca
   // podem bloquear o wallpaper aparecer — o pior caso é elas falharem
   // sozinhas (já tratado com try/catch), sem afetar o resto do app.
-  ensureClickBroadcast();
-  _bootLog('ensureClickBroadcast retornou');
-  ensureMediaSessionPoll();
-  _bootLog('ensureMediaSessionPoll retornou, chamando createControlWindow');
+  // Só ligam de verdade se o wallpaper já ativo no boot for uma cena WE
+  // (recomputeInteractiveHooks decide) — não incondicional feito antes.
+  recomputeInteractiveHooks();
+  _bootLog('recomputeInteractiveHooks retornou, chamando createControlWindow');
 
   if (!_isScreensaver && !_isConfigMode) {
     createControlWindow();
