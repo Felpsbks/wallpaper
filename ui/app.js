@@ -435,6 +435,21 @@ function renderLibrary() {
   }
 
   updateLibraryStatsBar();
+  syncLibCardMinFromLayout();
+}
+
+// Grid da Biblioteca fixado em 4 colunas (repeat(4,1fr) no CSS) — a largura
+// de cada card não vem mais do slider de tamanho, então --lib-card-min
+// (usado só pra calcular a altura proporcional da miniatura em
+// grid-auto-rows) precisa ser medido a partir da largura real da coluna, e
+// não adivinhado.
+function syncLibCardMinFromLayout() {
+  requestAnimationFrame(() => {
+    if (!libGrid.querySelector('.wallpaper-card') || libGrid.classList.contains('list-view')) return;
+    const cols = 4, gap = 16;
+    const colWidth = (libGrid.clientWidth - gap * (cols - 1)) / cols;
+    if (colWidth > 0) libGrid.style.setProperty('--lib-card-min', colWidth + 'px');
+  });
 }
 
 async function setWallpaper(w) {
