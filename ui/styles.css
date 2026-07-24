@@ -715,10 +715,18 @@ body::after {
    `aspect-ratio: 16/10` — confirmado ao vivo (2026-07-24, PC com GPU em
    disabled_software) que aspect-ratio estava sendo ignorado/mal calculado
    aqui, colapsando a miniatura numa faixa finíssima (~30px de altura em vez
-   de ~62% da largura). padding-bottom em % é calculado só a partir da
-   LARGURA do próprio elemento — não depende do suporte/comportamento de
-   aspect-ratio, robusto em qualquer engine de renderização. 62.5% = 10/16. */
-.card-thumb-wrap { width: 100%; height: 0; padding-bottom: 62.5%; background: var(--bg3); position: relative; overflow: hidden; }
+   de ~62% da largura). A troca pra `padding-bottom: 62.5%` (calculado a
+   partir da LARGURA do próprio elemento) tampouco resolveu — mesmo bug
+   idêntico continuou. Causa real: dentro de `display:grid` com colunas
+   `auto-fill`/`minmax()`, a largura de cada card só fica definitiva DEPOIS
+   que o grid decide a altura de cada linha — qualquer técnica de altura
+   baseada em "% da própria largura" (aspect-ratio OU padding-bottom, tanto
+   faz) cai numa dependência circular que o Chromium resolve errado aqui
+   (linha vira ~0). Corrigido de vez calculando a altura a partir de
+   `--lib-card-min` (já existe, o slider de tamanho seta em px) em vez de em
+   %  — nenhuma dependência circular possível, porque não depende de
+   resolver a própria largura primeiro. */
+.card-thumb-wrap { width: 100%; height: calc(var(--lib-card-min, 230px) * 0.625); background: var(--bg3); position: relative; overflow: hidden; }
 .card-thumb-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transition: transform 0.3s; }
 .wallpaper-card:hover .card-thumb-img { transform: scale(1.05); }
 .card-thumb { position: absolute; inset: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 28px; color: var(--text2); }

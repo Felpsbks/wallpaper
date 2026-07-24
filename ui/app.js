@@ -435,34 +435,6 @@ function renderLibrary() {
   }
 
   updateLibraryStatsBar();
-  _diagCardSizes();
-}
-
-// Diagnóstico temporário (2026-07-24) pro bug relatado de cards da Biblioteca
-// achatados em algumas abas de filtro mas não em outras. O usuário não
-// consegue abrir o DevTools (atalho não registrado neste app), então mede o
-// layout real de dentro do próprio app e manda pro painel de Log (aba Log,
-// botão Copiar) — mesmo canal já usado antes pra coletar os logs de GPU.
-// Remover depois que o bug for resolvido.
-function _diagCardSizes() {
-  requestAnimationFrame(() => {
-    const grid = document.getElementById('wallpaper-grid');
-    const cards = grid.querySelectorAll('.wallpaper-card');
-    if (!cards.length) return;
-    const filterLabel = libraryTypeFilter || 'Todos';
-    const gridCs = getComputedStyle(grid);
-    ctrlLog(`[DIAG] filtro=${filterLabel} listView=${grid.classList.contains('list-view')} grid.display=${gridCs.display} grid.gridTemplateColumns=${gridCs.gridTemplateColumns}`);
-    const n = Math.min(3, cards.length);
-    for (let i = 0; i < n; i++) {
-      const card = cards[i];
-      const wrap = card.querySelector('.card-thumb-wrap');
-      const img = card.querySelector('.card-thumb-img');
-      const cardRect = card.getBoundingClientRect();
-      const wrapRect = wrap ? wrap.getBoundingClientRect() : null;
-      const wrapCs = wrap ? getComputedStyle(wrap) : null;
-      ctrlLog(`[DIAG] card[${i}] id=${card.dataset.id} cardRect=${Math.round(cardRect.width)}x${Math.round(cardRect.height)} wrapRect=${wrapRect ? Math.round(wrapRect.width)+'x'+Math.round(wrapRect.height) : 'N/A'} wrap.height=${wrapCs ? wrapCs.height : 'N/A'} wrap.paddingBottom=${wrapCs ? wrapCs.paddingBottom : 'N/A'} wrap.position=${wrapCs ? wrapCs.position : 'N/A'} hasImg=${!!img} imgNatural=${img ? img.naturalWidth+'x'+img.naturalHeight : 'N/A'} imgComplete=${img ? img.complete : 'N/A'}`);
-    }
-  });
 }
 
 async function setWallpaper(w) {
