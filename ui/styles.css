@@ -712,7 +712,7 @@ body::after {
    cortada pelo overflow:hidden do cartão pai depois de espremido. minmax()
    com um piso calculado evita que o grid precise "adivinhar" a altura da
    linha a partir do conteúdo. */
-#wallpaper-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--lib-card-min, 230px), calc(var(--lib-card-min, 230px) + 70px))); grid-auto-rows: minmax(calc(var(--lib-card-min, 230px) * 0.625 + 42px), auto); gap: 16px; padding: 20px 24px; align-content: start; align-items: start; }
+#wallpaper-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--lib-card-min, 180px), calc(var(--lib-card-min, 180px) + 70px))); grid-auto-rows: minmax(calc(var(--lib-card-min, 180px) * 0.625 + 42px), auto); gap: 16px; padding: 20px 24px; align-content: start; align-items: start; }
 .wallpaper-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; position: relative; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s; }
 .wallpaper-card:hover { transform: scale(1.04); box-shadow: 0 8px 24px rgba(124, 58, 237, 0.25); border-color: var(--accent); }
 .wallpaper-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
@@ -734,7 +734,7 @@ body::after {
    `--lib-card-min` (já existe, o slider de tamanho seta em px) em vez de em
    %  — nenhuma dependência circular possível, porque não depende de
    resolver a própria largura primeiro. */
-.card-thumb-wrap { width: 100%; height: calc(var(--lib-card-min, 230px) * 0.625); background: var(--bg3); position: relative; overflow: hidden; }
+.card-thumb-wrap { width: 100%; height: calc(var(--lib-card-min, 180px) * 0.625); background: var(--bg3); position: relative; overflow: hidden; }
 .card-thumb-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transition: transform 0.3s; }
 .wallpaper-card:hover .card-thumb-img { transform: scale(1.05); }
 .card-thumb { position: absolute; inset: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 28px; color: var(--text2); }
