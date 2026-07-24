@@ -704,7 +704,7 @@ body::after {
    ser um intervalo fixo (não um "preencha o resto"), o tamanho de cada
    coluna não varia conforme a quantidade de itens muda (mesmo cartão em
    qualquer linha, cheia ou não). */
-#wallpaper-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--lib-card-min, 180px), calc(var(--lib-card-min, 180px) + 60px))); gap: 16px; padding: 20px 24px; align-content: start; }
+#wallpaper-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--lib-card-min, 230px), calc(var(--lib-card-min, 230px) + 70px))); gap: 16px; padding: 20px 24px; align-content: start; }
 .wallpaper-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; position: relative; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s; }
 .wallpaper-card:hover { transform: scale(1.04); box-shadow: 0 8px 24px rgba(124, 58, 237, 0.25); border-color: var(--accent); }
 .wallpaper-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
