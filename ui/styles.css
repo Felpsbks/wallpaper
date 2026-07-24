@@ -711,10 +711,17 @@ body::after {
 .card-active-badge { position: absolute; top: 8px; left: 8px; background: var(--accent); color: #fff; font-size: 9px; font-weight: 700; padding: 3px 7px; border-radius: 6px; z-index: 2; display: none; }
 .wallpaper-card.active .card-active-badge { display: block; }
 .card-scene-fallback-badge { position: absolute; bottom: 8px; right: 8px; background: rgba(255, 152, 0, 0.85); color: #1a1200; font-size: 9px; font-weight: 700; padding: 3px 7px; border-radius: 6px; z-index: 2; cursor: default; }
-.card-thumb-wrap { width: 100%; aspect-ratio: 16/10; background: var(--bg3); position: relative; overflow: hidden; }
-.card-thumb-img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.3s; }
+/* height:0 + padding-bottom (truque clássico de proporção fixa) em vez de
+   `aspect-ratio: 16/10` — confirmado ao vivo (2026-07-24, PC com GPU em
+   disabled_software) que aspect-ratio estava sendo ignorado/mal calculado
+   aqui, colapsando a miniatura numa faixa finíssima (~30px de altura em vez
+   de ~62% da largura). padding-bottom em % é calculado só a partir da
+   LARGURA do próprio elemento — não depende do suporte/comportamento de
+   aspect-ratio, robusto em qualquer engine de renderização. 62.5% = 10/16. */
+.card-thumb-wrap { width: 100%; height: 0; padding-bottom: 62.5%; background: var(--bg3); position: relative; overflow: hidden; }
+.card-thumb-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transition: transform 0.3s; }
 .wallpaper-card:hover .card-thumb-img { transform: scale(1.05); }
-.card-thumb { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 28px; color: var(--text2); }
+.card-thumb { position: absolute; inset: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 28px; color: var(--text2); }
 .card-type-badge { position: absolute; bottom: 8px; left: 8px; background: rgba(0,0,0,0.65); backdrop-filter: blur(4px); color: #fff; font-size: 9px; font-weight: 600; padding: 3px 7px; border-radius: 6px; z-index: 2; }
 .card-info { padding: 10px 12px; }
 .card-name { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
