@@ -497,7 +497,9 @@ document.getElementById('lib-view-list').addEventListener('click', () => {
   document.getElementById('lib-view-list').classList.add('active');
   document.getElementById('lib-view-grid').classList.remove('active');
 });
-document.getElementById('lib-size-slider').addEventListener('input', e => {
+const libSizeSlider = document.getElementById('lib-size-slider');
+libGrid.style.setProperty('--lib-card-min', libSizeSlider.value + 'px');
+libSizeSlider.addEventListener('input', e => {
   libGrid.style.setProperty('--lib-card-min', e.target.value + 'px');
 });
 
@@ -771,6 +773,11 @@ document.getElementById('btn-props-save').addEventListener('click', async () => 
 // ---- Settings ----
 const setVolume  = document.getElementById('set-volume');
 const setVolumeV = document.getElementById('set-volume-val');
+// Controle de acesso rápido na barra lateral (mesmo valor de "Volume do
+// vídeo" em Configurações, só sem precisar abrir a tela pra ajustar toda
+// vez) — mantido em sincronia nos dois sentidos com o slider de Configurações.
+const sidebarVolume  = document.getElementById('sidebar-volume');
+const sidebarVolumeV = document.getElementById('sidebar-volume-val');
 const setPauseFs = document.getElementById('set-pause-fs');
 const setPerfModeFs = document.getElementById('set-performance-mode-fs');
 const setMuteFs  = document.getElementById('set-mute-fs');
@@ -790,7 +797,18 @@ const clockColor     = document.getElementById('clock-color');
 const clockFontSize  = document.getElementById('clock-fontsize');
 const clockFontSizeV = document.getElementById('clock-fontsize-val');
 
-setVolume.addEventListener('input', () => { setVolumeV.textContent = setVolume.value + '%'; });
+setVolume.addEventListener('input', () => {
+  setVolumeV.textContent = setVolume.value + '%';
+  if (sidebarVolume) { sidebarVolume.value = setVolume.value; sidebarVolumeV.textContent = setVolume.value + '%'; }
+});
+if (sidebarVolume) {
+  sidebarVolume.addEventListener('input', () => {
+    setVolume.value = sidebarVolume.value;
+    setVolumeV.textContent = sidebarVolume.value + '%';
+    sidebarVolumeV.textContent = sidebarVolume.value + '%';
+  });
+  sidebarVolume.addEventListener('change', saveSettings);
+}
 clockFontSize.addEventListener('input', () => { clockFontSizeV.textContent = clockFontSize.value + 'px'; });
 
 async function saveSettings() {
@@ -2905,6 +2923,10 @@ async function init() {
     // Settings UI
     setVolume.value = settings.volume ?? 50;
     setVolumeV.textContent = (settings.volume ?? 50) + '%';
+    if (sidebarVolume) {
+      sidebarVolume.value = settings.volume ?? 50;
+      sidebarVolumeV.textContent = (settings.volume ?? 50) + '%';
+    }
     setPauseFs.checked = settings.pauseOnFullscreen ?? true;
     setPerfModeFs.checked = settings.performanceModeFullscreen ?? false;
     setMuteFs.checked  = settings.muteOnFullscreen  ?? false;

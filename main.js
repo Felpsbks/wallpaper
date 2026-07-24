@@ -2228,7 +2228,14 @@ function parseSingleWorkshopItem(wpDir, id) {
   if (!fs.existsSync(pf)) return null;
   let project; try { project = JSON.parse(fs.readFileSync(pf, 'utf-8')); } catch { return null; }
   const type = (project.type || '').toLowerCase();
-  if (type !== 'video' && type !== 'web' && type !== 'scene') return null;
+  // Achado ao vivo 2026-07-24: itens do tipo "Preset" da Wallpaper Engine
+  // (fundo + overlays configuráveis — relógio, "Buy Me A Drink", etc.) não
+  // têm NENHUM campo "type" no project.json, só um bloco "preset" com a
+  // configuração — caíam direto em "tipo desconhecido" mesmo tendo uma
+  // preview perfeitamente válida pra mostrar. Formato novo que a gente nunca
+  // tinha visto (nenhum outro tipo tem "type" ausente).
+  const isPreset = !type && project.preset && typeof project.preset === 'object';
+  if (!isPreset && type !== 'video' && type !== 'web' && type !== 'scene') return null;
 
   // Builds pro usuário final (ver _isEndUserBuild) mostram vídeo E web do
   // Steam Workshop — "web" é uma página HTML/JS normal, não depende do
@@ -2236,12 +2243,94 @@ function parseSingleWorkshopItem(wpDir, id) {
   // parcial do formato proprietário da Wallpaper Engine, ainda cheia de
   // recursos "não confirmados ao vivo", ver memória do projeto). No meu
   // próprio dev (bin/electron.exe) continua tudo liberado, sem filtro.
-  if (_isEndUserBuild && type !== 'video' && type !== 'web') return null;
+  // Preset é liberado nos dois casos: vira uma imagem estática normal (não
+  // depende de nenhum renderer proprietário nosso, é só um arquivo de
+  // imagem de verdade), mesmo nível de suporte que vídeo/web.
+  if (_isEndUserBuild && !isPreset && type !== 'video' && type !== 'web') return null;
 
   let preview = null;
   for (const n of [project.preview, 'preview.gif', 'preview.jpg', 'preview.png'].filter(Boolean)) {
     const pp = path.join(wpDir, n);
     if (fs.existsSync(pp)) { preview = pp; break; }
+  }
+
+  // Sem renderer de overlay pra "preset" ainda (relógio/visualizador/etc
+  // configuráveis) — mesma estratégia de fallback graciosa que "scene" já
+  // usa: mostra a preview como imagem estática em vez de recusar o item
+  // inteiro. Prefere o background_image real do preset (a imagem de fundo
+  // de verdade) à preview (que é só uma miniatura), quando existir.
+  if (isPreset) {
+    // Achado ao vivo 2026-07-24: um "Preset" não é um wallpaper web
+    // independente — ele referencia (via "dependency") outro item da
+    // Workshop que é o motor Web de verdade (index.html + schema completo
+    // de propriedades em general.properties), e só guarda os VALORES
+    // customizados desse preset específico (imagem de fundo, config de
+    // relógio, etc.) em "preset". O motor fica numa pasta IRMÃ (mesmo
+    // content/431960/, outro workshopId) — se ela já foi baixada (ver
+    // download-workshop-item/steamcmd-download-item, que agora baixam a
+    // dependency junto), renderiza o motor de verdade com os valores do
+    // preset aplicados via window.wallpaperPropertyListener.applyUserProperties
+    // (mesmo mecanismo que qualquer wallpaper "web" normal já usa, ver
+    // 'web-wallpaper-show'). Sem a dependency baixada, cai pro fallback de
+    // imagem estática (igual "scene" não suportada) em vez de recusar tudo.
+    const depId = project.dependency ? String(project.dependency).match(/\d+/)?.[0] : null;
+    const depDir = depId ? path.join(path.dirname(wpDir), depId) : null;
+    const depProjectPath = depDir ? path.join(depDir, 'project.json') : null;
+    if (depProjectPath && fs.existsSync(depProjectPath)) {
+      let depProject = null;
+      try { depProject = JSON.parse(fs.readFileSync(depProjectPath, 'utf-8')); } catch { depProject = null; }
+      const depType = depProject ? (depProject.type || '').toLowerCase() : '';
+      const depFile = depProject && depProject.file ? path.join(depDir, depProject.file) : null;
+      if (depType === 'web' && depFile && fs.existsSync(depFile)) {
+        const depProperties = depProject.general && depProject.general.properties ? depProject.general.properties : null;
+        // Propriedades tipo "file" (ex: background_image) apontam pra um
+        // caminho relativo — precisa resolver dentro da pasta do PRESET
+        // (onde a imagem de verdade escolhida pelo autor do preset mora),
+        // não da pasta do motor (que só tem os assets padrão dele).
+        const options = {};
+        if (depProperties) {
+          for (const [key, val] of Object.entries(project.preset || {})) {
+            if (val === null || val === undefined) continue;
+            const schema = depProperties[key];
+            if (schema && schema.type === 'file' && typeof val === 'string') {
+              const assetPath = path.join(wpDir, val);
+              options[key] = fs.existsSync(assetPath) ? 'file:///' + assetPath.replace(/\\/g, '/') : val;
+            } else {
+              options[key] = val;
+            }
+          }
+        }
+        return {
+          workshopId: id,
+          name: project.title || `Workshop ${id}`,
+          type: 'url',
+          src: 'file:///' + depFile.replace(/\\/g, '/'),
+          preview,
+          tags: Array.isArray(project.tags) ? project.tags : [],
+          properties: depProperties,
+          options,
+          presetOf: depId,
+        };
+      }
+    }
+
+    const bgRel = project.preset.background_image;
+    let src = preview;
+    if (typeof bgRel === 'string') {
+      const bgPath = path.join(wpDir, bgRel);
+      if (fs.existsSync(bgPath)) src = bgPath;
+    }
+    if (!src) return null;
+    return {
+      workshopId: id,
+      name: project.title || `Workshop ${id}`,
+      type: 'image',
+      src,
+      preview: preview || src,
+      tags: Array.isArray(project.tags) ? project.tags : [],
+      presetOf: depId,
+      presetFallbackReason: depId ? 'dependency_not_downloaded' : 'no_dependency',
+    };
   }
 
   if (type === 'scene') {
@@ -3406,6 +3495,34 @@ ipcMain.handle('steamcmd-download-item', async (_, { username, workshopId }) => 
 
   const contentDir = path.join(steamCmdDir, 'steamapps', 'workshop', 'content', '431960', id);
   if (fs.existsSync(contentDir) && fs.readdirSync(contentDir).length > 0) {
+    // Itens "Preset" da Wallpaper Engine (ver parseSingleWorkshopItem) não
+    // são wallpapers independentes — referenciam outro item via
+    // "dependency" que é o motor Web de verdade. Sem esse segundo item
+    // baixado, o preset só consegue cair no fallback de imagem estática.
+    // Baixa a dependency também, antes de importar, se ainda não estiver
+    // presente (mesma pasta content/431960/, outro workshopId).
+    try {
+      const pf = path.join(contentDir, 'project.json');
+      if (fs.existsSync(pf)) {
+        const proj = JSON.parse(fs.readFileSync(pf, 'utf-8'));
+        const depId = (!proj.type && proj.preset && proj.dependency) ? String(proj.dependency).match(/\d+/)?.[0] : null;
+        if (depId) {
+          const depDir = path.join(steamCmdDir, 'steamapps', 'workshop', 'content', '431960', depId);
+          if (!(fs.existsSync(depDir) && fs.readdirSync(depDir).length > 0)) {
+            appLog(`Item ${id} é um "Preset" da Wallpaper Engine — baixando também o motor do qual ele depende (item ${depId})...`);
+            if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'starting' });
+            await runSteamCmdWithFallback(exePath, [
+              '+login', username,
+              '+workshop_download_item', '431960', depId, 'validate',
+              '+quit',
+            ], username);
+          }
+        }
+      }
+    } catch (err) {
+      appLog.warn('Falha ao checar/baixar a dependency de um preset: ' + err.message);
+    }
+
     const wpItem = importFromContentDir(contentDir, id);
     if (wpItem) {
       appLog.ok('Item baixado via SteamCMD e importado com sucesso!');

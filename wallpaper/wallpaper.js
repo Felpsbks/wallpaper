@@ -256,7 +256,15 @@ function showVideo(wallpaper) {
   savedVolume = (wallpaper.volume ?? 50) / 100;
   videoEl.volume = savedVolume;
   videoEl.loop = true;
-  videoEl.play().catch((err) => {
+  // makeVideoElement() sempre cria o elemento com muted=true — obrigatório
+  // pra autoplay funcionar (o Chromium bloqueia autoplay com som, só permite
+  // autoplay mudo). Sem desmutar de novo depois que o play() realmente
+  // começa, o som nunca toca em wallpaper nenhum, não importa o volume —
+  // bug real, .muted sempre vence sobre .volume. Só desmuta DEPOIS do
+  // play() resolver (não antes/junto), senão o autoplay é rejeitado de novo.
+  videoEl.play().then(() => {
+    videoEl.muted = savedVolume <= 0;
+  }).catch((err) => {
     hostBridge.send('wallpaper-video-error', { stage: 'play', message: err.message, src: videoEl.src, ts: Date.now() });
   });
 
@@ -439,10 +447,10 @@ hostBridge.on('stop',             ()  => { hideAll(); });
 hostBridge.on('unstop',           ()  => { if (_activeWallpaper) setWallpaper(_activeWallpaper); });
 hostBridge.on('pause',            ()  => { videoEl.pause(); });
 hostBridge.on('resume',           ()  => { videoEl.play().catch(() => {}); });
-hostBridge.on('mute',             ()  => { videoEl.volume = 0; });
-hostBridge.on('unmute',           (v) => { savedVolume = v / 100; videoEl.volume = savedVolume; });
+hostBridge.on('mute',             ()  => { videoEl.muted = true; });
+hostBridge.on('unmute',           (v) => { savedVolume = v / 100; videoEl.volume = savedVolume; videoEl.muted = savedVolume <= 0; });
 hostBridge.on('update-settings',  (s) => {
-  if (s.volume !== undefined) { savedVolume = s.volume / 100; videoEl.volume = savedVolume; }
+  if (s.volume !== undefined) { savedVolume = s.volume / 100; videoEl.volume = savedVolume; videoEl.muted = savedVolume <= 0; }
   if (s.audioReactive !== undefined) {
     if (s.audioReactive && !audioContext) initAudioVisualizer();
     else if (!s.audioReactive && audioContext) {

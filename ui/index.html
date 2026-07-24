@@ -110,6 +110,17 @@
       <div class="stat-row-mini"><span>FPS</span><span id="stat-fps-val">--</span></div>
     </div>
 
+    <!-- Volume de acesso rápido — mesmo valor de "Volume do vídeo" em
+         Configurações, só que sem precisar abrir a tela de Configurações
+         toda vez. Os dois campos ficam sincronizados (ver ui/app.js). -->
+    <div class="system-stats" style="margin-top:14px;">
+      <div class="nav-section-label" style="padding-left:0;margin-bottom:10px;">VOLUME</div>
+      <div class="range-row">
+        <input type="range" id="sidebar-volume" min="0" max="100" value="50" style="flex:1" />
+        <span class="range-val" id="sidebar-volume-val">50%</span>
+      </div>
+    </div>
+
     <div class="update-banner" id="update-banner" style="display:none;">
       <div class="update-banner-text">Nova versão <b id="update-banner-version"></b> disponível</div>
       <div class="update-banner-actions">
