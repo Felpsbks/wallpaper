@@ -435,6 +435,35 @@ function renderLibrary() {
   }
 
   updateLibraryStatsBar();
+  _diagCardSizes();
+}
+
+// Diagnóstico temporário (2026-07-24) — duas correções de CSS diferentes
+// (aspect-ratio, depois padding-bottom %, depois altura fixa calc() sem
+// nenhuma dependência de largura) não mudaram o resultado visual nem um
+// pixel. Isso descarta bug de CSS de layout — precisa confirmar se o
+// tamanho CALCULADO (via JS, não afetado por bug de pintura) já está
+// correto, o que apontaria pra corrupção de renderização por GPU (mesma
+// classe de bug já vista neste PC) em vez de layout. Sem DevTools
+// disponível neste app, mede aqui dentro e manda pro painel de Log (aba
+// Log, botão Copiar). Remover depois que o bug for resolvido.
+function _diagCardSizes() {
+  requestAnimationFrame(() => {
+    const grid = document.getElementById('wallpaper-grid');
+    const cards = grid.querySelectorAll('.wallpaper-card');
+    if (!cards.length) return;
+    const filterLabel = libraryTypeFilter || 'Todos';
+    ctrlLog(`[DIAG] filtro=${filterLabel} --lib-card-min=${getComputedStyle(grid).getPropertyValue('--lib-card-min')} devicePixelRatio=${window.devicePixelRatio}`);
+    const n = Math.min(3, cards.length);
+    for (let i = 0; i < n; i++) {
+      const card = cards[i];
+      const wrap = card.querySelector('.card-thumb-wrap');
+      const cardRect = card.getBoundingClientRect();
+      const wrapRect = wrap ? wrap.getBoundingClientRect() : null;
+      const wrapCs = wrap ? getComputedStyle(wrap) : null;
+      ctrlLog(`[DIAG] card[${i}] id=${card.dataset.id} cardRect=${cardRect.width.toFixed(1)}x${cardRect.height.toFixed(1)} wrapRect=${wrapRect ? wrapRect.width.toFixed(1)+'x'+wrapRect.height.toFixed(1) : 'N/A'} wrap.computedHeight=${wrapCs ? wrapCs.height : 'N/A'}`);
+    }
+  });
 }
 
 async function setWallpaper(w) {
