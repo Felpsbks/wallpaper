@@ -148,8 +148,36 @@ public class MainForm : Form
         // monitor só (onde só existe 1 processo, sem ninguém pra colidir).
         // Environment.ProcessId garante uma pasta só pra este processo.
         var userDataFolder = Path.Combine(Path.GetTempPath(), "EngineWallpaperHostWV2_" + Environment.ProcessId);
-        var env = await Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(null, userDataFolder, envOptions);
-        await _webView.EnsureCoreWebView2Async(env);
+
+        // Mesmo com pasta de perfil isolada por processo, o mesmo HRESULT
+        // 0x8007139F ("recurso não está no estado correto") ainda apareceu ao
+        // vivo num PC específico rodando UM processo só (sem colisão nenhuma
+        // possível) — ou seja, existe pelo menos mais uma causa pro mesmo
+        // erro nessa máquina, plausivelmente uma condição passageira (algum
+        // recurso interno do WebView2/Windows ainda não pronto no instante
+        // exato da primeira tentativa, num PC que já sabemos ter processos
+        // relacionados a GPU/sandbox mais lentos/instáveis pra subir — ver
+        // project_workerw_fragility). Tenta de novo com um pequeno intervalo
+        // antes de desistir de vez, em vez de assumir que é permanente.
+        Microsoft.Web.WebView2.Core.CoreWebView2Environment? env = null;
+        Exception? lastError = null;
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            try
+            {
+                env = await Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(null, userDataFolder, envOptions);
+                await _webView.EnsureCoreWebView2Async(env);
+                lastError = null;
+                break;
+            }
+            catch (Exception ex)
+            {
+                lastError = ex;
+                Console.WriteLine($"[webview2] Tentativa {attempt}/3 de inicializar falhou: {ex.GetType().Name}: {ex.Message}");
+                if (attempt < 3) await Task.Delay(1500);
+            }
+        }
+        if (lastError != null) throw lastError;
 
         // Filtros de bloqueio de anúncio do YouTube ficam ativos pro processo
         // inteiro (não atrapalham a shell/vídeo — só casam domínio de anúncio).
