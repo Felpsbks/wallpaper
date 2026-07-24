@@ -37,7 +37,13 @@ function getWallpaperHostExePath() {
 // disso porque, nesse tipo específico, a mensagem nunca passa pela shell
 // (wallpaper.js) — é interceptada e tratada 100% do lado C#, então o mudo
 // tem que vir embutido nela em vez de chegar por um canal 'mute' separado.
-function spawnWallpaperHostProcess(display, contentDir, getWallpaperMuted) {
+// onFatalLine: callback opcional, chamado com o texto completo de qualquer
+// linha "[fatal]" que o processo mandar (ver Program.cs/MainForm.cs's
+// ReportFatalAndExit/HandleHostMessage) — main.js usa isso pra mandar um
+// relatório automático pro endpoint de diagnóstico remoto (ver
+// license-server/api/diag-report.js), sem depender do usuário copiar/colar
+// stack trace manualmente.
+function spawnWallpaperHostProcess(display, contentDir, getWallpaperMuted, onFatalLine) {
   const exePath = getWallpaperHostExePath();
   if (!fs.existsSync(exePath)) {
     console.error(`[wallpaperhost] Executável não encontrado em ${exePath} — rode "dotnet publish -c Release -r win-x64 --self-contained true" dentro de native/WallpaperHost antes de ligar o Modo de compatibilidade (WebView2).`);
@@ -73,7 +79,11 @@ function spawnWallpaperHostProcess(display, contentDir, getWallpaperMuted) {
       while ((idx = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, idx).replace(/\r$/, '');
         buf = buf.slice(idx + 1);
-        if (line) (isErr ? console.error : console.log)(`[wallpaperhost] ${line}`);
+        if (!line) continue;
+        (isErr ? console.error : console.log)(`[wallpaperhost] ${line}`);
+        if (onFatalLine && /\[fatal\]/i.test(line)) {
+          try { onFatalLine(line); } catch {}
+        }
       }
     });
   }

@@ -477,7 +477,9 @@ function spawnWallpaperWindowOrHost(display) {
   if (settings.webview2CompatMode && process.platform === 'win32' && !_isScreensaver && !_isConfigMode) {
     const { spawnWallpaperHostProcess } = require('./src/wallpaper-host-process');
     const contentDir = getWallpaperContentDir();
-    const proc = spawnWallpaperHostProcess(display, contentDir, () => !!store.get('wallpaperMuted'));
+    const proc = spawnWallpaperHostProcess(display, contentDir, () => !!store.get('wallpaperMuted'), (line) => {
+      reportDiagnostic({ source: 'wallpaperhost', message: line, extra: { displayId: display.id } });
+    });
     if (proc) {
       wallpaperWindows.set(display.id, proc);
       const displayWallpapers = store.get('displayWallpapers') || {};
@@ -2552,6 +2554,23 @@ function httpPostJSON(url, body) {
     req.write(data);
     req.end();
   });
+}
+
+// ---- Diagnóstico remoto (WallpaperHost.exe → license-server → mim) ----
+// Pedido do usuário: em vez de precisar copiar/colar stack trace toda vez
+// que o "Modo de compatibilidade (WebView2)" quebra num PC que não dou
+// acesso remoto nenhum, o app manda um relatório curto sozinho assim que
+// vê uma linha "[fatal]" vinda do WallpaperHost.exe (ver
+// spawnWallpaperHostProcess's onFatalLine, src/wallpaper-host-process.js).
+// Reusa o mesmo servidor de licença já hospedado (license-server/, Vercel) —
+// endpoint novo, não mexe em nada do fluxo de ativação existente.
+function reportDiagnostic({ source, message, extra }) {
+  try {
+    const machineId = License.getMachineId(store);
+    httpPostJSON(`${License.LICENSE_SERVER_URL}/api/diag-report`, {
+      source, message, extra, appVersion: APP_VERSION, machineId,
+    }).catch(() => {}); // melhor esforço — nunca deve travar nem gerar log de erro visível
+  } catch {}
 }
 
 // Wallpaper Engine tags every Workshop item with exactly one content-type tag.

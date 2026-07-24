@@ -88,4 +88,4 @@ async function checkLicense(store) {
   return { ok: false, needsActivation: true };
 }
 
-module.exports = { checkLicense, activate, getMachineId };
+module.exports = { checkLicense, activate, getMachineId, LICENSE_SERVER_URL };

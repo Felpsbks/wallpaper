@@ -83,4 +83,27 @@ async function validateKey(key, machineId) {
   return { valid: true, expiresAt: record.expiresAt };
 }
 
-module.exports = { generateKey, revokeKey, validateKey, hashKey, _setClientForTesting };
+// Diagnóstico remoto (ver project_webview2_compat_mode / project_update_checker
+// nas memórias) — o app (main.js ou WallpaperHost.exe, via main.js) manda um
+// relatório curto aqui quando um erro fatal acontece, em vez de depender de
+// print-e-cola manual do usuário. Lista com tamanho travado (LTRIM) em vez de
+// uma chave por relatório — não precisa de índice/expiração separada, e nunca
+// cresce sem limite mesmo se algo entrar em loop mandando relatórios.
+const MAX_DIAG_REPORTS = 200;
+
+async function saveDiagReport(report) {
+  const c = await getClient();
+  const id = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  const entry = { id, receivedAt: new Date().toISOString(), ...report };
+  await c.lPush('diag:reports', JSON.stringify(entry));
+  await c.lTrim('diag:reports', 0, MAX_DIAG_REPORTS - 1);
+  return id;
+}
+
+async function listDiagReports(limit = 50) {
+  const c = await getClient();
+  const raw = await c.lRange('diag:reports', 0, Math.max(0, limit - 1));
+  return raw.map((r) => JSON.parse(r));
+}
+
+module.exports = { generateKey, revokeKey, validateKey, hashKey, saveDiagReport, listDiagReports, _setClientForTesting };
