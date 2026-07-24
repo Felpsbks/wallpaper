@@ -53,7 +53,35 @@ public class MainForm : Form
         _webView.Dock = DockStyle.Fill;
         Controls.Add(_webView);
 
-        Load += async (_, _) => await InitializeWebViewAsync();
+        // Sem isso, qualquer falha aqui (WebView2 Runtime ausente/desatualizado,
+        // colisão de pasta de perfil entre processos, path de conteúdo
+        // inválido — já vimos os três de verdade) sobe como exceção não
+        // tratada e o WinForms mostra o diálogo de crash padrão do .NET: uma
+        // pilha de "Assemblies Carregados" gigante e pouco legível, sem
+        // categorizar a causa. Loga uma mensagem curta e acionável no stdout
+        // (main.js já espelha isso na aba Log do app) e fecha limpo em vez
+        // disso — muito mais rápido de diagnosticar da próxima vez.
+        Load += async (_, _) =>
+        {
+            try
+            {
+                await InitializeWebViewAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[fatal] Falha ao inicializar o WebView2: {ex.GetType().Name}: {ex.Message}");
+                if (ex is System.Runtime.InteropServices.COMException comEx)
+                {
+                    var hr = unchecked((uint)comEx.HResult);
+                    Console.WriteLine($"[fatal] HRESULT: 0x{hr:X8}");
+                    if (hr == 0x80070003)
+                        Console.WriteLine("[fatal] Provável causa: pasta de conteúdo do wallpaper não existe de verdade no disco (path errado passado pro processo — ver getWallpaperContentDir() em main.js).");
+                    else if (hr == 0x8007139F)
+                        Console.WriteLine("[fatal] Provável causa: outro processo WallpaperHost.exe já está usando a mesma pasta de perfil do WebView2 (deveria estar isolada por PID — ver userDataFolder em InitializeWebViewAsync), ou o WebView2 Runtime não está instalado/atualizado neste PC (https://developer.microsoft.com/microsoft-edge/webview2/).");
+                }
+                Application.Exit();
+            }
+        };
 
         Shown += (_, _) =>
         {
