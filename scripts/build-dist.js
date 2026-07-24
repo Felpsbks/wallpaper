@@ -80,13 +80,60 @@ console.log('\nPublishing WallpaperHost.exe (Modo de compatibilidade WebView2)..
 const dotnetResult = spawnSync('dotnet', ['publish', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true'], {
   cwd: whHostRoot, stdio: 'inherit', shell: true,
 });
+let whBundled = false;
 if (dotnetResult.status !== 0 || !fs.existsSync(path.join(whPublishSrc, 'WallpaperHost.exe'))) {
   console.warn('dotnet publish falhou ou não encontrado — pulando WallpaperHost.exe. "Modo de compatibilidade (WebView2)" não vai funcionar neste pacote (o toggle aparece, mas cai no aviso de "executável não encontrado").');
 } else {
   fs.mkdirSync(whDistDir, { recursive: true });
   spawnSync('xcopy', [`"${whPublishSrc}"`, `"${whDistDir}"`, '/E', '/I', '/Q'], { shell: true });
+
+  // wallpaper/ precisa andar JUNTO do WallpaperHost.exe, dentro da mesma
+  // pasta — ver getWallpaperContentDir() em main.js. Copiado da cópia já
+  // desempacotada pelo pack.js (bin/resources/app.asar.unpacked/wallpaper),
+  // fonte única de verdade, em vez de ler wallpaper/ direto (evita duas
+  // lógicas de "qual é o conteúdo real" divergindo).
+  const wallpaperUnpackedSrc = path.join(root, 'bin', 'resources', 'app.asar.unpacked', 'wallpaper');
+  if (fs.existsSync(wallpaperUnpackedSrc)) {
+    const whContentDir = path.join(whDistDir, 'content');
+    fs.mkdirSync(whContentDir, { recursive: true });
+    spawnSync('xcopy', [`"${wallpaperUnpackedSrc}"`, `"${whContentDir}"`, '/E', '/I', '/Q'], { shell: true });
+    whBundled = true;
+  } else {
+    console.warn('bin/resources/app.asar.unpacked/wallpaper não encontrado — rode "node scripts/pack.js" antes deste script. WallpaperHost.exe ficou sem conteúdo pra servir.');
+  }
   console.log('WallpaperHost.exe empacotado em dist/Engine Wallpaper/wallpaperhost/');
 }
+
+// --- 5. Assets de release prontos pra upload (auto-update leve + instalação manual) ---
+// wallpaperhost.zip: pequeno (só o runtime .NET self-contained + conteúdo
+// web), o segundo asset opcional que apply-update (main.js) sabe baixar e
+// trocar sozinho junto do app.asar — ver memória project_update_checker.
+// EngineWallpaper-<versão>-win64.zip: pacote completo, pra instalação manual
+// do zero (o auto-update não serve pra quem ainda não tem o app instalado).
+// Compress-Archive (PowerShell) em vez de alguma lib de zip em Node — mesma
+// ferramenta já usada manualmente nesta sessão pra gerar as releases, sem
+// dependência nova.
+console.log('\nGerando assets de release (.zip)...');
+if (whBundled) {
+  const whZipPath = path.join(distRoot, 'wallpaperhost.zip');
+  spawnSync('powershell', [
+    '-NoProfile', '-Command',
+    `Compress-Archive -Path '${whDistDir}\\*' -DestinationPath '${whZipPath}' -Force`,
+  ], { stdio: 'inherit' });
+  console.log(fs.existsSync(whZipPath)
+    ? `wallpaperhost.zip pronto (${(fs.statSync(whZipPath).size / 1024 / 1024).toFixed(1)} MB)`
+    : 'Falha ao gerar wallpaperhost.zip — Compress-Archive não rodou.');
+}
+
+const appVersion = require(path.join(root, 'package.json')).version;
+const fullZipPath = path.join(distRoot, `EngineWallpaper-${appVersion}-win64.zip`);
+spawnSync('powershell', [
+  '-NoProfile', '-Command',
+  `Compress-Archive -Path '${distApp}\\*' -DestinationPath '${fullZipPath}' -Force`,
+], { stdio: 'inherit' });
+console.log(fs.existsSync(fullZipPath)
+  ? `EngineWallpaper-${appVersion}-win64.zip pronto (${(fs.statSync(fullZipPath).size / 1024 / 1024).toFixed(1)} MB)`
+  : 'Falha ao gerar o zip completo — Compress-Archive não rodou.');
 
 // --- Done ---
 const size = dirSizeMB(distApp);

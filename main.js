@@ -452,11 +452,23 @@ function notifyDisplaysChanged() {
 // não existe de verdade no disco pra qualquer outro processo. Confirmado ao
 // vivo (2026-07-23): passar isso pro WallpaperHost.exe quebrava na hora com
 // "O sistema não pode encontrar o caminho especificado" assim que o toggle
-// era ligado. scripts/pack.js agora roda `asar pack --unpack-dir wallpaper`,
-// deixando uma cópia de verdade em app.asar.unpacked/wallpaper — sempre no
-// mesmo lugar relativo a process.resourcesPath, tanto em dev quanto no
-// pacote final.
+// era ligado.
+//
+// Caminho principal: pasta irmã do próprio exe (scripts/build-dist.js copia
+// wallpaper/ pra dentro de wallpaperhost/content/, junto do WallpaperHost.exe
+// publicado) — mesma convenção que getWallpaperHostExePath() (src/wallpaper-
+// host-process.js) já usa pro .exe em si. Importante ficarem SEMPRE juntos
+// como uma unidade só: o auto-update leve (apply-update, mais abaixo) troca
+// os dois pelo mesmo asset de release (wallpaperhost.zip) quando existe, sem
+// nunca deixar um wallpaper.js novo conversando com um WallpaperHost.exe
+// velho (ou vice-versa) — ver memória project_update_checker.
+//
+// Fallback: app.asar.unpacked/wallpaper (scripts/pack.js roda `asar pack
+// --unpack-dir wallpaper`) — cobre dev (bin/wallpaperhost/ nunca existe ali)
+// e instalações de antes desta mudança, que só tinham esse caminho.
 function getWallpaperContentDir() {
+  const sibling = path.join(path.dirname(process.execPath), 'wallpaperhost', 'content');
+  if (fs.existsSync(sibling)) return sibling;
   return path.join(process.resourcesPath, 'app.asar.unpacked', 'wallpaper');
 }
 
@@ -2297,11 +2309,21 @@ async function checkForUpdates() {
     // fallback de abrir a página da release no navegador.
     const asset = Array.isArray(data.assets) ? data.assets.find(a => /^app\.asar$/i.test(a.name)) : null;
 
+    // Segundo asset opcional, "wallpaperhost.zip" — cobre o WallpaperHost.exe
+    // (Modo de compatibilidade WebView2, ver getWallpaperContentDir/
+    // spawnWallpaperWindowOrHost) e o wallpaper/ que ele serve, que app.asar
+    // sozinho nunca atualiza (é um binário .NET compilado separado, nunca
+    // fez parte do asar). A maioria das releases não mexe nisso — fica null
+    // e apply-update pula essa parte inteira, sem mudar o fluxo de sempre.
+    const whAsset = Array.isArray(data.assets) ? data.assets.find(a => /^wallpaperhost\.zip$/i.test(a.name)) : null;
+
     _pendingUpdateInfo = {
       version: remoteVersion,
       url: data.html_url,
       assetUrl: asset ? asset.browser_download_url : null,
       assetSize: asset ? asset.size : null,
+      wallpaperhostAssetUrl: whAsset ? whAsset.browser_download_url : null,
+      wallpaperhostAssetSize: whAsset ? whAsset.size : null,
     };
     if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('update-available', _pendingUpdateInfo);
   } catch (err) {
@@ -2387,8 +2409,26 @@ ipcMain.handle('apply-update', async () => {
       throw new Error('Download incompleto ou corrompido.');
     }
 
-    const targetAsarPath = path.join(process.resourcesPath, 'app.asar');
+    // Segundo asset opcional (WallpaperHost.exe + conteúdo, ver
+    // checkForUpdates acima) — baixado só quando a release realmente inclui
+    // ele. Reusa o mesmo httpDownload; nenhuma mudança no fluxo de quem só
+    // tem o app.asar de sempre.
     const exePath = process.execPath;
+    let wallpaperhostZipTmpPath = null;
+    if (_pendingUpdateInfo.wallpaperhostAssetUrl) {
+      wallpaperhostZipTmpPath = path.join(updateDir, 'wallpaperhost-update.zip');
+      appLog('Baixando componente WallpaperHost.exe (Modo de compatibilidade WebView2)...');
+      sendProgress({ status: 'downloading', pct: 0, component: 'wallpaperhost' });
+      await httpDownload(_pendingUpdateInfo.wallpaperhostAssetUrl, wallpaperhostZipTmpPath, (received, total) => {
+        sendProgress({ status: 'downloading', pct: total ? received / total : null, received, total, component: 'wallpaperhost' });
+      });
+      const whDownloadedSize = fs.statSync(wallpaperhostZipTmpPath).size;
+      if (!whDownloadedSize || (_pendingUpdateInfo.wallpaperhostAssetSize && whDownloadedSize !== _pendingUpdateInfo.wallpaperhostAssetSize)) {
+        throw new Error('Download do componente WallpaperHost.exe incompleto ou corrompido.');
+      }
+    }
+
+    const targetAsarPath = path.join(process.resourcesPath, 'app.asar');
     const pid = process.pid;
     const batPath = path.join(updateDir, 'apply.bat');
     // Confirmado ao vivo (2026-07-20): esse script ficou preso pra sempre
@@ -2422,6 +2462,20 @@ ipcMain.handle('apply-update', async () => {
     // (ver applyUpdateLogPath mais abaixo em app.whenReady) lê e mostra esse
     // arquivo na aba Log de verdade antes de apagar.
     const applyLogPath = path.join(updateDir, 'apply-log.txt');
+    // Só entra no .bat quando a release realmente tem o segundo asset — pra
+    // quem não tem (a maioria), o script gerado fica byte-a-byte igual ao de
+    // sempre, nenhuma linha nova, nenhum taskkill/Expand-Archive.
+    // taskkill aqui é rede de segurança extra: before-quit (main.js) já mata
+    // todo processo WallpaperHost.exe conhecido antes do app.quit(), mas
+    // isso fecha a pequena janela de corrida entre esse kill() assíncrono e
+    // o rmdir tentando apagar uma pasta ainda em uso.
+    const wallpaperhostDir = path.join(path.dirname(exePath), 'wallpaperhost');
+    const wallpaperhostSwapLines = wallpaperhostZipTmpPath ? [
+      `echo [%date% %time%] Trocando componente WallpaperHost.exe... >> "${applyLogPath}"`,
+      `taskkill /F /IM WallpaperHost.exe >nul 2>>"${applyLogPath}"`,
+      `if exist "${wallpaperhostDir}" rmdir /S /Q "${wallpaperhostDir}"`,
+      `powershell -NoProfile -Command "Expand-Archive -Path '${wallpaperhostZipTmpPath}' -DestinationPath '${wallpaperhostDir}' -Force" >>"${applyLogPath}" 2>&1`,
+    ] : [];
     const batContents = [
       '@echo off',
       `echo [%date% %time%] Iniciando, esperando PID ${pid} fechar... > "${applyLogPath}"`,
@@ -2436,6 +2490,7 @@ ipcMain.handle('apply-update', async () => {
       ':swap',
       `echo [%date% %time%] Processo antigo encerrado (ou limite atingido). Copiando app.asar... >> "${applyLogPath}"`,
       `copy /Y "${downloadTmpPath}" "${targetAsarPath}" >nul 2>>"${applyLogPath}"`,
+      ...wallpaperhostSwapLines,
       `echo [%date% %time%] Copiado. Reabrindo o app... >> "${applyLogPath}"`,
       `start "" "${exePath}"`,
       'del "%~f0"',
