@@ -2262,58 +2262,20 @@ function parseSingleWorkshopItem(wpDir, id) {
   if (isPreset) {
     // Achado ao vivo 2026-07-24: um "Preset" não é um wallpaper web
     // independente — ele referencia (via "dependency") outro item da
-    // Workshop que é o motor Web de verdade (index.html + schema completo
-    // de propriedades em general.properties), e só guarda os VALORES
-    // customizados desse preset específico (imagem de fundo, config de
-    // relógio, etc.) em "preset". O motor fica numa pasta IRMÃ (mesmo
-    // content/431960/, outro workshopId) — se ela já foi baixada (ver
-    // download-workshop-item/steamcmd-download-item, que agora baixam a
-    // dependency junto), renderiza o motor de verdade com os valores do
-    // preset aplicados via window.wallpaperPropertyListener.applyUserProperties
-    // (mesmo mecanismo que qualquer wallpaper "web" normal já usa, ver
-    // 'web-wallpaper-show'). Sem a dependency baixada, cai pro fallback de
-    // imagem estática (igual "scene" não suportada) em vez de recusar tudo.
+    // Workshop que é o motor Web de verdade. TENTAMOS renderizar esse motor
+    // de verdade (index.html + applyUserProperties com os valores do
+    // preset) — corrigiu um bug real de URL duplicada (file:///file:///),
+    // mas mesmo depois disso a tela continuou preta na aplicação real. Esse
+    // motor específico desenha tudo via Canvas/createjs (Arthesian Library +
+    // módulos de visualizer/clock/grid próprios), não HTML/CSS simples como
+    // a maioria dos wallpapers "web" — e sem conseguir ver o console de
+    // erros de verdade desta sessão (sem GUI, ver
+    // project_gui_testing_limitation), não dava pra depurar mais fundo às
+    // cegas. Decisão explícita do usuário: manter só o fallback confiável de
+    // imagem estática (igual "scene" não suportada) em vez de continuar
+    // tentando o motor completo. Prefere o background_image real do preset
+    // à preview (que é só uma miniatura), quando existir.
     const depId = project.dependency ? String(project.dependency).match(/\d+/)?.[0] : null;
-    const depDir = depId ? path.join(path.dirname(wpDir), depId) : null;
-    const depProjectPath = depDir ? path.join(depDir, 'project.json') : null;
-    if (depProjectPath && fs.existsSync(depProjectPath)) {
-      let depProject = null;
-      try { depProject = JSON.parse(fs.readFileSync(depProjectPath, 'utf-8')); } catch { depProject = null; }
-      const depType = depProject ? (depProject.type || '').toLowerCase() : '';
-      const depFile = depProject && depProject.file ? path.join(depDir, depProject.file) : null;
-      if (depType === 'web' && depFile && fs.existsSync(depFile)) {
-        const depProperties = depProject.general && depProject.general.properties ? depProject.general.properties : null;
-        // Propriedades tipo "file" (ex: background_image) apontam pra um
-        // caminho relativo — precisa resolver dentro da pasta do PRESET
-        // (onde a imagem de verdade escolhida pelo autor do preset mora),
-        // não da pasta do motor (que só tem os assets padrão dele).
-        const options = {};
-        if (depProperties) {
-          for (const [key, val] of Object.entries(project.preset || {})) {
-            if (val === null || val === undefined) continue;
-            const schema = depProperties[key];
-            if (schema && schema.type === 'file' && typeof val === 'string') {
-              const assetPath = path.join(wpDir, val);
-              options[key] = fs.existsSync(assetPath) ? 'file:///' + assetPath.replace(/\\/g, '/') : val;
-            } else {
-              options[key] = val;
-            }
-          }
-        }
-        return {
-          workshopId: id,
-          name: project.title || `Workshop ${id}`,
-          type: 'url',
-          src: 'file:///' + depFile.replace(/\\/g, '/'),
-          preview,
-          tags: Array.isArray(project.tags) ? project.tags : [],
-          properties: depProperties,
-          options,
-          presetOf: depId,
-        };
-      }
-    }
-
     const bgRel = project.preset.background_image;
     let src = preview;
     if (typeof bgRel === 'string') {
@@ -2329,7 +2291,6 @@ function parseSingleWorkshopItem(wpDir, id) {
       preview: preview || src,
       tags: Array.isArray(project.tags) ? project.tags : [],
       presetOf: depId,
-      presetFallbackReason: depId ? 'dependency_not_downloaded' : 'no_dependency',
     };
   }
 
@@ -3495,34 +3456,11 @@ ipcMain.handle('steamcmd-download-item', async (_, { username, workshopId }) => 
 
   const contentDir = path.join(steamCmdDir, 'steamapps', 'workshop', 'content', '431960', id);
   if (fs.existsSync(contentDir) && fs.readdirSync(contentDir).length > 0) {
-    // Itens "Preset" da Wallpaper Engine (ver parseSingleWorkshopItem) não
-    // são wallpapers independentes — referenciam outro item via
-    // "dependency" que é o motor Web de verdade. Sem esse segundo item
-    // baixado, o preset só consegue cair no fallback de imagem estática.
-    // Baixa a dependency também, antes de importar, se ainda não estiver
-    // presente (mesma pasta content/431960/, outro workshopId).
-    try {
-      const pf = path.join(contentDir, 'project.json');
-      if (fs.existsSync(pf)) {
-        const proj = JSON.parse(fs.readFileSync(pf, 'utf-8'));
-        const depId = (!proj.type && proj.preset && proj.dependency) ? String(proj.dependency).match(/\d+/)?.[0] : null;
-        if (depId) {
-          const depDir = path.join(steamCmdDir, 'steamapps', 'workshop', 'content', '431960', depId);
-          if (!(fs.existsSync(depDir) && fs.readdirSync(depDir).length > 0)) {
-            appLog(`Item ${id} é um "Preset" da Wallpaper Engine — baixando também o motor do qual ele depende (item ${depId})...`);
-            if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('steamcmd-status', { state: 'starting' });
-            await runSteamCmdWithFallback(exePath, [
-              '+login', username,
-              '+workshop_download_item', '431960', depId, 'validate',
-              '+quit',
-            ], username);
-          }
-        }
-      }
-    } catch (err) {
-      appLog.warn('Falha ao checar/baixar a dependency de um preset: ' + err.message);
-    }
-
+    // Itens "Preset" da Wallpaper Engine sempre caem no fallback de imagem
+    // estática (ver parseSingleWorkshopItem) — não baixamos mais a
+    // "dependency" (o motor de verdade), pois tentamos renderizá-lo e não
+    // funcionou (tela preta, sem conseguir depurar mais fundo sem GUI real).
+    // Baixar esse segundo item só desperdiçaria banda/disco sem usar pra nada.
     const wpItem = importFromContentDir(contentDir, id);
     if (wpItem) {
       appLog.ok('Item baixado via SteamCMD e importado com sucesso!');
