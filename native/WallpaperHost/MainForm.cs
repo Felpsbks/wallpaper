@@ -109,7 +109,18 @@ public class MainForm : Form
                 "--disable-renderer-backgrounding " +
                 "--disable-background-timer-throttling",
         };
-        var env = await Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(null, null, envOptions);
+        // main.js spawna um WallpaperHost.exe POR MONITOR (mesmo exe, mesmo
+        // caminho, processos diferentes) — passar null aqui faz o WebView2
+        // cair na pasta de perfil PADRÃO, derivada só do caminho do exe, que
+        // fica IGUAL pra todos os processos. Dois processos tentando abrir a
+        // mesma pasta de perfil ao mesmo tempo colidem — confirmado ao vivo
+        // no PC real com 2 monitores: COMException 0x8007139F ("o grupo ou
+        // recurso não está no estado correto") direto em
+        // CreateCoreWebView2ControllerAsync, e funcionava normal com 1
+        // monitor só (onde só existe 1 processo, sem ninguém pra colidir).
+        // Environment.ProcessId garante uma pasta só pra este processo.
+        var userDataFolder = Path.Combine(Path.GetTempPath(), "EngineWallpaperHostWV2_" + Environment.ProcessId);
+        var env = await Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(null, userDataFolder, envOptions);
         await _webView.EnsureCoreWebView2Async(env);
 
         // Filtros de bloqueio de anúncio do YouTube ficam ativos pro processo
