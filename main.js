@@ -1184,7 +1184,9 @@ function startWorkerWWatchdog() {
       console.log('[watchdog] wallpaper window not correctly embedded — re-attaching');
       embedWallpaperBehindDesktop(win);
     }
-  }, 1000);
+  }, 3000); // isEmbeddedCorrectly() já evita o reencaixe caro na maioria dos ticks
+            // (só a checagem em si roda toda vez) — 1s era mais frequente do
+            // que precisa pra pegar Win+D/recriação do WorkerW a tempo.
 }
 
 // ---- Autostart (Startup-folder .lnk, not the Registry Run key) ----

@@ -698,10 +698,13 @@ body::after {
 
 /* Library Grid — mesmo tamanho de card compacto da aba Descobrir (.wp-card),
    em vez dos cards grandes de antes que só cabiam 1 por linha. */
-/* Largura fixa (não 1fr) — cartões não devem crescer/encolher pra preencher
-   a linha; ficam sempre no mesmo tamanho, com espaço sobrando à direita nas
-   linhas incompletas, em vez de "esticar" conforme muda a quantidade de itens. */
-#wallpaper-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, var(--lib-card-min, 150px)); gap: 16px; padding: 20px 24px; align-content: start; }
+/* Cresce um pouco (até +60px do tamanho base) pra não ficar minúsculo/tipo
+   "pílula" quando cabem muitas colunas na tela, mas sem 1fr puro — o teto
+   evita que o card também não estoure de tamanho com poucos itens, e por
+   ser um intervalo fixo (não um "preencha o resto"), o tamanho de cada
+   coluna não varia conforme a quantidade de itens muda (mesmo cartão em
+   qualquer linha, cheia ou não). */
+#wallpaper-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--lib-card-min, 180px), calc(var(--lib-card-min, 180px) + 60px))); gap: 16px; padding: 20px 24px; align-content: start; }
 .wallpaper-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; position: relative; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s; }
 .wallpaper-card:hover { transform: scale(1.04); box-shadow: 0 8px 24px rgba(124, 58, 237, 0.25); border-color: var(--accent); }
 .wallpaper-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
