@@ -762,6 +762,8 @@ body::after {
 .lib-view-btn:hover { color: var(--text); }
 .lib-view-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 #lib-size-slider { width: 90px; accent-color: var(--accent); }
+.lib-volume-control { display: flex; align-items: center; gap: 6px; color: var(--text2); padding-right: 4px; border-right: 1px solid var(--border); margin-right: 4px; }
+#lib-volume-slider { width: 70px; accent-color: var(--accent); }
 
 
 /* =========================================

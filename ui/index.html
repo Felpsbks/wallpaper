@@ -110,17 +110,6 @@
       <div class="stat-row-mini"><span>FPS</span><span id="stat-fps-val">--</span></div>
     </div>
 
-    <!-- Volume de acesso rápido — mesmo valor de "Volume do vídeo" em
-         Configurações, só que sem precisar abrir a tela de Configurações
-         toda vez. Os dois campos ficam sincronizados (ver ui/app.js). -->
-    <div class="system-stats" style="margin-top:14px;">
-      <div class="nav-section-label" style="padding-left:0;margin-bottom:10px;">VOLUME</div>
-      <div class="range-row">
-        <input type="range" id="sidebar-volume" min="0" max="100" value="50" style="flex:1" />
-        <span class="range-val" id="sidebar-volume-val">50%</span>
-      </div>
-    </div>
-
     <div class="update-banner" id="update-banner" style="display:none;">
       <div class="update-banner-text">Nova versão <b id="update-banner-version"></b> disponível</div>
       <div class="update-banner-actions">
@@ -335,6 +324,13 @@
             <span id="lib-stats-text">0 wallpapers</span>
           </div>
           <div class="lib-stats-right">
+            <!-- Volume de acesso rápido — mesmo valor de "Volume do vídeo" em
+                 Configurações, sincronizado nos dois sentidos (ver ui/app.js),
+                 só que aqui na Biblioteca em vez de precisar abrir Configurações. -->
+            <div class="lib-volume-control" title="Volume">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+              <input type="range" id="lib-volume-slider" min="0" max="100" value="50" title="Volume" />
+            </div>
             <button class="lib-view-btn active" id="lib-view-grid" title="Visualização em grade">
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
             </button>
