@@ -196,7 +196,7 @@ body::after {
 .update-banner-close:hover { background: rgba(255,255,255,0.08); color: var(--text); }
 
 /* User Profile Sidebar (FYNIX Style) */
-.sidebar-user { margin-top: 12px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,0.05); }
+.sidebar-user { margin-top: 12px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,0.05); position: relative; }
 .user-profile { display:flex; align-items:center; gap: 12px; padding: 0 8px; }
 .user-avatar { width:36px; height:36px; border-radius:50%; border: 2px solid var(--accent); object-fit:cover; }
 .user-avatar-fallback {
@@ -205,8 +205,29 @@ body::after {
   display: flex; align-items: center; justify-content: center;
   font-size: 14px; font-weight: 700; color: #fff;
 }
+.user-avatar-btn { background: none; border: none; padding: 0; cursor: pointer; flex-shrink: 0; border-radius: 50%; }
+.user-avatar-btn:hover { filter: brightness(1.15); }
 .user-info { display:flex; flex-direction:column; }
 .user-name { font-size:14px; font-weight:600; color:#fff; }
+
+/* Seletor de avatar — popover acima do widget de usuário na sidebar */
+.avatar-picker {
+  position: absolute; bottom: calc(100% + 8px); left: 8px; right: 8px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
+  padding: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); z-index: 20;
+}
+.avatar-picker-title { font-size: 11px; font-weight: 600; color: var(--text2); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.03em; }
+.avatar-picker-grid { display: flex; gap: 8px; }
+.avatar-picker-option {
+  width: 40px; height: 40px; border-radius: 50%; padding: 0; cursor: pointer;
+  border: 2px solid transparent; background: linear-gradient(135deg, var(--accent), var(--accent2));
+  overflow: hidden; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; font-weight: 700; color: #fff;
+}
+.avatar-picker-option img { width: 100%; height: 100%; object-fit: cover; object-position: top center; display: block; }
+.avatar-picker-option:hover { border-color: var(--text2); }
+.avatar-picker-option.active { border-color: var(--accent); }
 
 /* Sidebar: seção EXPLORAR + painel SISTEMA (uso real de CPU/RAM/FPS) */
 .nav-section-label { font-size: 10px; font-weight: 700; letter-spacing: .06em; color: var(--text2); opacity: .7; padding: 10px 12px 4px; }

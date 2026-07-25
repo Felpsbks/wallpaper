@@ -1474,6 +1474,57 @@ document.addEventListener('DOMContentLoaded', () => {
 // sidebar (EXPLORAR ligado aos filtros reais, painel SISTEMA com CPU/RAM/FPS
 // de verdade) — tudo aqui usa dado real, nada inventado (ver main.js's
 // 'system-stats'/'get-steam-status' e wallpaper.js's 'wallpaper-fps').
+// Seletor de avatar da sidebar — persiste em settings.userAvatar (string
+// vazia = usa o círculo com a inicial do nome, "Padrão"). Busca settings
+// direto via IPC em vez de depender da variável global `settings` (que só
+// fica populada depois que init() resolve, em paralelo com isto) — tanto
+// pra aplicar o avatar salvo ao carregar quanto pra nunca sobrescrever
+// outras configurações com um objeto ainda incompleto ao salvar.
+function initAvatarPicker() {
+  const btn = document.getElementById('user-avatar-btn');
+  const picker = document.getElementById('avatar-picker');
+  const fallback = document.getElementById('user-avatar-fallback');
+  const img = document.getElementById('user-avatar-img');
+  if (!btn || !picker || !fallback || !img) return;
+
+  function applyAvatar(src) {
+    if (src) {
+      img.src = src;
+      img.style.display = 'block';
+      fallback.style.display = 'none';
+    } else {
+      img.style.display = 'none';
+      fallback.style.display = 'flex';
+    }
+    picker.querySelectorAll('.avatar-picker-option').forEach(opt => {
+      opt.classList.toggle('active', (opt.dataset.avatar || '') === (src || ''));
+    });
+  }
+
+  ipc('get-settings').then((s) => applyAvatar((s && s.userAvatar) || ''));
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    picker.style.display = picker.style.display === 'none' ? 'block' : 'none';
+  });
+  document.addEventListener('click', (e) => {
+    if (picker.style.display !== 'none' && !picker.contains(e.target) && !btn.contains(e.target)) {
+      picker.style.display = 'none';
+    }
+  });
+  picker.querySelectorAll('.avatar-picker-option').forEach(opt => {
+    opt.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const src = opt.dataset.avatar || '';
+      applyAvatar(src);
+      picker.style.display = 'none';
+      const current = await ipc('get-settings');
+      settings = { ...(current || {}), userAvatar: src };
+      await ipc('set-settings', settings);
+    });
+  });
+}
+
 function initHeaderAndSystemPanel() {
   // Saudação: nome real da conta do Windows (não temos "nome de exibição"
   // próprio no app hoje) + período do dia real.
@@ -1486,7 +1537,11 @@ function initHeaderAndSystemPanel() {
   const sidebarNameEl = document.getElementById('sidebar-user-name');
   if (sidebarNameEl) sidebarNameEl.textContent = osName || 'Usuário';
   const avatarFallback = document.getElementById('user-avatar-fallback');
-  if (avatarFallback && osName) avatarFallback.textContent = osName[0].toUpperCase();
+  const userInitial = osName ? osName[0].toUpperCase() : 'U';
+  if (avatarFallback) avatarFallback.textContent = userInitial;
+  const avatarOptDefault = document.getElementById('avatar-opt-default');
+  if (avatarOptDefault) avatarOptDefault.textContent = userInitial;
+  initAvatarPicker();
 
   const aboutVersionEl = document.getElementById('about-version');
   if (aboutVersionEl) aboutVersionEl.textContent = appVersion;
@@ -1524,11 +1579,13 @@ function initHeaderAndSystemPanel() {
     });
   }
 
-  // Clicar no nome/avatar do usuário na sidebar também abre Configurações.
-  const sidebarUser = document.querySelector('.sidebar-user');
-  if (sidebarUser) {
-    sidebarUser.style.cursor = 'pointer';
-    sidebarUser.addEventListener('click', () => {
+  // Clicar no nome do usuário na sidebar abre Configurações — o avatar em si
+  // (botão separado, ver initAvatarPicker) abre o seletor de avatar em vez
+  // disso, então não usa o mesmo clique.
+  const sidebarUserName = document.getElementById('sidebar-user-name');
+  if (sidebarUserName) {
+    sidebarUserName.style.cursor = 'pointer';
+    sidebarUserName.addEventListener('click', () => {
       const settingsNav = document.querySelector('.nav-item[data-panel="settings"]');
       if (settingsNav) settingsNav.click();
     });

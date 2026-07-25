@@ -132,11 +132,23 @@
       </div>
     </div>
 
-    <div class="sidebar-user">
+    <div class="sidebar-user" id="sidebar-user">
       <div class="user-profile">
-        <div class="user-avatar-fallback" id="user-avatar-fallback">U</div>
+        <button class="user-avatar-btn" id="user-avatar-btn" title="Escolher avatar">
+          <div class="user-avatar-fallback" id="user-avatar-fallback">U</div>
+          <img class="user-avatar" id="user-avatar-img" style="display:none" alt="Avatar" />
+        </button>
         <div class="user-info">
           <span class="user-name" id="sidebar-user-name">…</span>
+        </div>
+      </div>
+      <div class="avatar-picker" id="avatar-picker" style="display:none">
+        <div class="avatar-picker-title">Escolher avatar</div>
+        <div class="avatar-picker-grid">
+          <button class="avatar-picker-option" id="avatar-opt-default" data-avatar="" title="Padrão"></button>
+          <button class="avatar-picker-option" data-avatar="avatars/miku.png" title="Hatsune Miku"><img src="avatars/miku.png" /></button>
+          <button class="avatar-picker-option" data-avatar="avatars/dandadan.jpg" title="DanDaDan"><img src="avatars/dandadan.jpg" /></button>
+          <button class="avatar-picker-option" data-avatar="avatars/luffy.png" title="One Piece"><img src="avatars/luffy.png" /></button>
         </div>
       </div>
     </div>
