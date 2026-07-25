@@ -4,6 +4,7 @@
 const fs         = require('fs');
 const path       = require('path');
 const { execFileSync, spawnSync } = require('child_process');
+const { signExe } = require('./sign');
 
 const root    = path.join(__dirname, '..');
 const binSrc  = path.join(root, 'bin');
@@ -65,6 +66,11 @@ if (!fs.existsSync(rcedit)) {
   }
 }
 
+// Assinatura com certificado autoassinado local — só some o aviso comum do
+// SmartScreen, e só nesta máquina (ver scripts/sign.js). Não resolve Smart
+// App Control em outras máquinas.
+signExe(exePath);
+
 // --- 4. Publish WallpaperHost.exe (Modo de compatibilidade WebView2) ---
 // NÃO vai dentro de dist/Engine Wallpaper/ (o pacote que todo mundo baixa) —
 // é um runtime .NET self-contained de ~80MB usado só por quem liga o toggle
@@ -88,6 +94,7 @@ if (dotnetResult.status !== 0 || !fs.existsSync(path.join(whPublishSrc, 'Wallpap
 } else {
   fs.mkdirSync(whStagingDir, { recursive: true });
   spawnSync('xcopy', [`"${whPublishSrc}"`, `"${whStagingDir}"`, '/E', '/I', '/Q'], { shell: true });
+  signExe(path.join(whStagingDir, 'WallpaperHost.exe'));
 
   // wallpaper/ precisa andar JUNTO do WallpaperHost.exe, dentro do mesmo
   // zip — ver getWallpaperContentDir() em main.js. Copiado da cópia já
