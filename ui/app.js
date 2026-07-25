@@ -811,17 +811,50 @@ const clockColor     = document.getElementById('clock-color');
 const clockFontSize  = document.getElementById('clock-fontsize');
 const clockFontSizeV = document.getElementById('clock-fontsize-val');
 
+// 'input' dispara a cada pixel arrastado (tempo real); 'change' só dispara
+// quando o botão do slider é solto. saveSettings() é pesada demais pra
+// rodar em 'input' (grava configurações no disco, mexe em autostart/
+// barra de tarefas a cada chamada) — o volume em si já é aplicado ao vivo
+// via o canal leve 'preview-volume' (main.js), e só persiste de verdade em
+// 'change'.
+let _lastNonZeroVolume = 50;
 setVolume.addEventListener('input', () => {
   setVolumeV.textContent = setVolume.value + '%';
   if (libVolumeSlider) libVolumeSlider.value = setVolume.value;
+  ipcRenderer.send('preview-volume', +setVolume.value);
+  updateLibVolumeMuteIcon();
 });
 if (libVolumeSlider) {
   libVolumeSlider.addEventListener('input', () => {
     setVolume.value = libVolumeSlider.value;
     setVolumeV.textContent = libVolumeSlider.value + '%';
+    ipcRenderer.send('preview-volume', +libVolumeSlider.value);
+    updateLibVolumeMuteIcon();
   });
   libVolumeSlider.addEventListener('change', saveSettings);
 }
+const libVolumeMuteBtn = document.getElementById('lib-volume-mute-btn');
+const libVolumeIcon = document.getElementById('lib-volume-icon');
+const VOLUME_ICON_ON = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>';
+const VOLUME_ICON_MUTED = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>';
+function updateLibVolumeMuteIcon() {
+  if (!libVolumeIcon) return;
+  libVolumeIcon.innerHTML = (+libVolumeSlider.value === 0) ? VOLUME_ICON_MUTED : VOLUME_ICON_ON;
+}
+libVolumeMuteBtn?.addEventListener('click', () => {
+  const current = +libVolumeSlider.value;
+  if (current > 0) {
+    _lastNonZeroVolume = current;
+    libVolumeSlider.value = 0;
+  } else {
+    libVolumeSlider.value = _lastNonZeroVolume || 50;
+  }
+  setVolume.value = libVolumeSlider.value;
+  setVolumeV.textContent = libVolumeSlider.value + '%';
+  ipcRenderer.send('preview-volume', +libVolumeSlider.value);
+  updateLibVolumeMuteIcon();
+  saveSettings();
+});
 clockFontSize.addEventListener('input', () => { clockFontSizeV.textContent = clockFontSize.value + 'px'; });
 
 async function saveSettings() {
@@ -2937,6 +2970,8 @@ async function init() {
     setVolume.value = settings.volume ?? 50;
     setVolumeV.textContent = (settings.volume ?? 50) + '%';
     if (libVolumeSlider) libVolumeSlider.value = settings.volume ?? 50;
+    if ((settings.volume ?? 50) > 0) _lastNonZeroVolume = settings.volume;
+    updateLibVolumeMuteIcon();
     setPauseFs.checked = settings.pauseOnFullscreen ?? true;
     setPerfModeFs.checked = settings.performanceModeFullscreen ?? false;
     setMuteFs.checked  = settings.muteOnFullscreen  ?? false;

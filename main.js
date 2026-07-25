@@ -2172,6 +2172,18 @@ ipcMain.handle('get-desktop-audio-source', async () => {
   return sources[0]?.id;
 });
 
+// Preview de volume em tempo real, enquanto o usuário ainda está
+// arrastando o slider (evento 'input') — 'set-settings' completo faz coisa
+// pesada demais pra rodar a cada pixel de arrasto (grava no disco,
+// reescreve chave de autostart no Registro, mexe em visibilidade nativa da
+// barra de tarefas). Esse canal só repassa o volume pros wallpapers ativos
+// via sendToAllWallpapers, sem persistir nada — a persistência de verdade
+// continua acontecendo em set-settings, chamado só quando o usuário solta
+// o slider ('change').
+ipcMain.on('preview-volume', (_e, volume) => {
+  sendToAllWallpapers('update-settings', { volume });
+});
+
 ipcMain.handle('set-settings', async (_, settings) => {
   const prevCompatMode = !!(store.get('settings') || {}).webview2CompatMode;
   store.set('settings', settings);

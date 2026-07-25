@@ -328,7 +328,9 @@
                  Configurações, sincronizado nos dois sentidos (ver ui/app.js),
                  só que aqui na Biblioteca em vez de precisar abrir Configurações. -->
             <div class="lib-volume-control" title="Volume">
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+              <button class="lib-volume-mute-btn" id="lib-volume-mute-btn" title="Mudo">
+                <svg id="lib-volume-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+              </button>
               <input type="range" id="lib-volume-slider" min="0" max="100" value="50" title="Volume" />
             </div>
             <button class="lib-view-btn active" id="lib-view-grid" title="Visualização em grade">
