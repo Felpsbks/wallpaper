@@ -46,6 +46,14 @@ Write-Host "[sign] certificado criado e importado em Raizes Confiaveis (CurrentU
   }
 }
 
+// Achado ao vivo (2026-07-24): assinar logo depois do rcedit terminar de
+// embutir o ícone às vezes falhava com "%1 não é um aplicativo Win32
+// válido" — o arquivo checado alguns minutos depois estava perfeitamente
+// válido (cabeçalho MZ correto, tamanho certo). Mesma classe de corrida
+// intermitente já vista em pack.js (main.js) e build-dist.js (xcopy do
+// app.asar) nesta mesma sessão — algo (bem provável antivírus) segurando
+// uma leitura logo após uma escrita grande. Retry com pausa curta em vez
+// de desistir na primeira falha.
 function signExe(exePath) {
   if (!fs.existsSync(exePath)) {
     console.warn(`[sign] arquivo não encontrado, pulando: ${exePath}`);
@@ -66,13 +74,20 @@ $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate
 $result = Set-AuthenticodeSignature -FilePath "${exePath}" -Certificate $cert -HashAlgorithm SHA256
 if ($result.Status -ne 'Valid') { Write-Error "assinatura ficou com status $($result.Status): $($result.StatusMessage)"; exit 1 }
 `;
-  const result = runPs(ps);
-  if (result.status !== 0) {
-    console.warn(`[sign] falha ao assinar ${exePath} — build segue sem assinatura nesse arquivo.`);
-    return false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const result = runPs(ps);
+    if (result.status === 0) {
+      console.log(`[sign] assinado (certificado autoassinado local): ${path.basename(exePath)}`);
+      return true;
+    }
+    console.warn(`[sign] falha ao assinar ${exePath} — tentativa ${attempt}/3.`);
+    if (attempt < 3) {
+      const until = Date.now() + 2000 * attempt;
+      while (Date.now() < until) { /* pausa síncrona curta antes de tentar de novo */ }
+    }
   }
-  console.log(`[sign] assinado (certificado autoassinado local): ${path.basename(exePath)}`);
-  return true;
+  console.warn(`[sign] desisti de assinar ${exePath} depois de 3 tentativas — build segue sem assinatura nesse arquivo.`);
+  return false;
 }
 
 module.exports = { signExe, ensureCert };

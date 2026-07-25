@@ -32,10 +32,47 @@ for (const entry of fs.readdirSync(binSrc)) {
   const dst  = path.join(distApp, name);
 
   if (fs.statSync(src).isDirectory()) {
-    spawnSync('xcopy', [`"${src}"`, `"${dst}"`, '/E', '/I', '/Q'], { shell: true });
+    copyDirWithVerify(src, dst);
   } else {
     fs.copyFileSync(src, dst);
   }
+}
+
+// Achado ao vivo (2026-07-24): xcopy de bin/resources/ (o app.asar de
+// ~40MB) pra dist/ às vezes termina com status 0 ("copiado com sucesso")
+// mas o arquivo de destino sai MENOR que o original — sem nenhum erro
+// visível, sem detecção nova no Windows Defender no momento, reproduzido
+// duas vezes rodando o pipeline completo (gen-icon+pack+build-dist em
+// sequência) e nenhuma vez isolado — tudo aponta pra alguma varredura em
+// tempo real (antivírus) segurando uma leitura do arquivo recém-escrito
+// bem nesse instante. Sem esse retry, isso publicava silenciosamente uma
+// release faltando main.js inteiro (app não abre pra ninguém). Compara o
+// tamanho total de cada árvore copiada contra a original; se não bater,
+// apaga e tenta de novo (até 3x, com uma pequena pausa).
+function dirSizeBytes(dir) {
+  let total = 0;
+  for (const e of fs.readdirSync(dir)) {
+    const p = path.join(dir, e);
+    const s = fs.statSync(p);
+    total += s.isDirectory() ? dirSizeBytes(p) : s.size;
+  }
+  return total;
+}
+function copyDirWithVerify(src, dst) {
+  const expected = dirSizeBytes(src);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (fs.existsSync(dst)) fs.rmSync(dst, { recursive: true, force: true });
+    spawnSync('xcopy', [`"${src}"`, `"${dst}"`, '/E', '/I', '/Q'], { shell: true });
+    const actual = fs.existsSync(dst) ? dirSizeBytes(dst) : -1;
+    if (actual === expected) return;
+    console.warn(`Cópia de "${path.basename(src)}" incompleta (esperado ${expected} bytes, veio ${actual}) — tentativa ${attempt}/3, tentando de novo...`);
+    if (attempt < 3) {
+      const waitMs = 1500 * attempt;
+      const until = Date.now() + waitMs;
+      while (Date.now() < until) { /* pausa síncrona curta antes de tentar de novo */ }
+    }
+  }
+  throw new Error(`Falha ao copiar "${src}" pra "${dst}" corretamente depois de 3 tentativas — build abortado antes de publicar algo quebrado.`);
 }
 
 // --- 3. Apply icon + version info via rcedit ---

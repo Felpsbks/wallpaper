@@ -46,12 +46,33 @@ const outAsar = path.join(resDir, 'app.asar');
   }
 })();
 
+// Achado ao vivo (2026-07-24): main.js sumia silenciosamente de dentro do
+// .asar final em builds intermitentes — nem sempre, sem erro nenhum visível
+// em nenhuma etapa (copyFileSync não lança, xcopy termina com status 0,
+// `asar pack` termina com sucesso). Nenhuma detecção nova do Windows
+// Defender no momento certo pra provar de vez, mas o padrão bate com
+// varredura em tempo real segurando/removendo um arquivo recém-escrito bem
+// no meio da cópia — a mesma classe de interferência que já causou EBUSY
+// nesta mesma pasta temp antes. package.json (mesmo loop, mesmo método)
+// nunca some; main.js sim, de forma intermitente. Retry com verificação de
+// tamanho evita publicar silenciosamente uma release sem main.js (app não
+// abriria pra ninguém).
+function copyFileWithVerify(src, dst) {
+  const expectedSize = fs.statSync(src).size;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    fs.copyFileSync(src, dst);
+    if (fs.existsSync(dst) && fs.statSync(dst).size === expectedSize) return;
+    console.warn(`Cópia de "${path.basename(src)}" incompleta — tentativa ${attempt}/3, tentando de novo...`);
+  }
+  throw new Error(`Falha ao copiar "${src}" corretamente depois de 3 tentativas — build abortado.`);
+}
+
 console.log('Preparing source...');
 if (fs.existsSync(tmpSrc)) fs.rmSync(tmpSrc, { recursive: true });
 fs.mkdirSync(path.join(tmpSrc, 'node_modules'), { recursive: true });
 
 for (const f of ['main.js', 'package.json']) {
-  fs.copyFileSync(path.join(root, f), path.join(tmpSrc, f));
+  copyFileWithVerify(path.join(root, f), path.join(tmpSrc, f));
 }
 for (const d of ['src', 'wallpaper', 'ui', 'assets']) {
   const src = path.join(root, d);
@@ -65,6 +86,25 @@ const nmDst = path.join(tmpSrc, 'node_modules');
 for (const mod of fs.readdirSync(nmSrc)) {
   if (mod === 'electron' || mod === '.bin') continue;
   spawnSync('xcopy', [`"${path.join(nmSrc, mod)}"`, `"${path.join(nmDst, mod)}"`, '/E', '/I', '/Q'], { shell: true });
+}
+
+// Recopia main.js/package.json aqui de novo, o mais perto possível do
+// empacotamento — confirmado ao vivo que o primeiro copyFileWithVerify lá
+// em cima às vezes "passa" (tamanho bate na hora) mas o arquivo some de
+// tmpSrc segundos depois, durante as cópias de node_modules (mais lentas).
+// Encurtar a janela entre a cópia final e o `asar pack` reduz a chance de
+// pegar isso no meio de novo.
+for (const f of ['main.js', 'package.json']) {
+  copyFileWithVerify(path.join(root, f), path.join(tmpSrc, f));
+}
+
+// Confere que o essencial sobreviveu até aqui ANTES de empacotar — falhar
+// alto e claro agora é muito melhor que empacotar silenciosamente um app.asar
+// incompleto e só descobrir depois de publicado.
+for (const mustExist of ['main.js', 'package.json', 'ui', 'src', 'wallpaper']) {
+  if (!fs.existsSync(path.join(tmpSrc, mustExist))) {
+    throw new Error(`"${mustExist}" não está em ${tmpSrc} depois de preparar a fonte — build abortado antes de empacotar algo incompleto.`);
+  }
 }
 
 fs.mkdirSync(resDir, { recursive: true });
@@ -81,6 +121,15 @@ console.log('Packing ASAR (native addons + wallpaper/ unpacked)...');
 // quanto no pacote final — ver getWallpaperContentDir() em main.js.
 execSync(`npx @electron/asar pack "${tmpSrc}" "${outAsar}" --unpack "**/*.node" --unpack-dir "wallpaper"`, { stdio: 'inherit' });
 fs.rmSync(tmpSrc, { recursive: true });
+
+// Última verificação, agora no .asar de verdade que vai ser publicado — lista
+// o conteúdo empacotado e confere que main.js está lá dentro antes de seguir.
+// Complementa a checagem em tmpSrc acima (cobre também um `asar pack`
+// silenciosamente incompleto, não só a etapa de preparar a fonte).
+const packedList = execSync(`npx @electron/asar list "${outAsar}"`, { encoding: 'utf-8' });
+if (!/[\\/]main\.js$/m.test(packedList)) {
+  throw new Error(`main.js não aparece dentro de ${outAsar} depois de empacotar — build abortado antes de publicar algo quebrado.`);
+}
 
 const size = fs.statSync(outAsar).size;
 console.log(`Done: ${outAsar} (${(size / 1024 / 1024).toFixed(1)} MB)`);
