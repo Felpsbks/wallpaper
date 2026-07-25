@@ -480,6 +480,54 @@ function getWallpaperContentDir() {
 // pelo auto-update leve (checkForUpdates/apply-update, mais abaixo neste
 // arquivo — ver memória project_update_checker). onProgress opcional, pra
 // UI mostrar "Baixando... X%" no toggle enquanto isso acontece.
+// Versão síncrona/pontual do mesmo certificado autoassinado local usado por
+// scheduleExeSelfSign (mais abaixo) — reusa o MESMO arquivo de certificado
+// em userData/codesign/ (gerado uma vez, na primeira coisa que precisar
+// assinar, seja o exe principal ou este). Diferente do exe principal,
+// WallpaperHost.exe não é o processo que está rodando agora, então dá pra
+// assinar direto, sem esperar nenhum PID fechar nem reiniciar nada.
+// A senha do .pfx é gerada aqui em JS (crypto.randomBytes), não dentro do
+// PowerShell — [System.Security.Cryptography.RandomNumberGenerator]::GetBytes
+// (o jeito "moderno" de gerar bytes aleatórios) não existe no Windows
+// PowerShell 5.1 (.NET Framework, não .NET moderno), confirmado ao vivo
+// (MethodNotFound) antes de subir isso. RNGCryptoServiceProvider existe nas
+// duas versões, mas gerar em JS e só embutir o valor já pronto no script
+// evita depender de qualquer API de criptografia específica do PowerShell.
+function ensureLocalCodesignCert() {
+  const codesignDir = path.join(app.getPath('userData'), 'codesign');
+  const pfxPath = path.join(codesignDir, 'codesign-cert.pfx');
+  const pwPath  = path.join(codesignDir, 'codesign-cert.pw.txt');
+  fs.mkdirSync(codesignDir, { recursive: true });
+  let createBlock = '';
+  if (!fs.existsSync(pfxPath) || !fs.existsSync(pwPath)) {
+    const password = require('crypto').randomBytes(24).toString('base64');
+    fs.writeFileSync(pwPath, password, 'utf8');
+    createBlock = `
+$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Engine Wallpaper (autoassinado, local)" -KeyUsage DigitalSignature -FriendlyName "Engine Wallpaper Local Codesign" -CertStoreLocation "Cert:\\CurrentUser\\My" -NotAfter (Get-Date).AddYears(5)
+$pw = ConvertTo-SecureString -String '${password}' -Force -AsPlainText
+Export-PfxCertificate -Cert $cert -FilePath "${pfxPath}" -Password $pw | Out-Null
+Move-Item -Path "Cert:\\CurrentUser\\My\\$($cert.Thumbprint)" -Destination "Cert:\\CurrentUser\\Root" -Force
+`;
+  }
+  return { pfxPath, pwPath, createBlock };
+}
+
+function signExeSync(exePath) {
+  if (!fs.existsSync(exePath)) return;
+  try {
+    const { pfxPath, pwPath, createBlock } = ensureLocalCodesignCert();
+    const password = fs.readFileSync(pwPath, 'utf8');
+    const ps = `
+${createBlock}
+$signCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2("${pfxPath}", '${password}')
+Set-AuthenticodeSignature -FilePath "${exePath}" -Certificate $signCert -HashAlgorithm SHA256 | Out-Null
+`;
+    spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true });
+  } catch (err) {
+    appLog.warn('Falha ao assinar ' + path.basename(exePath) + ' localmente: ' + err.message);
+  }
+}
+
 async function ensureWallpaperHostInstalled(onProgress) {
   const wallpaperhostDir = path.join(path.dirname(process.execPath), 'wallpaperhost');
   const exePath = path.join(wallpaperhostDir, 'WallpaperHost.exe');
@@ -520,6 +568,7 @@ async function ensureWallpaperHostInstalled(onProgress) {
       throw new Error('Falha ao extrair o componente baixado.');
     }
 
+    signExeSync(exePath);
     appLog.ok('Componente do Modo de compatibilidade (WebView2) instalado.');
     onProgress?.({ status: 'done' });
     return { ok: true };
@@ -2658,6 +2707,78 @@ ipcMain.handle('apply-update', async () => {
   }
 });
 
+// Assinatura Authenticode automática, uma única vez por instalação, com
+// certificado autoassinado GERADO NESTA MÁQUINA (userData/codesign/) —
+// decisão explícita do usuário depois de entender a limitação: isso resolve
+// só o aviso comum do SmartScreen ("editor desconhecido"), não o Smart App
+// Control (que ignora certificados autoassinados/raízes locais por design,
+// já que só confia na reputação da nuvem da Microsoft atrelada a uma CA
+// comercial real). Cada máquina gera e confia no próprio certificado — não
+// pede pra ninguém importar uma CA de outra pessoa.
+//
+// Não dá pra assinar o próprio .exe enquanto ele está rodando (o Windows
+// mantém o arquivo em uso pelo processo atual) — reusa o mesmo padrão já
+// validado ao vivo no apply-update logo acima: um .bat descartável espera
+// este PID terminar (mesmo teto de 30s, mesma contagem de linhas do
+// tasklist em vez de findstr por substring), assina, e reabre o app.
+// store.get('exeSelfSigned') garante que isso roda só uma vez, mesmo se
+// falhar (melhor esforço, sem ficar tentando de novo a cada boot).
+function scheduleExeSelfSign() {
+  if (process.platform !== 'win32') return;
+  if (store.get('exeSelfSigned')) return;
+  store.set('exeSelfSigned', true);
+  try {
+    const exePath = process.execPath;
+    const pid = process.pid;
+    const { pfxPath, createBlock } = ensureLocalCodesignCert();
+    const pwPath = path.join(app.getPath('userData'), 'codesign', 'codesign-cert.pw.txt');
+    const password = fs.readFileSync(pwPath, 'utf8');
+    const tmpDir = path.join(app.getPath('temp'), 'engine-wallpaper-selfsign');
+    if (fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const logPath = path.join(tmpDir, 'selfsign-log.txt');
+    const psPath  = path.join(tmpDir, 'selfsign.ps1');
+    const batPath = path.join(tmpDir, 'selfsign.bat');
+    const wallpaperhostExe = path.join(path.dirname(exePath), 'wallpaperhost', 'WallpaperHost.exe');
+
+    const psLines = [
+      `"[$(Get-Date)] iniciando auto-assinatura" | Out-File -Append "${logPath}"`,
+      createBlock,
+      `$signCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2("${pfxPath}", '${password}')`,
+      `$r1 = Set-AuthenticodeSignature -FilePath "${exePath}" -Certificate $signCert -HashAlgorithm SHA256`,
+      `"[$(Get-Date)] assinatura do exe principal: $($r1.Status)" | Out-File -Append "${logPath}"`,
+      `if (Test-Path "${wallpaperhostExe}") {`,
+      `  $r2 = Set-AuthenticodeSignature -FilePath "${wallpaperhostExe}" -Certificate $signCert -HashAlgorithm SHA256`,
+      `  "[$(Get-Date)] assinatura do WallpaperHost.exe: $($r2.Status)" | Out-File -Append "${logPath}"`,
+      `}`,
+    ].join('\r\n');
+    fs.writeFileSync(psPath, psLines);
+
+    const batContents = [
+      '@echo off',
+      'set wait_count=0',
+      ':wait',
+      `for /f %%i in ('tasklist /FI "PID eq ${pid}" /FO CSV /NH 2^>NUL ^| find /C /V ""') do set proc_count=%%i`,
+      'if not "%proc_count%"=="1" goto sign',
+      'set /a wait_count+=1',
+      'if %wait_count% GEQ 30 goto sign',
+      'timeout /t 1 /nobreak >nul',
+      'goto wait',
+      ':sign',
+      `powershell -NoProfile -ExecutionPolicy Bypass -File "${psPath}" >nul 2>>"${logPath}"`,
+      `start "" "${exePath}"`,
+      'del "%~f0"',
+    ].join('\r\n');
+    fs.writeFileSync(batPath, batContents);
+
+    appLog('Assinando o app com certificado local (uma única vez, em segundo plano)...');
+    spawn('cmd.exe', ['/c', batPath], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    setTimeout(() => app.quit(), 300);
+  } catch (err) {
+    appLog.warn('Auto-assinatura local falhou ao agendar: ' + err.message);
+  }
+}
+
 function httpPost(url, formData) {
   return new Promise((resolve, reject) => {
     const data = new URLSearchParams(formData).toString();
@@ -3640,6 +3761,7 @@ app.whenReady().then(async () => {
     // segundo plano).
     setTimeout(checkForUpdates, 8000);
     setInterval(checkForUpdates, 6 * 60 * 60 * 1000);
+    setTimeout(scheduleExeSelfSign, 5000);
   } else if (_isConfigMode) {
     createControlWindow();
   }
