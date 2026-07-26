@@ -2661,8 +2661,15 @@ function httpGet(url) {
 function httpDownload(url, destPath, onProgress) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(destPath);
-    https.get(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
+    // `timeout` aqui é o tempo de INATIVIDADE do socket (não um prazo total —
+    // qualquer byte recebido reseta o contador), então não atrapalha downloads
+    // grandes e legítimos. Sem isso, uma conexão que trava sem nunca emitir
+    // 'error' (ex: a URL assinada de um asset de release que sumiu no meio do
+    // download, caso real visto ao vivo 2026-07-26) prendia o usuário pra
+    // sempre na tela "0% (0 B / 0 B)", sem jeito de saber ou cancelar.
+    const req = https.get(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+      timeout: 20000,
     }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         file.close();
@@ -2684,7 +2691,9 @@ function httpDownload(url, destPath, onProgress) {
       }
       res.pipe(file);
       file.on('finish', () => file.close(() => resolve()));
-    }).on('error', (err) => {
+    });
+    req.on('timeout', () => req.destroy(new Error('Conexão travou (sem resposta) ao baixar a atualização.')));
+    req.on('error', (err) => {
       file.close();
       fs.unlink(destPath, () => {});
       reject(err);
@@ -2782,7 +2791,7 @@ ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedU
 // não tem "novidade" pra quem tá abrindo o app pela primeira vez.
 const WHATS_NEW = {
   version: APP_VERSION,
-  text: 'Novo: Modo Jogo — detecta direto pela Steam quando você começa a jogar (mesmo em janela) e descarrega o wallpaper da memória na hora, recarregando só quando você fecha o jogo, pra não roubar desempenho da sua partida. Avatar da sidebar agora só mostra a foto, maior e sem moldura — editar/trocar/enviar imagem ficou só em Configurações.',
+  text: 'Novo: Modo Jogo — detecta direto pela Steam quando você começa a jogar (mesmo em janela) e descarrega o wallpaper da memória na hora, recarregando só quando você fecha o jogo, pra não roubar desempenho da sua partida. Avatar da sidebar agora só mostra a foto, sem moldura — editar/trocar/enviar imagem ficou só em Configurações. Corrigido: baixar uma atualização podia travar pra sempre em "0%" se a conexão engasgasse, sem erro nem jeito de saber o que aconteceu.',
 };
 ipcMain.handle('get-whats-new', () => {
   if (store.get('lastSeenWhatsNewVersion') === WHATS_NEW.version) return null;
