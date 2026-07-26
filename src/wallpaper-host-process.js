@@ -43,7 +43,13 @@ function getWallpaperHostExePath() {
 // relatório automático pro endpoint de diagnóstico remoto (ver
 // license-server/api/diag-report.js), sem depender do usuário copiar/colar
 // stack trace manualmente.
-function spawnWallpaperHostProcess(display, contentDir, getWallpaperMuted, onFatalLine) {
+// onLine: callback opcional (line, isErr) chamado pra TODA linha de saída do
+// processo — quando presente, substitui o console.log/error espelhado (que
+// só aparece na aba Log da UI, nunca no app-log.txt em disco). Achado ao
+// vivo 2026-07-26 investigando tela preta no modo WebView2: zero rastro em
+// disco da saída do host (os "[embed]"/"[page->host]"/erros do C#), mesma
+// lacuna de log que já atrasou o diagnóstico da tela preta do Electron.
+function spawnWallpaperHostProcess(display, contentDir, getWallpaperMuted, onFatalLine, onLine) {
   const exePath = getWallpaperHostExePath();
   if (!fs.existsSync(exePath)) {
     console.error(`[wallpaperhost] Executável não encontrado em ${exePath} — rode "dotnet publish -c Release -r win-x64 --self-contained true" dentro de native/WallpaperHost antes de ligar o Modo de compatibilidade (WebView2).`);
@@ -60,11 +66,13 @@ function spawnWallpaperHostProcess(display, contentDir, getWallpaperMuted, onFat
   let destroyed = false;
   child.on('exit', (code, signal) => {
     destroyed = true;
-    console.log(`[wallpaperhost] processo (display ${display.id}) saiu: code=${code} signal=${signal}`);
+    const msg = `processo (display ${display.id}) saiu: code=${code} signal=${signal}`;
+    if (onLine) { try { onLine(msg, code !== 0); } catch {} } else { console.log(`[wallpaperhost] ${msg}`); }
   });
   child.on('error', (err) => {
     destroyed = true;
-    console.error(`[wallpaperhost] falha ao iniciar processo (display ${display.id}): ${err.message}`);
+    const msg = `falha ao iniciar processo (display ${display.id}): ${err.message}`;
+    if (onLine) { try { onLine(msg, true); } catch {} } else { console.error(`[wallpaperhost] ${msg}`); }
   });
 
   // stdout/stderr do processo já viram log mirrorado na aba do app (console.log
@@ -80,7 +88,13 @@ function spawnWallpaperHostProcess(display, contentDir, getWallpaperMuted, onFat
         const line = buf.slice(0, idx).replace(/\r$/, '');
         buf = buf.slice(idx + 1);
         if (!line) continue;
-        (isErr ? console.error : console.log)(`[wallpaperhost] ${line}`);
+        if (onLine) {
+          // appLog (via onLine) já espelha na aba Log da UI E grava em disco
+          // — usar console.* junto duplicaria a linha na UI.
+          try { onLine(line, isErr); } catch {}
+        } else {
+          (isErr ? console.error : console.log)(`[wallpaperhost] ${line}`);
+        }
         if (onFatalLine && /\[fatal\]/i.test(line)) {
           try { onFatalLine(line); } catch {}
         }

@@ -656,8 +656,15 @@ function spawnWallpaperWindowOrHost(display) {
   if (settings.webview2CompatMode && process.platform === 'win32' && !_isScreensaver && !_isConfigMode) {
     const { spawnWallpaperHostProcess } = require('./src/wallpaper-host-process');
     const contentDir = getWallpaperContentDir();
+    appLog.debug(`[wallpaperhost] iniciando (displayId=${display.id}) contentDir=${contentDir}`);
     const proc = spawnWallpaperHostProcess(display, contentDir, () => !!store.get('wallpaperMuted'), (line) => {
       reportDiagnostic({ source: 'wallpaperhost', message: line, extra: { displayId: display.id } });
+    }, (line, isErr) => {
+      // Toda a saída do host vai pro appLog (aba Log + app-log.txt em disco)
+      // — antes só ia pro console espelhado (invisível fora da UI aberta),
+      // o que deixou a tela preta do modo WebView2 sem nenhum rastro
+      // diagnosticável (2026-07-26).
+      (isErr ? appLog.err : appLog.debug)(`[wallpaperhost] ${line}`);
     });
     if (proc) {
       wallpaperWindows.set(display.id, proc);
