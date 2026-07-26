@@ -1402,12 +1402,31 @@ function setAutostart(enabled) {
   if (process.platform !== 'win32') return;
 
   const exePath = process.execPath;
-  const workDir = path.dirname(path.dirname(exePath)); // .../bin/electron.exe -> repo root
+  const isDevCopy = path.basename(exePath).toLowerCase() === 'electron.exe';
+  // Dev (bin/electron.exe): trabalha a partir da raiz do repo, como sempre.
+  // Empacotado ("Engine Wallpaper.exe"): o exe mora na RAIZ da instalação —
+  // o dirname duplo antigo apontava pra pasta ACIMA da instalação (ex.:
+  // Downloads\), errado.
+  const workDir = isDevCopy ? path.dirname(path.dirname(exePath)) : path.dirname(exePath);
   const startupDir = path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
   const lnkPath = path.join(startupDir, 'EngineWallpaper.lnk');
 
   const exists = fs.existsSync(lnkPath);
-  if (enabled === exists) return; // already in the desired state — skip the slow PowerShell spawn
+
+  if (enabled && exists) {
+    // Bug real confirmado ao vivo (2026-07-26, mesma família do renderer
+    // stale): só checar "existe um atalho" deixava um .lnk criado por OUTRA
+    // cópia (a de dev, no repo/OneDrive) valendo pra sempre — o boot abria
+    // a cópia errada e a versão instalada "não iniciava com o PC". Regras:
+    // a cópia de dev NUNCA reescreve um atalho existente (não rouba o
+    // autostart da instalação real); a empacotada assume a posse sempre que
+    // o alvo registrado não for ela mesma. O alvo fica registrado na store
+    // (autostartLnkTarget) pra essa checagem ser barata em todo boot, sem
+    // spawn de PowerShell só pra ler o .lnk.
+    if (isDevCopy) return;
+    if (store.get('autostartLnkTarget') === exePath) return;
+  }
+  if (!enabled && !exists) return;
 
   // Always clear the old Run-key entry (harmless if it was never set) so the
   // two mechanisms can never coexist and double-launch the app.
@@ -1415,11 +1434,13 @@ function setAutostart(enabled) {
 
   if (!enabled) {
     try { fs.unlinkSync(lnkPath); } catch {}
+    store.delete('autostartLnkTarget');
     return;
   }
 
   if (createShortcut(exePath, workDir, lnkPath)) {
-    appLog.ok('Atalho de inicialização criado em ' + lnkPath);
+    store.set('autostartLnkTarget', exePath);
+    appLog.ok('Atalho de inicialização criado/atualizado apontando pra ' + exePath);
   }
 }
 
