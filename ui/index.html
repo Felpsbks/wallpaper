@@ -159,6 +159,30 @@
 
   <div id="content">
 
+    <!-- Avatar flutuante — pedido explícito do usuário: "queria que o
+         avatar ficasse em toda as página". Fica FORA de qualquer .panel
+         (irmão deles, não filho), então nunca some ao trocar de aba —
+         diferente do widget da sidebar, que já existia mas ficava "muito
+         escondido" (outro pedido anterior do usuário). -->
+    <div class="header-avatar-wrap header-avatar-wrap-floating">
+      <button class="user-avatar-btn header-avatar-btn" id="header-avatar-btn" title="Escolher avatar">
+        <div class="user-avatar-fallback header-avatar-fallback" id="header-avatar-fallback">U</div>
+        <img class="user-avatar header-avatar" id="header-avatar-img" style="display:none" alt="Avatar" />
+      </button>
+      <div class="avatar-picker header-avatar-picker" id="header-avatar-picker" style="display:none">
+        <div class="avatar-picker-title">Escolher avatar</div>
+        <div class="avatar-picker-grid">
+          <button class="avatar-picker-option" id="avatar-opt-default-header" data-avatar="" title="Padrão"></button>
+          <button class="avatar-picker-option" data-avatar="avatars/miku.png" title="Hatsune Miku"><img src="avatars/miku.png" /></button>
+          <button class="avatar-picker-option" data-avatar="avatars/dandadan.jpg" title="DanDaDan"><img src="avatars/dandadan.jpg" /></button>
+          <button class="avatar-picker-option" data-avatar="avatars/luffy.png" title="One Piece"><img src="avatars/luffy.png" /></button>
+          <button class="avatar-picker-option avatar-picker-upload" id="avatar-upload-btn" title="Enviar sua imagem">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" style="pointer-events:none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- ===== DESCOBRIR (NOVO) ===== -->
     <div class="panel active" id="panel-discover">
       <div class="discover-main">
@@ -168,29 +192,9 @@
         <div class="discover-sticky-header">
           <!-- Header interno transparente -->
           <div class="discover-header discover-header-new">
-            <div class="greeting greeting-with-avatar">
-              <div class="header-avatar-wrap">
-                <button class="user-avatar-btn header-avatar-btn" id="header-avatar-btn" title="Escolher avatar">
-                  <div class="user-avatar-fallback header-avatar-fallback" id="header-avatar-fallback">U</div>
-                  <img class="user-avatar header-avatar" id="header-avatar-img" style="display:none" alt="Avatar" />
-                </button>
-                <div class="avatar-picker header-avatar-picker" id="header-avatar-picker" style="display:none">
-                  <div class="avatar-picker-title">Escolher avatar</div>
-                  <div class="avatar-picker-grid">
-                    <button class="avatar-picker-option" id="avatar-opt-default-header" data-avatar="" title="Padrão"></button>
-                    <button class="avatar-picker-option" data-avatar="avatars/miku.png" title="Hatsune Miku"><img src="avatars/miku.png" /></button>
-                    <button class="avatar-picker-option" data-avatar="avatars/dandadan.jpg" title="DanDaDan"><img src="avatars/dandadan.jpg" /></button>
-                    <button class="avatar-picker-option" data-avatar="avatars/luffy.png" title="One Piece"><img src="avatars/luffy.png" /></button>
-                    <button class="avatar-picker-option avatar-picker-upload" id="avatar-upload-btn" title="Enviar sua imagem">
-                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" style="pointer-events:none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
-                    </button>
-                  </div>
-                </div>
-              </div>
-              <div>
-                <h2 id="discover-greeting">Olá 👋</h2>
-                <p class="greeting-sub">Encontre wallpapers incríveis para seu desktop.</p>
-              </div>
+            <div class="greeting">
+              <h2 id="discover-greeting">Olá 👋</h2>
+              <p class="greeting-sub">Encontre wallpapers incríveis para seu desktop.</p>
             </div>
             <div class="header-right">
               <div class="search-wrap" style="position:relative;">

@@ -499,12 +499,15 @@ body::after {
    explícito do usuário (o da sidebar "fica muito escondido"). Reusa as
    mesmas classes .user-avatar/.user-avatar-fallback/.avatar-picker* da
    sidebar (ver initAvatarWidget em app.js, agora genérico pros dois). */
-.greeting-with-avatar { display: flex; align-items: center; gap: 12px; }
 .header-avatar-wrap { position: relative; flex-shrink: 0; }
-.header-avatar-btn { width: 44px; height: 44px; }
-.header-avatar-fallback, .header-avatar { width: 44px; height: 44px; font-size: 17px; }
-.header-avatar { border-width: 3px; }
-.header-avatar-picker { top: calc(100% + 8px); bottom: auto; left: 0; right: auto; width: max-content; }
+/* Flutua por cima de QUALQUER painel ativo — é irmão dos .panel dentro de
+   #content, não filho de nenhum, então nunca some ao trocar de aba (pedido
+   explícito do usuário: "queria que o avatar ficasse em toda as página"). */
+.header-avatar-wrap-floating { position: absolute; top: 10px; right: 16px; z-index: 50; }
+.header-avatar-btn { width: 36px; height: 36px; }
+.header-avatar-fallback, .header-avatar { width: 36px; height: 36px; font-size: 14px; }
+.header-avatar { border-width: 2px; }
+.header-avatar-picker { top: calc(100% + 8px); bottom: auto; left: auto; right: 0; width: max-content; }
 .avatar-picker-upload { background: var(--bg3); color: var(--text2); display: flex; align-items: center; justify-content: center; }
 .avatar-picker-upload:hover { color: var(--text); }
 .header-right { display: flex; align-items: center; gap: 8px; }
