@@ -3241,11 +3241,11 @@ let _pendingUpdateVersion = null;
 function showUpdateBanner(info) {
   if (!info) return;
   _pendingUpdateVersion = info.version;
-  const banner = document.getElementById('update-banner');
-  const versionEl = document.getElementById('update-banner-version');
-  const btn = document.getElementById('update-banner-download');
+  const modal = document.getElementById('modal-update-available');
+  const versionEl = document.getElementById('update-modal-version');
+  const btn = document.getElementById('btn-update-modal-download');
   if (versionEl) versionEl.textContent = `v${info.version}`;
-  banner.style.display = 'flex';
+  modal.classList.add('open');
 
   const resetButton = () => {
     btn.disabled = false;
@@ -3265,8 +3265,8 @@ function showUpdateBanner(info) {
     });
   };
 
-  document.getElementById('update-banner-dismiss').onclick = async () => {
-    banner.style.display = 'none';
+  document.getElementById('btn-update-modal-dismiss').onclick = async () => {
+    modal.classList.remove('open');
     await ipc('dismiss-update-notice', info.version);
   };
 }
@@ -3319,13 +3319,16 @@ ipc('get-whats-new').then((info) => {
 // (pedido explícito do usuário pra melhorar). Reusa a mesma tela cheia
 // roxa de sempre (dl-loading-screen), com progresso real de bytes baixados.
 ipcRenderer.on('update-apply-progress', (_e, data) => {
-  const btn = document.getElementById('update-banner-download');
+  const btn = document.getElementById('btn-update-modal-download');
   const dlScreen = document.getElementById('dl-loading-screen');
   const dlFill = document.getElementById('dl-progress-fill');
   const dlText = document.getElementById('dl-progress-text');
 
   if (data.status === 'downloading') {
     if (btn) btn.textContent = 'Baixando...';
+    // A tela cheia assume o progresso — o modal já cumpriu seu papel
+    // (perguntar "atualizar agora?"), fechar evita as duas competindo.
+    document.getElementById('modal-update-available')?.classList.remove('open');
     document.getElementById('dl-loading-title').textContent = 'Atualizando o app';
     document.getElementById('dl-loading-subtitle').textContent = _pendingUpdateVersion ? `Versão ${_pendingUpdateVersion}` : '';
     dlScreen.classList.add('visible');

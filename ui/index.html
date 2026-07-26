@@ -135,14 +135,6 @@
       </div>
     </div>
 
-    <div class="update-banner" id="update-banner" style="display:none;">
-      <div class="update-banner-text">Nova versão <b id="update-banner-version"></b> disponível</div>
-      <div class="update-banner-actions">
-        <button class="update-banner-btn" id="update-banner-download">Baixar</button>
-        <button class="update-banner-close" id="update-banner-dismiss" title="Não mostrar de novo">✕</button>
-      </div>
-    </div>
-
     <div class="update-banner" id="monitor-detected-banner" style="display:none;">
       <div class="update-banner-text">🖥️ <span id="monitor-detected-text"></span></div>
       <div class="update-banner-actions">
@@ -1030,6 +1022,23 @@
     </label>
     <div class="modal-actions">
       <button class="btn btn-primary" id="btn-wallpaper-conflict-notice-close">Entendi</button>
+    </div>
+  </div>
+</div>
+
+<!-- "Nova versão disponível" — mesmo pedido/motivo do modal de Novidades
+     logo abaixo: era um banner preso na sidebar (com botão "Baixar"
+     embutido nele) até o usuário clicar ou fechar. Mesma lógica de sempre
+     (showUpdateBanner/apply-update em ui/app.js), só troca onde renderiza. -->
+<div class="modal-backdrop" id="modal-update-available">
+  <div class="modal" style="width:420px;">
+    <h3>🚀 Nova versão disponível</h3>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:20px;line-height:1.6">
+      A versão <b id="update-modal-version"></b> já está pronta pra instalar.
+    </p>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="btn-update-modal-dismiss">Depois</button>
+      <button class="btn btn-primary" id="btn-update-modal-download">Atualizar agora</button>
     </div>
   </div>
 </div>
