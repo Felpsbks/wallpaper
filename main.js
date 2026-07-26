@@ -2165,12 +2165,21 @@ ipcMain.handle('youtube-download-wallpaper', async (event, { videoId, title }) =
   }
 });
 
+// Mesma lacuna do embedWallpaperBehindDesktop (ver comentário lá) — só ia
+// pro terminal, invisível fora de dev. Achado ao vivo 2026-07-25: um caso
+// real de "tela preta" só apareceu o WorkerW embedding OK no log, sem
+// nenhum rastro do lado do vídeo, exatamente porque isso aqui não gravava
+// em disco.
 ipcMain.on('wallpaper-video-error', (event, info) => {
-  console.error(`[wallpaper] video ${info.stage} error (code=${info.code ?? 'n/a'}): ${info.message || 'unknown'} — src=${info.src}`);
+  const msg = `[wallpaper] video ${info.stage} error (code=${info.code ?? 'n/a'}): ${info.message || 'unknown'} — src=${info.src}`;
+  console.error(msg);
+  appLog.err(msg);
 });
 
 ipcMain.on('wallpaper-video-state', (event, info) => {
-  console.log(`[wallpaper] video state: paused=${info.paused} ended=${info.ended} currentTime=${info.currentTime.toFixed(2)} readyState=${info.readyState} networkState=${info.networkState} dims=${info.videoWidth}x${info.videoHeight} src=${info.src}`);
+  const msg = `[wallpaper] video state: paused=${info.paused} ended=${info.ended} currentTime=${info.currentTime.toFixed(2)} readyState=${info.readyState} networkState=${info.networkState} dims=${info.videoWidth}x${info.videoHeight} src=${info.src}`;
+  console.log(msg);
+  appLog.debug(msg);
 });
 
 // Cenas WE que usam algo que nosso decodificador/renderer ainda não sabe ler
