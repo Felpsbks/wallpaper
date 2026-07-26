@@ -943,7 +943,12 @@ body::after {
   backdrop-filter: blur(4px);
 }
 .modal-close:hover { background: rgba(255,255,255,0.2); }
-.modal-close svg { width: 16px; height: 16px; }
+/* pointer-events:none no ícone — SVG feito só de <line> sem fill só captura
+   clique em cima da própria linha (pointer-events:visiblePainted, padrão);
+   no meio do X, onde as duas linhas se cruzam, a área ao redor é vazia e o
+   clique não acionava nada. Com isso, TODO clique dentro do círculo cai
+   direto no botão por trás, o ícone vira só decoração. */
+.modal-close svg { width: 16px; height: 16px; pointer-events: none; }
 
 .modal-hero {
   position: relative;
