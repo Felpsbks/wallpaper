@@ -1811,11 +1811,15 @@ ipcMain.on('wallpaper-click-received', (event, info) => {
 // hidden right when the freeze starts, that's the cause (Chromium stops
 // compositing new frames while a page is "hidden", independent of JS/timers).
 ipcMain.on('wallpaper-visibility-change', (event, info) => {
-  console.log(`[diag] visibilitychange: hidden=${info.hidden} state=${info.state} at ${new Date(info.ts).toLocaleTimeString('pt-BR')}`);
+  const msg = `[diag] visibilitychange: hidden=${info.hidden} state=${info.state} at ${new Date(info.ts).toLocaleTimeString('pt-BR')}`;
+  console.log(msg);
+  appLog.debug(msg);
 });
 
 ipcMain.on('wallpaper-set-attempt', (event, info) => {
-  console.log(`[wallpaper] applying "${info.name || info.id}" type=${info.type} renderType=${info.renderType} src=${info.src}`);
+  const msg = `[wallpaper] applying "${info.name || info.id}" type=${info.type} renderType=${info.renderType} src=${info.src}`;
+  console.log(msg);
+  appLog.debug(msg);
 });
 
 // Wallpaper tipo "web": renderizado via BrowserView (ver comentário acima de
