@@ -134,18 +134,18 @@ if (dotnetResult.status !== 0 || !fs.existsSync(path.join(whPublishSrc, 'Wallpap
   signExe(path.join(whStagingDir, 'WallpaperHost.exe'));
 
   // wallpaper/ precisa andar JUNTO do WallpaperHost.exe, dentro do mesmo
-  // zip — ver getWallpaperContentDir() em main.js. Copiado da cópia já
-  // desempacotada pelo pack.js (bin/resources/app.asar.unpacked/wallpaper),
-  // fonte única de verdade, em vez de ler wallpaper/ direto (evita duas
-  // lógicas de "qual é o conteúdo real" divergindo).
-  const wallpaperUnpackedSrc = path.join(root, 'bin', 'resources', 'app.asar.unpacked', 'wallpaper');
-  if (fs.existsSync(wallpaperUnpackedSrc)) {
+  // zip — ver getWallpaperContentDir() em main.js. Copiado direto da fonte
+  // (wallpaper/ do repo): desde 2026-07-26 o pack.js empacota wallpaper/
+  // INTEIRO dentro do asar (a pasta app.asar.unpacked/wallpaper não existe
+  // mais — era a causa raiz das instalações rodando renderer stale pra
+  // sempre, ver comentário no pack.js), então o repo é a única fonte real.
+  const wallpaperSrc = path.join(root, 'wallpaper');
+  if (fs.existsSync(wallpaperSrc)) {
     const whContentDir = path.join(whStagingDir, 'content');
-    fs.mkdirSync(whContentDir, { recursive: true });
-    spawnSync('xcopy', [`"${wallpaperUnpackedSrc}"`, `"${whContentDir}"`, '/E', '/I', '/Q'], { shell: true });
+    copyDirWithVerify(wallpaperSrc, whContentDir);
     whBundled = true;
   } else {
-    console.warn('bin/resources/app.asar.unpacked/wallpaper não encontrado — rode "node scripts/pack.js" antes deste script. WallpaperHost.exe ficou sem conteúdo pra servir.');
+    console.warn('wallpaper/ não encontrado no repo — WallpaperHost.exe ficou sem conteúdo pra servir.');
   }
 }
 

@@ -108,19 +108,38 @@ for (const mustExist of ['main.js', 'package.json', 'ui', 'src', 'wallpaper']) {
 }
 
 fs.mkdirSync(resDir, { recursive: true });
-console.log('Packing ASAR (native addons + wallpaper/ unpacked)...');
-// wallpaper/ precisa ficar fora do .asar (não só .node) — é o contentDir que
-// main.js passa pro WallpaperHost.exe (Modo de compatibilidade WebView2) via
-// SetVirtualHostNameToFolderMapping do WebView2. Esse processo é nativo, sem
-// nenhuma noção do formato .asar (só o próprio Electron sabe ler de dentro de
-// um .asar de forma transparente) — apontar pra um caminho asar-interno
-// falhava ao vivo com "O sistema não pode encontrar o caminho especificado"
-// (0x80070003) assim que o toggle era ligado, confirmado pelo usuário no PC
-// real. --unpack-dir deixa uma cópia de verdade em app.asar.unpacked/wallpaper/,
-// no mesmo lugar de sempre relativo a process.resourcesPath, tanto em dev
-// quanto no pacote final — ver getWallpaperContentDir() em main.js.
-execSync(`npx @electron/asar pack "${tmpSrc}" "${outAsar}" --unpack "**/*.node" --unpack-dir "wallpaper"`, { stdio: 'inherit' });
+console.log('Packing ASAR (native addons unpacked)...');
+// wallpaper/ agora vai INTEIRO dentro do .asar — sem --unpack-dir. Histórico
+// importante (causa raiz REAL da tela preta encontrada 2026-07-26): quando
+// wallpaper/ ficava fora (app.asar.unpacked/), o auto-update leve só trocava
+// o app.asar — a pasta unpacked NUNCA era atualizada, então toda instalação
+// via zip rodava pra sempre o wallpaper.js da versão do zip original
+// (confirmado ao vivo: instalação em v1.0.59 ainda rodava o renderer da
+// v1.0.27, sem NENHUMA das correções de áudio/volume/diagnóstico — e era por
+// isso que `npm run dev` funcionava e o zip não: o dev reempacota tudo
+// fresco a cada execução). Com wallpaper/ dentro do asar, o update carrega o
+// renderer junto automaticamente, e instalações antigas se curam sozinhas na
+// próxima atualização (o novo asar não marca esses arquivos como unpacked,
+// então o Electron os lê de dentro dele e ignora a pasta stale no disco).
+//
+// O motivo original de deixar fora era o WallpaperHost.exe (WebView2), um
+// processo nativo sem noção do formato .asar — mas esse caso já é coberto
+// pela cópia própria dele em wallpaperhost/content/ (ver build-dist.js e
+// getWallpaperContentDir() em main.js), que o wallpaperhost.zip já
+// distribui e o update já renova.
+execSync(`npx @electron/asar pack "${tmpSrc}" "${outAsar}" --unpack "**/*.node"`, { stdio: 'inherit' });
 fs.rmSync(tmpSrc, { recursive: true });
+
+// Limpa a app.asar.unpacked/wallpaper que packs antigos deixaram em bin/ —
+// com wallpaper/ dentro do asar ela vira peso morto (o Electron nem olha
+// mais pra ela), e sem limpar iria parar nos zips novos à toa, confundindo
+// qualquer diagnóstico futuro. node_modules/ (koffi .node) continua unpacked
+// de verdade e NÃO é tocado aqui.
+const staleUnpackedWallpaper = path.join(resDir, 'app.asar.unpacked', 'wallpaper');
+if (fs.existsSync(staleUnpackedWallpaper)) {
+  fs.rmSync(staleUnpackedWallpaper, { recursive: true, force: true });
+  console.log('Removida app.asar.unpacked/wallpaper stale (agora vive dentro do asar).');
+}
 
 // Última verificação, agora no .asar de verdade que vai ser publicado — lista
 // o conteúdo empacotado e confere que main.js está lá dentro antes de seguir.
@@ -129,6 +148,12 @@ fs.rmSync(tmpSrc, { recursive: true });
 const packedList = execSync(`npx @electron/asar list "${outAsar}"`, { encoding: 'utf-8' });
 if (!/[\\/]main\.js$/m.test(packedList)) {
   throw new Error(`main.js não aparece dentro de ${outAsar} depois de empacotar — build abortado antes de publicar algo quebrado.`);
+}
+// wallpaper.js DENTRO do asar é o que faz o auto-update carregar o renderer
+// junto (ver comentário do pack acima) — se voltar a ficar de fora por
+// qualquer regressão, o bug da instalação-stale volta silenciosamente.
+if (!/[\\/]wallpaper[\\/]wallpaper\.js$/m.test(packedList)) {
+  throw new Error(`wallpaper/wallpaper.js não aparece dentro de ${outAsar} — o auto-update deixaria o renderer stale de novo. Build abortado.`);
 }
 
 const size = fs.statSync(outAsar).size;

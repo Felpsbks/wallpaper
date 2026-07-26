@@ -463,9 +463,14 @@ function notifyDisplaysChanged() {
 // nunca deixar um wallpaper.js novo conversando com um WallpaperHost.exe
 // velho (ou vice-versa) — ver memória project_update_checker.
 //
-// Fallback: app.asar.unpacked/wallpaper (scripts/pack.js roda `asar pack
-// --unpack-dir wallpaper`) — cobre dev (bin/wallpaperhost/ nunca existe ali)
-// e instalações de antes desta mudança, que só tinham esse caminho.
+// Fallback: app.asar.unpacked/wallpaper — SÓ existe em instalações antigas
+// (de quando o pack.js usava --unpack-dir wallpaper). Desde 2026-07-26
+// wallpaper/ vive INTEIRO dentro do asar (causa raiz da tela preta: o
+// auto-update só trocava o asar e a pasta unpacked ficava stale pra sempre,
+// ver comentário no pack.js) — builds novos não geram mais essa pasta.
+// Mantido só como último recurso pra uma instalação antiga que ligue o
+// WebView2 antes do wallpaperhost/ ser baixado; se o caminho não existir,
+// spawnWallpaperWindowOrHost já cai pro Electron normal sozinho.
 function getWallpaperContentDir() {
   const sibling = path.join(path.dirname(process.execPath), 'wallpaperhost', 'content');
   if (fs.existsSync(sibling)) return sibling;
