@@ -2392,6 +2392,33 @@ function applyTaskbarIconsVisibility(settings) {
 
 ipcMain.handle('open-file-dialog', async (_, options) => dialog.showOpenDialog(controlWin, options));
 
+// Avatar próprio do usuário (pedido explícito: "opção de fazer upload") —
+// copiado pra userData/avatars/ (fora do app.asar, sobrevive a updates,
+// diferente de ui/avatars/ que é reempacotado a cada release) com nome fixo
+// "custom<ext>", sobrescrevendo qualquer envio anterior. Retorna a URL
+// file:// pronta pra usar direto em <img src>/settings.userAvatar.
+ipcMain.handle('upload-avatar', async () => {
+  const result = await dialog.showOpenDialog(controlWin, {
+    title: 'Escolher imagem de avatar',
+    filters: [{ name: 'Imagens', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths.length) return { ok: false };
+
+  const srcPath = result.filePaths[0];
+  const ext = path.extname(srcPath) || '.png';
+  const avatarsDir = path.join(app.getPath('userData'), 'avatars');
+  fs.mkdirSync(avatarsDir, { recursive: true });
+  // Limpa envios anteriores (extensão pode mudar de uma vez pra outra) antes
+  // de copiar o novo — nunca acumula lixo de uploads velhos.
+  for (const f of fs.readdirSync(avatarsDir)) {
+    if (f.startsWith('custom.')) { try { fs.unlinkSync(path.join(avatarsDir, f)); } catch (_) {} }
+  }
+  const destPath = path.join(avatarsDir, 'custom' + ext);
+  fs.copyFileSync(srcPath, destPath);
+  return { ok: true, url: 'file:///' + destPath.replace(/\\/g, '/') };
+});
+
 ipcMain.handle('window-minimize', () => controlWin?.minimize());
 ipcMain.handle('window-close',    () => controlWin?.close());
 

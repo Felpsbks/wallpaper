@@ -1555,11 +1555,24 @@ document.addEventListener('DOMContentLoaded', () => {
 // fica populada depois que init() resolve, em paralelo com isto) — tanto
 // pra aplicar o avatar salvo ao carregar quanto pra nunca sobrescrever
 // outras configurações com um objeto ainda incompleto ao salvar.
-function initAvatarPicker() {
-  const btn = document.getElementById('user-avatar-btn');
-  const picker = document.getElementById('avatar-picker');
-  const fallback = document.getElementById('user-avatar-fallback');
-  const img = document.getElementById('user-avatar-img');
+// Dois lugares mostram/trocam o avatar agora: o widget original da sidebar
+// (pedido do usuário: "fica muito escondido") e um novo, maior, ao lado da
+// saudação no topo do Descobrir. Cada `applyAvatar` local só atualiza SEU
+// próprio par img/fallback+picker — sem um registro compartilhado, trocar o
+// avatar num widget deixava o outro maluco (mostrando o valor antigo) até a
+// próxima navegação. `_avatarApplyFns` guarda um applyAvatar por widget
+// inicializado; qualquer escolha (nos dois lugares, incluindo upload) chama
+// todos eles, então os dois sempre refletem o mesmo estado na hora.
+const _avatarApplyFns = [];
+function _applyAvatarEverywhere(src) {
+  for (const fn of _avatarApplyFns) fn(src);
+}
+
+function initAvatarWidget(btnId, pickerId, fallbackId, imgId, uploadBtnId) {
+  const btn = document.getElementById(btnId);
+  const picker = document.getElementById(pickerId);
+  const fallback = document.getElementById(fallbackId);
+  const img = document.getElementById(imgId);
   if (!btn || !picker || !fallback || !img) return;
 
   function applyAvatar(src) {
@@ -1572,9 +1585,10 @@ function initAvatarPicker() {
       fallback.style.display = 'flex';
     }
     picker.querySelectorAll('.avatar-picker-option').forEach(opt => {
-      opt.classList.toggle('active', (opt.dataset.avatar || '') === (src || ''));
+      opt.classList.toggle('active', !!opt.dataset.avatar && opt.dataset.avatar === src);
     });
   }
+  _avatarApplyFns.push(applyAvatar);
 
   ipc('get-settings').then((s) => applyAvatar((s && s.userAvatar) || ''));
 
@@ -1587,17 +1601,36 @@ function initAvatarPicker() {
       picker.style.display = 'none';
     }
   });
+
+  async function chooseAvatar(src) {
+    picker.style.display = 'none';
+    _applyAvatarEverywhere(src);
+    const current = await ipc('get-settings');
+    settings = { ...(current || {}), userAvatar: src };
+    await ipc('set-settings', settings);
+  }
+
   picker.querySelectorAll('.avatar-picker-option').forEach(opt => {
-    opt.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const src = opt.dataset.avatar || '';
-      applyAvatar(src);
-      picker.style.display = 'none';
-      const current = await ipc('get-settings');
-      settings = { ...(current || {}), userAvatar: src };
-      await ipc('set-settings', settings);
-    });
+    if (opt.id === uploadBtnId) return; // tratado à parte, abaixo
+    opt.addEventListener('click', (e) => { e.stopPropagation(); chooseAvatar(opt.dataset.avatar || ''); });
   });
+
+  const uploadBtn = uploadBtnId ? document.getElementById(uploadBtnId) : null;
+  uploadBtn?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    uploadBtn.disabled = true;
+    try {
+      const res = await ipc('upload-avatar');
+      if (res && res.ok) await chooseAvatar(res.url);
+    } finally {
+      uploadBtn.disabled = false;
+    }
+  });
+}
+
+function initAvatarPicker() {
+  initAvatarWidget('user-avatar-btn', 'avatar-picker', 'user-avatar-fallback', 'user-avatar-img', 'avatar-upload-btn-sidebar');
+  initAvatarWidget('header-avatar-btn', 'header-avatar-picker', 'header-avatar-fallback', 'header-avatar-img', 'avatar-upload-btn');
 }
 
 function initHeaderAndSystemPanel() {
@@ -1611,11 +1644,15 @@ function initHeaderAndSystemPanel() {
   if (greetingEl) greetingEl.textContent = osName ? `${period}, ${osName} 👋` : `${period} 👋`;
   const sidebarNameEl = document.getElementById('sidebar-user-name');
   if (sidebarNameEl) sidebarNameEl.textContent = osName || 'Usuário';
-  const avatarFallback = document.getElementById('user-avatar-fallback');
   const userInitial = osName ? osName[0].toUpperCase() : 'U';
+  const avatarFallback = document.getElementById('user-avatar-fallback');
   if (avatarFallback) avatarFallback.textContent = userInitial;
+  const headerAvatarFallback = document.getElementById('header-avatar-fallback');
+  if (headerAvatarFallback) headerAvatarFallback.textContent = userInitial;
   const avatarOptDefault = document.getElementById('avatar-opt-default');
   if (avatarOptDefault) avatarOptDefault.textContent = userInitial;
+  const avatarOptDefaultHeader = document.getElementById('avatar-opt-default-header');
+  if (avatarOptDefaultHeader) avatarOptDefaultHeader.textContent = userInitial;
   initAvatarPicker();
 
   const aboutVersionEl = document.getElementById('about-version');

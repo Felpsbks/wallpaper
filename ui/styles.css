@@ -494,6 +494,19 @@ body::after {
 .discover-header-new { justify-content: space-between; align-items: flex-start; }
 .greeting h2 { font-size: 17px; font-weight: 700; margin: 0 0 2px; }
 .greeting-sub { font-size: 11px; color: var(--text2); margin: 0; }
+
+/* Avatar bem visível no topo do Descobrir, ao lado da saudação — pedido
+   explícito do usuário (o da sidebar "fica muito escondido"). Reusa as
+   mesmas classes .user-avatar/.user-avatar-fallback/.avatar-picker* da
+   sidebar (ver initAvatarWidget em app.js, agora genérico pros dois). */
+.greeting-with-avatar { display: flex; align-items: center; gap: 12px; }
+.header-avatar-wrap { position: relative; flex-shrink: 0; }
+.header-avatar-btn { width: 44px; height: 44px; }
+.header-avatar-fallback, .header-avatar { width: 44px; height: 44px; font-size: 17px; }
+.header-avatar { border-width: 3px; }
+.header-avatar-picker { top: calc(100% + 8px); bottom: auto; left: 0; right: auto; width: max-content; }
+.avatar-picker-upload { background: var(--bg3); color: var(--text2); display: flex; align-items: center; justify-content: center; }
+.avatar-picker-upload:hover { color: var(--text); }
 .header-right { display: flex; align-items: center; gap: 8px; }
 .header-right .search-wrap input { padding-right: 46px; }
 .search-kbd {
