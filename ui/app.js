@@ -1456,6 +1456,20 @@ document.addEventListener('DOMContentLoaded', () => {
   if (overlay && closeBtn) {
     closeBtn.addEventListener('click', () => overlay.classList.remove('open'));
 
+    // Diagnóstico temporário (2026-07-25) — o fix de pointer-events não
+    // resolveu de verdade (relatado ao vivo), preciso ver o que o clique
+    // realmente atinge em vez de adivinhar de novo. Loga em QUALQUER clique
+    // dentro da área do botão (capture:true, roda antes de qualquer outro
+    // handler/stopPropagation poder interferir), via ctrlLog -> boot-log.txt
+    // (sem precisar de DevTools, que este app não tem). Remover depois.
+    document.addEventListener('click', (e) => {
+      const rect = closeBtn.getBoundingClientRect();
+      const inside = e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
+      if (inside || e.target === closeBtn || closeBtn.contains(e.target)) {
+        ctrlLog(`[DIAG-CLOSE] click x=${e.clientX} y=${e.clientY} target=${e.target.tagName}.${e.target.className} insideRect=${inside} isCloseBtnOrChild=${e.target === closeBtn || closeBtn.contains(e.target)} overlayOpenBefore=${overlay.classList.contains('open')} rect=${JSON.stringify(rect)}`);
+      }
+    }, true);
+
     // Fechar ao clicar fora do painel lateral
     document.addEventListener('mousedown', (e) => {
       if (overlay.classList.contains('open') && !overlay.contains(e.target)) {
