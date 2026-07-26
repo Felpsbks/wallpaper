@@ -1630,7 +1630,6 @@ function initAvatarWidget(btnId, pickerId, fallbackId, imgId, uploadBtnId) {
 
 function initAvatarPicker() {
   initAvatarWidget('user-avatar-btn', 'avatar-picker', 'user-avatar-fallback', 'user-avatar-img', 'avatar-upload-btn-sidebar');
-  initAvatarWidget('header-avatar-btn', 'header-avatar-picker', 'header-avatar-fallback', 'header-avatar-img', 'avatar-upload-btn');
 }
 
 function initHeaderAndSystemPanel() {
@@ -1647,12 +1646,8 @@ function initHeaderAndSystemPanel() {
   const userInitial = osName ? osName[0].toUpperCase() : 'U';
   const avatarFallback = document.getElementById('user-avatar-fallback');
   if (avatarFallback) avatarFallback.textContent = userInitial;
-  const headerAvatarFallback = document.getElementById('header-avatar-fallback');
-  if (headerAvatarFallback) headerAvatarFallback.textContent = userInitial;
   const avatarOptDefault = document.getElementById('avatar-opt-default');
   if (avatarOptDefault) avatarOptDefault.textContent = userInitial;
-  const avatarOptDefaultHeader = document.getElementById('avatar-opt-default-header');
-  if (avatarOptDefaultHeader) avatarOptDefaultHeader.textContent = userInitial;
   initAvatarPicker();
 
   const aboutVersionEl = document.getElementById('about-version');
@@ -1691,13 +1686,12 @@ function initHeaderAndSystemPanel() {
     });
   }
 
-  // Clicar no nome do usuário na sidebar abre Configurações — o avatar em si
-  // (botão separado, ver initAvatarPicker) abre o seletor de avatar em vez
-  // disso, então não usa o mesmo clique.
-  const sidebarUserName = document.getElementById('sidebar-user-name');
-  if (sidebarUserName) {
-    sidebarUserName.style.cursor = 'pointer';
-    sidebarUserName.addEventListener('click', () => {
+  // Clicar em qualquer parte do card de perfil (nome, fundo) abre
+  // Configurações — o botão do avatar tem seu próprio clique com
+  // stopPropagation (ver initAvatarWidget), então não dispara os dois.
+  const sidebarProfileCard = document.getElementById('sidebar-user');
+  if (sidebarProfileCard) {
+    sidebarProfileCard.addEventListener('click', () => {
       const settingsNav = document.querySelector('.nav-item[data-panel="settings"]');
       if (settingsNav) settingsNav.click();
     });

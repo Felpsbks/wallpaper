@@ -195,9 +195,22 @@ body::after {
 }
 .update-banner-close:hover { background: rgba(255,255,255,0.08); color: var(--text); }
 
-/* User Profile Sidebar (FYNIX Style) */
-.sidebar-user { margin-top: 12px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,0.05); position: relative; }
-.user-profile { display:flex; align-items:center; gap: 12px; padding: 0 8px; }
+/* Card de perfil — bem visível no topo da sidebar, entre a logo e a
+   navegação (histórico: começou como widget pequeno no rodapé, o usuário
+   achou "muito escondido"; tentei flutuando por cima do conteúdo, o usuário
+   achou "feio, ofuscando tudo"; aqui fica grande, com destaque, mas sem
+   competir com a logo — permanente em toda tela porque a sidebar é
+   permanente). */
+.sidebar-profile-card {
+  margin: 4px 12px 14px; padding: 10px 12px; position: relative;
+  display: flex; align-items: center; gap: 10px;
+  background: linear-gradient(135deg, rgba(124,58,237,0.18), rgba(45,27,84,0.35));
+  border: 1px solid var(--border); border-radius: 14px; cursor: pointer;
+}
+.sidebar-profile-card:hover { border-color: var(--accent); }
+.sidebar-profile-avatar { width: 44px; height: 44px; font-size: 17px; flex-shrink: 0; }
+.sidebar-profile-avatar-btn { flex-shrink: 0; }
+.sidebar-profile-name { font-size: 14px; font-weight: 700; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .user-avatar { width:36px; height:36px; border-radius:50%; border: 2px solid var(--accent); object-fit:cover; }
 .user-avatar-fallback {
   width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
@@ -207,14 +220,13 @@ body::after {
 }
 .user-avatar-btn { background: none; border: none; padding: 0; cursor: pointer; flex-shrink: 0; border-radius: 50%; }
 .user-avatar-btn:hover { filter: brightness(1.15); }
-.user-info { display:flex; flex-direction:column; }
-.user-name { font-size:14px; font-weight:600; color:#fff; }
 
-/* Seletor de avatar — popover acima do widget de usuário na sidebar */
+/* Seletor de avatar — popover abaixo do card de perfil */
 .avatar-picker {
-  position: absolute; bottom: calc(100% + 8px); left: 8px; right: 8px;
+  position: absolute; top: calc(100% + 8px); left: 0; right: 0;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
   padding: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); z-index: 20;
+  cursor: default;
 }
 .avatar-picker-title { font-size: 11px; font-weight: 600; color: var(--text2); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.03em; }
 .avatar-picker-grid { display: flex; gap: 8px; }
@@ -495,19 +507,6 @@ body::after {
 .greeting h2 { font-size: 17px; font-weight: 700; margin: 0 0 2px; }
 .greeting-sub { font-size: 11px; color: var(--text2); margin: 0; }
 
-/* Avatar bem visível no topo do Descobrir, ao lado da saudação — pedido
-   explícito do usuário (o da sidebar "fica muito escondido"). Reusa as
-   mesmas classes .user-avatar/.user-avatar-fallback/.avatar-picker* da
-   sidebar (ver initAvatarWidget em app.js, agora genérico pros dois). */
-.header-avatar-wrap { position: relative; flex-shrink: 0; }
-/* Flutua por cima de QUALQUER painel ativo — é irmão dos .panel dentro de
-   #content, não filho de nenhum, então nunca some ao trocar de aba (pedido
-   explícito do usuário: "queria que o avatar ficasse em toda as página"). */
-.header-avatar-wrap-floating { position: absolute; top: 10px; right: 16px; z-index: 50; }
-.header-avatar-btn { width: 36px; height: 36px; }
-.header-avatar-fallback, .header-avatar { width: 36px; height: 36px; font-size: 14px; }
-.header-avatar { border-width: 2px; }
-.header-avatar-picker { top: calc(100% + 8px); bottom: auto; left: auto; right: 0; width: max-content; }
 .avatar-picker-upload { background: var(--bg3); color: var(--text2); display: flex; align-items: center; justify-content: center; }
 .avatar-picker-upload:hover { color: var(--text); }
 .header-right { display: flex; align-items: center; gap: 8px; }
