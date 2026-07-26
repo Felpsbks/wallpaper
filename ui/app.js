@@ -1455,7 +1455,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const closeBtn = document.getElementById('modal-close');
   if (overlay && closeBtn) {
     closeBtn.addEventListener('click', () => overlay.classList.remove('open'));
-    
+
     // Fechar ao clicar fora do painel lateral
     document.addEventListener('mousedown', (e) => {
       if (overlay.classList.contains('open') && !overlay.contains(e.target)) {
@@ -1464,6 +1464,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!isCardClick) {
           overlay.classList.remove('open');
         }
+      }
+    });
+
+    // Fallback pro X às vezes não responder (relatado ao vivo) — Esc sempre
+    // fecha, independente de acertar o botão pequeno no canto.
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && overlay.classList.contains('open')) {
+        overlay.classList.remove('open');
       }
     });
   }
