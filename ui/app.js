@@ -1697,13 +1697,31 @@ function initHeaderAndSystemPanel() {
     });
   }
 
-  // Status real da sessão Steam (conectado = tem cookie de sessão salvo).
+  // Botão de sair rápido no card de perfil — diferente do ✕ da titlebar
+  // (que só fecha o painel, o wallpaper continua rodando), este encerra o
+  // app de verdade (mesmo 'quit-app' do menu da bandeja). stopPropagation
+  // pra não também abrir Configurações (clique do card acima).
+  document.getElementById('btn-sidebar-quit')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (confirm('Sair do Engine Wallpaper? Isso também para o papel de parede.')) ipc('quit-app');
+  });
+
+  // Status real da sessão Steam (conectado = tem cookie de sessão salvo) —
+  // mostrado no badge do cabeçalho E como subtítulo no card de perfil da
+  // sidebar (preenche o espaço que ficou vazio ali, com dado real).
   ipc('get-steam-status').then((status) => {
+    const connected = !!(status && status.connected);
     const badge = document.getElementById('steam-status-badge');
-    if (!badge) return;
-    badge.classList.toggle('connected', !!(status && status.connected));
-    const label = document.getElementById('steam-status-label');
-    if (label) label.textContent = status && status.connected ? 'Conectado' : 'Desconectado';
+    if (badge) {
+      badge.classList.toggle('connected', connected);
+      const label = document.getElementById('steam-status-label');
+      if (label) label.textContent = connected ? 'Conectado' : 'Desconectado';
+    }
+    const sidebarStatus = document.getElementById('sidebar-user-status');
+    if (sidebarStatus) {
+      sidebarStatus.textContent = connected ? 'Steam conectada' : 'Steam desconectada';
+      sidebarStatus.classList.toggle('connected', connected);
+    }
   }).catch(() => {});
 
   // Painel SISTEMA: CPU/RAM chegam prontos do main a cada 2s, FPS vem do

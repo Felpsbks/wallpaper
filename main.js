@@ -2442,6 +2442,10 @@ ipcMain.handle('upload-avatar', async () => {
 
 ipcMain.handle('window-minimize', () => controlWin?.minimize());
 ipcMain.handle('window-close',    () => controlWin?.close());
+// Diferente do ✕ da titlebar (window-close só fecha o painel, o wallpaper
+// segue rodando) — este realmente encerra o processo inteiro, mesmo atalho
+// do "Sair" da bandeja (tray, ver createTray acima).
+ipcMain.handle('quit-app',        () => { app.exit(0); });
 
 // ---- Steam Workshop scanner ----
 function getSteamPath() {
@@ -2791,7 +2795,7 @@ ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedU
 // não tem "novidade" pra quem tá abrindo o app pela primeira vez.
 const WHATS_NEW = {
   version: APP_VERSION,
-  text: 'Novo: Modo Jogo — detecta direto pela Steam quando você começa a jogar (mesmo em janela) e descarrega o wallpaper da memória na hora, recarregando só quando você fecha o jogo, pra não roubar desempenho da sua partida. Avatar da sidebar agora só mostra a foto, sem moldura — editar/trocar/enviar imagem ficou só em Configurações. Corrigido: baixar uma atualização podia travar pra sempre em "0%" se a conexão engasgasse, sem erro nem jeito de saber o que aconteceu.',
+  text: 'Novo: Modo Jogo — detecta direto pela Steam quando você começa a jogar (mesmo em janela) e descarrega o wallpaper da memória na hora, recarregando só quando você fecha o jogo, pra não roubar desempenho da sua partida. Avatar da sidebar agora só mostra a foto, sem moldura, com status da Steam e um atalho rápido de sair logo abaixo. Corrigido: baixar uma atualização podia travar pra sempre em "0%" se a conexão engasgasse.',
 };
 ipcMain.handle('get-whats-new', () => {
   if (store.get('lastSeenWhatsNewVersion') === WHATS_NEW.version) return null;

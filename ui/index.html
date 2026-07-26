@@ -110,15 +110,28 @@
       <div class="stat-row-mini"><span>FPS</span><span id="stat-fps-val">--</span></div>
     </div>
 
+    <!-- Mesmo divisor usado antes de EXPLORAR (linha ~68) — separa
+         visualmente o card de perfil do painel SISTEMA acima, pedido do
+         usuário depois que o card perdeu a moldura de fundo. -->
+    <div class="sidebar-divider"></div>
+
     <!-- Card de perfil — pedido do usuário: SÓ mostra a foto, sem moldura de
          fundo, maior; a edição/upload de avatar saiu daqui e foi pra
          Configurações (ver settings-avatar-grid lá). Clicar em qualquer
          parte (foto ou nome) abre Configurações — mesmo comportamento de
-         antes, só que agora sem popover próprio aqui. -->
+         antes, só que agora sem popover próprio aqui. Status da Steam e
+         botão de sair rápido adicionados pra preencher o espaço que ficou
+         vazio depois que a moldura saiu (pedido do usuário). -->
     <div class="sidebar-profile-card sidebar-profile-card-plain" id="sidebar-user">
       <div class="user-avatar-fallback sidebar-profile-avatar" id="user-avatar-fallback">U</div>
       <img class="user-avatar sidebar-profile-avatar" id="user-avatar-img" style="display:none" alt="Avatar" />
-      <span class="sidebar-profile-name" id="sidebar-user-name">…</span>
+      <div class="sidebar-profile-info">
+        <span class="sidebar-profile-name" id="sidebar-user-name">…</span>
+        <span class="sidebar-profile-status" id="sidebar-user-status">--</span>
+      </div>
+      <button class="sidebar-profile-quit-btn" id="btn-sidebar-quit" title="Sair do Engine Wallpaper">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+      </button>
     </div>
 
     <div class="update-banner" id="monitor-detected-banner" style="display:none;">

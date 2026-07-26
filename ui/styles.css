@@ -202,7 +202,16 @@ body::after {
   margin: 4px 12px 14px; padding: 6px 12px; position: relative;
   display: flex; align-items: center; gap: 10px; cursor: pointer;
 }
+.sidebar-profile-info { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 1px; }
 .sidebar-profile-name { font-size: 14px; font-weight: 700; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-profile-status { font-size: 11px; color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-profile-status.connected { color: #4ade80; }
+.sidebar-profile-quit-btn {
+  flex-shrink: 0; width: 26px; height: 26px; border-radius: 8px; padding: 0;
+  border: none; background: transparent; color: var(--text2); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.sidebar-profile-quit-btn:hover { background: rgba(255,255,255,0.08); color: #f87171; }
 /* .sidebar-profile-avatar controla o tamanho (única usuária hoje é o card da
    sidebar); estas duas só cuidam de forma/cor — sem width/height próprios
    pra não brigar com .sidebar-profile-avatar por especificidade de CSS. */
