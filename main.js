@@ -699,7 +699,7 @@ function spawnWallpaperWindow(display) {
   }
 
   win.webContents.on('did-finish-load', () => {
-    if (!_isScreensaver) embedWallpaperBehindDesktop(win);
+    if (!_isScreensaver) embedWallpaperBehindDesktop(win, display.id);
 
     // Per-display wallpaper, fallback to global current
     const displayWallpapers = store.get('displayWallpapers') || {};
@@ -1182,7 +1182,7 @@ ipcMain.handle('should-show-wallpaper-conflict-notice', () => {
 ipcMain.handle('set-wallpaper-conflict-notice-optout', () => { store.set('wallpaperConflictNoticeOptOut', true); return true; });
 
 // ---- Win32 WorkerW embedding ----
-function embedWallpaperBehindDesktop(win) {
+function embedWallpaperBehindDesktop(win, displayId) {
   if (process.platform !== 'win32') return;
   try {
     const { embedBehindDesktop } = require('./src/workerw');
@@ -1191,9 +1191,22 @@ function embedWallpaperBehindDesktop(win) {
     // even after native reparenting (Electron's own model doesn't know we
     // called SetParent behind its back) — pass it through so workerw.js can
     // re-assert the correct position relative to WorkerW's coordinate space.
-    if (!embedBehindDesktop(hwnd, win.getBounds())) console.warn('[main] WorkerW embedding failed');
+    const ok = embedBehindDesktop(hwnd, win.getBounds());
+    // Achado ao vivo (2026-07-25): essa função só logava via console.warn/
+    // error, que não vai pro app-log.txt (só pro terminal, que ninguém vê
+    // fora de dev) — uma falha silenciosa aqui (tela preta, sem papel de
+    // parede nenhum) não deixava NENHUM rastro legível depois. appLog
+    // grava em disco, dá pra ler mesmo sem o usuário estar com o app
+    // aberto na hora.
+    if (!ok) {
+      console.warn('[main] WorkerW embedding failed');
+      appLog.err('WorkerW embedding falhou (displayId=' + displayId + ') — o papel de parede pode ficar com tela preta.');
+    } else {
+      appLog.debug('WorkerW embedding OK (displayId=' + displayId + ')');
+    }
   } catch (err) {
     console.error('[main] WorkerW error:', err.message);
+    appLog.err('WorkerW embedding lançou exceção (displayId=' + displayId + '): ' + err.message);
   }
 }
 
