@@ -1972,7 +1972,6 @@ async function startSteamCmdDirect(workshopId, title) {
   dlLog.textContent = '';
   dlLog.style.display = 'none';
   dlScreen.classList.add('visible');
-  setWsStatus(`⏳ ${displayTitle}`);
 
   const result = await ipc('steamcmd-download-item', { username: savedUsername, workshopId });
   if (!result || !result.ok) {
@@ -2094,17 +2093,21 @@ ipcRenderer.on('steamcmd-status', (_, data) => {
   const dlText = document.getElementById('dl-progress-text');
   const dlActive = dlScreen.classList.contains('visible');
 
+  // A barra flutuante (setWsStatus) só entra quando a tela cheia NÃO está
+  // ativa — as duas mostrando a mesma coisa ao mesmo tempo (pedido do
+  // usuário pra remover a duplicata) só acontecia quando dlActive já cobre
+  // o mesmo status.
   if (data.state === 'need-interactive-login') {
     _scmdSetStatus('🪟 Uma janela do SteamCMD vai abrir — se ela pedir senha ou código, digite direto ali (não aqui).', true);
-    setWsStatus('🪟 Uma janela do SteamCMD vai abrir — se pedir senha/código, digite ali.', '', 0.2);
+    if (!dlActive) setWsStatus('🪟 Uma janela do SteamCMD vai abrir — se pedir senha/código, digite ali.', '', 0.2);
     if (dlActive) { dlFill.style.width = '20%'; dlText.textContent = 'Aguardando login na Steam...'; }
   } else if (data.state === 'validating') {
     _scmdSetStatus('Verificando login...', true);
-    setWsStatus('⏳ Verificando login na Steam...', '', 0.4);
+    if (!dlActive) setWsStatus('⏳ Verificando login na Steam...', '', 0.4);
     if (dlActive) { dlFill.style.width = '45%'; dlText.textContent = 'Verificando login...'; }
   } else if (data.state === 'starting') {
     _scmdSetStatus('Baixando via SteamCMD...', true);
-    setWsStatus('📥 Baixando via SteamCMD...', '', 0.6);
+    if (!dlActive) setWsStatus('📥 Baixando via SteamCMD...', '', 0.6);
     if (dlActive) { dlFill.style.width = '70%'; dlText.textContent = 'Baixando arquivos...'; }
   } else if (data.state === 'completed') {
     const wp = data.wallpaper;
@@ -2115,7 +2118,11 @@ ipcRenderer.on('steamcmd-status', (_, data) => {
     if (wp) {
       // Mesmo comportamento do fluxo padrão: baixou, já aplica — e mostra o
       // mesmo aviso "flutuante" de sempre, visível mesmo se o modal já tiver
-      // sido fechado, pra ficar óbvio que terminou e o quê aconteceu.
+      // sido fechado, pra ficar óbvio que terminou e o quê aconteceu. Esse
+      // aqui sempre mostra (mesmo com dlActive) — é diferente dos de cima:
+      // o modal já fecha sozinho (abaixo), então não fica duplicado por
+      // muito tempo, e é o único jeito de saber que terminou se o modal já
+      // tiver sido fechado manualmente antes.
       setWallpaper(wp).catch((err) => console.error('[steamcmd-auto-aplicar]', err));
       setWsStatus('✅ Baixado via SteamCMD e aplicado!', wp.name || '', 1, '#4caf50');
       setTimeout(() => { hideWsStatus(); }, 5000);
@@ -2140,13 +2147,17 @@ ipcRenderer.on('download-progress', async (_, data) => {
   const dlFill = document.getElementById('dl-progress-fill');
   const dlText = document.getElementById('dl-progress-text');
 
+  // Este fluxo (diferente do SteamCMD acima) sempre mostra a tela cheia —
+  // a barra flutuante (setWsStatus) durante o download em si só duplicava
+  // a mesma informação por cima (pedido do usuário pra remover). Mantida
+  // só no 'completed', como lembrete que fica visível mesmo depois do
+  // modal fechar sozinho.
   if (data.state === 'preparing') {
     dlTitle.textContent = 'Aplicando wallpaper';
     dlSubtitle.textContent = data.name;
     dlFill.style.width = '0%';
     dlText.textContent = 'Iniciando...';
     dlScreen.classList.add('visible');
-    setWsStatus(`⏳ ${data.name}`);
     armDlUnstickButton();
   } else if (data.state === 'start') {
     dlTitle.textContent = 'Aplicando wallpaper';
@@ -2154,7 +2165,6 @@ ipcRenderer.on('download-progress', async (_, data) => {
     dlFill.style.width = '2%';
     dlText.textContent = '0% (Conectando...)';
     dlScreen.classList.add('visible');
-    setWsStatus(`📥 Baixando: ${data.name}`, '', 0.02);
     armDlUnstickButton();
   } else if (data.state === 'progress') {
     const pct = data.pct || 0;
@@ -2163,10 +2173,9 @@ ipcRenderer.on('download-progress', async (_, data) => {
       ? `${formatBytes(data.downloaded)} / ${formatBytes(data.total)}`
       : '';
     const spd = data.speed > 1024 ? `${formatBytes(data.speed)}/s` : '';
-    
+
     dlFill.style.width = `${pctInt}%`;
     dlText.textContent = `${pctInt}% - ${spd} (${size})`;
-    setWsStatus(`📥 ${pctInt}%  ${size}`, spd, pct);
   } else if (data.state === 'completed') {
     disarmDlUnstickButton();
     dlTitle.textContent = `Concluído!`;

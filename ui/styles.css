@@ -195,12 +195,11 @@ body::after {
 }
 .update-banner-close:hover { background: rgba(255,255,255,0.08); color: var(--text); }
 
-/* Card de perfil — bem visível no topo da sidebar, entre a logo e a
-   navegação (histórico: começou como widget pequeno no rodapé, o usuário
-   achou "muito escondido"; tentei flutuando por cima do conteúdo, o usuário
-   achou "feio, ofuscando tudo"; aqui fica grande, com destaque, mas sem
-   competir com a logo — permanente em toda tela porque a sidebar é
-   permanente). */
+/* Card de perfil — visível na sidebar (histórico: pequeno no rodapé foi
+   achado "muito escondido"; flutuando por cima do conteúdo foi achado "feio,
+   ofuscando tudo"; grande no topo funcionou, mas o usuário preferiu de volta
+   embaixo do SISTEMA — mesmo visual grande, só reposicionado. Permanente em
+   toda tela porque a sidebar é permanente). */
 .sidebar-profile-card {
   margin: 4px 12px 14px; padding: 10px 12px; position: relative;
   display: flex; align-items: center; gap: 10px;
@@ -221,7 +220,11 @@ body::after {
 .user-avatar-btn { background: none; border: none; padding: 0; cursor: pointer; flex-shrink: 0; border-radius: 50%; }
 .user-avatar-btn:hover { filter: brightness(1.15); }
 
-/* Seletor de avatar — popover abaixo do card de perfil */
+/* Seletor de avatar — abre pra BAIXO por padrão, mas o card de perfil agora
+   vive no rodapé da sidebar (pedido do usuário) — abrindo pra baixo ali
+   esbarraria no fim da janela, então esse modificador inverte pra cima. */
+.sidebar-profile-card-bottom .avatar-picker { top: auto; bottom: calc(100% + 8px); }
+
 .avatar-picker {
   position: absolute; top: calc(100% + 8px); left: 0; right: 0;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
