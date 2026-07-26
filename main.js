@@ -2761,7 +2761,7 @@ ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedU
 // não tem "novidade" pra quem tá abrindo o app pela primeira vez.
 const WHATS_NEW = {
   version: APP_VERSION,
-  text: 'Corrigido: download em alta qualidade do YouTube (ffmpeg bloqueado pelo Windows em algumas máquinas) e busca da Workshop mostrando poucos resultados de vídeo/web. Novo botão de favoritar na Biblioteca e cards com tamanho fixo.',
+  text: 'Corrigido: instalações via zip rodavam o renderer do wallpaper travado na versão original pra sempre (causa real da tela preta), e o atalho de "Iniciar com o Windows" podia apontar pra cópia errada. Novo: avatar de perfil (com opção de enviar sua própria imagem), volume que agora persiste de verdade entre sessões, cabeçalho fixo ao rolar o Descobrir.',
 };
 ipcMain.handle('get-whats-new', () => {
   if (store.get('lastSeenWhatsNewVersion') === WHATS_NEW.version) return null;

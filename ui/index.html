@@ -143,13 +143,6 @@
       </div>
     </div>
 
-    <div class="update-banner" id="whatsnew-banner" style="display:none;">
-      <div class="update-banner-text">📢 <b>Novidades</b> — <span id="whatsnew-banner-text"></span></div>
-      <div class="update-banner-actions">
-        <button class="update-banner-close" id="whatsnew-banner-dismiss" title="Ok, entendi">✕</button>
-      </div>
-    </div>
-
     <div class="update-banner" id="monitor-detected-banner" style="display:none;">
       <div class="update-banner-text">🖥️ <span id="monitor-detected-text"></span></div>
       <div class="update-banner-actions">
@@ -1037,6 +1030,21 @@
     </label>
     <div class="modal-actions">
       <button class="btn btn-primary" id="btn-wallpaper-conflict-notice-close">Entendi</button>
+    </div>
+  </div>
+</div>
+
+<!-- "O que há de novo" — antes era um banner preso na sidebar até ser
+     fechado manualmente (pedido do usuário: virar uma caixa central, igual
+     os outros avisos do app, que aparece uma vez só e não deixa nada preso
+     na lateral depois). Mesma lógica de antes (get-whats-new/mark-whats-
+     new-seen), só troca onde renderiza — ver ui/app.js. -->
+<div class="modal-backdrop" id="modal-whats-new">
+  <div class="modal" style="width:420px;">
+    <h3>📢 Novidades</h3>
+    <p id="whats-new-modal-text" style="font-size:13px;color:var(--text2);margin-bottom:20px;line-height:1.6"></p>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="btn-whats-new-close">Entendi</button>
     </div>
   </div>
 </div>

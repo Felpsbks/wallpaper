@@ -3294,13 +3294,13 @@ document.getElementById('btn-check-updates-now')?.addEventListener('click', asyn
 // vez por versão (main.js já filtra instalação nova e versão já vista).
 ipc('get-whats-new').then((info) => {
   if (!info) return;
-  const banner = document.getElementById('whatsnew-banner');
-  const textEl = document.getElementById('whatsnew-banner-text');
-  if (!banner || !textEl) return;
+  const modal = document.getElementById('modal-whats-new');
+  const textEl = document.getElementById('whats-new-modal-text');
+  if (!modal || !textEl) return;
   textEl.textContent = info.text;
-  banner.style.display = 'flex';
-  document.getElementById('whatsnew-banner-dismiss').onclick = async () => {
-    banner.style.display = 'none';
+  modal.classList.add('open');
+  document.getElementById('btn-whats-new-close').onclick = async () => {
+    modal.classList.remove('open');
     await ipc('mark-whats-new-seen', info.version);
   };
 });
