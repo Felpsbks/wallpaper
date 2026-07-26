@@ -1576,6 +1576,21 @@ let _manualPause = false;
 let _engineTimer = null;
 let _procCache = null; // { at, list } — evita rodar `tasklist` mais rápido que o antigo intervalo de 3s
 
+// Detecção de jogo via Steam: a própria Steam grava o appid do jogo em
+// execução (0 = nenhum) na chave abaixo em tempo real — sinal muito mais
+// confiável que heurística de fullscreen (cobre jogos em janela também, e
+// não exige cadastrar cada jogo manualmente em App Rules). `reg query` já é
+// o mesmo padrão usado em outros pontos deste arquivo (ex: sync-steam-desktop).
+function getSteamRunningAppId() {
+  try {
+    const out = execSync('reg query "HKCU\\Software\\Valve\\Steam" /v RunningAppID', { windowsHide: true }).toString();
+    const m = out.match(/RunningAppID\s+REG_DWORD\s+0x([0-9a-fA-F]+)/i);
+    return m ? parseInt(m[1], 16) : 0;
+  } catch (_) {
+    return 0; // Steam não instalada ou chave ausente — trata como "sem jogo"
+  }
+}
+
 ipcMain.handle('toggle-playback', () => {
   _manualPause = !_manualPause;
   sendToAllWallpapers(_manualPause ? 'pause' : 'resume');
@@ -1591,9 +1606,14 @@ async function buildEngineContext(restrictedMode) {
     dayOfWeek: now.getDay(),
     month: now.getMonth(),
     runningProcesses: null,
+    steamGameRunning: false,
     restrictedMode: !!restrictedMode,
   };
   if (restrictedMode) return context;
+
+  if ((store.get('settings') || {}).gameDetectionSteam !== false) {
+    context.steamGameRunning = getSteamRunningAppId() !== 0;
+  }
 
   const routines = store.get('routines') || [];
   const needsProcesses = appRulesNeedProcesses(store) || routines.some(r => (r.type === 'game' || r.type === 'application') && r.enabled);
@@ -1619,6 +1639,7 @@ function startAutomationEngine() {
       const settings = store.get('settings') || {};
       const hasAnyAutomation = (settings.appRules || []).length > 0
         || settings.pauseOnFullscreen || settings.muteOnFullscreen
+        || settings.gameDetectionSteam !== false
         || (store.get('routines') || []).length > 0
         || (store.get('smartPlaylists') || []).length > 0;
       if (!hasAnyAutomation) return;
@@ -1667,7 +1688,7 @@ ipcMain.handle('toggle-favorite', (_, item) => {
 });
 ipcMain.handle('get-current',          () => store.get('current') || null);
 const DEFAULT_CLOCK_OVERLAY = { enabled: false, position: 'top-left', format24h: true, showSeconds: false, showDate: true, showDayName: true, color: '#ffffff', fontSize: 48 };
-ipcMain.handle('get-settings',         () => store.get('settings') || { volume: 50, pauseOnFullscreen: true, performanceModeFullscreen: false, muteOnFullscreen: false, startWithWindows: true, audioReactive: false, hideTaskbarAndIcons: true, webview2CompatMode: false, clockOverlay: DEFAULT_CLOCK_OVERLAY });
+ipcMain.handle('get-settings',         () => store.get('settings') || { volume: 50, pauseOnFullscreen: true, performanceModeFullscreen: false, muteOnFullscreen: false, startWithWindows: true, audioReactive: false, hideTaskbarAndIcons: true, webview2CompatMode: false, gameDetectionSteam: true, clockOverlay: DEFAULT_CLOCK_OVERLAY });
 ipcMain.handle('get-displays',         () => screen.getAllDisplays().map(d => ({ id: d.id, bounds: d.bounds, label: d.label || null })));
 ipcMain.handle('get-display-wallpapers', () => store.get('displayWallpapers') || {});
 
@@ -2761,7 +2782,7 @@ ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedU
 // não tem "novidade" pra quem tá abrindo o app pela primeira vez.
 const WHATS_NEW = {
   version: APP_VERSION,
-  text: 'Corrigido: instalações via zip rodavam o renderer do wallpaper travado na versão original pra sempre (causa real da tela preta), e o atalho de "Iniciar com o Windows" podia apontar pra cópia errada. Novo: avatar de perfil (com opção de enviar sua própria imagem), volume que agora persiste de verdade entre sessões, cabeçalho fixo ao rolar o Descobrir.',
+  text: 'Novo: Modo Jogo — detecta direto pela Steam quando você começa a jogar (mesmo em janela) e descarrega o wallpaper da memória na hora, recarregando só quando você fecha o jogo, pra não roubar desempenho da sua partida. Avatar da sidebar agora só mostra a foto, maior e sem moldura — editar/trocar/enviar imagem ficou só em Configurações.',
 };
 ipcMain.handle('get-whats-new', () => {
   if (store.get('lastSeenWhatsNewVersion') === WHATS_NEW.version) return null;
@@ -3905,7 +3926,7 @@ app.whenReady().then(async () => {
 
   // First boot configuration
   if (!store.get('settings')) {
-    const defaultSettings = { volume: 50, pauseOnFullscreen: true, performanceModeFullscreen: false, muteOnFullscreen: false, startWithWindows: true, audioReactive: false, hideTaskbarAndIcons: true };
+    const defaultSettings = { volume: 50, pauseOnFullscreen: true, performanceModeFullscreen: false, muteOnFullscreen: false, startWithWindows: true, audioReactive: false, hideTaskbarAndIcons: true, gameDetectionSteam: true };
     store.set('settings', defaultSettings);
     // Instalação nova: a versão atual É "o app" pra esse usuário, não uma
     // "novidade" — não faz sentido mostrar o aviso de "o que mudou" (ver

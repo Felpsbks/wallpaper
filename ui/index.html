@@ -110,29 +110,15 @@
       <div class="stat-row-mini"><span>FPS</span><span id="stat-fps-val">--</span></div>
     </div>
 
-    <!-- Card de perfil — pedido do usuário: de volta pra baixo, embaixo do
-         SISTEMA, onde ficava antes (só que com o visual maior/melhor da
-         versão que passou pelo topo). O popover abre pra CIMA (bottom:...)
-         porque, aqui embaixo, abrir pra baixo esbarraria no rodapé da
-         janela. -->
-    <div class="sidebar-profile-card sidebar-profile-card-bottom" id="sidebar-user">
-      <button class="user-avatar-btn sidebar-profile-avatar-btn" id="user-avatar-btn" title="Escolher avatar">
-        <div class="user-avatar-fallback sidebar-profile-avatar" id="user-avatar-fallback">U</div>
-        <img class="user-avatar sidebar-profile-avatar" id="user-avatar-img" style="display:none" alt="Avatar" />
-      </button>
+    <!-- Card de perfil — pedido do usuário: SÓ mostra a foto, sem moldura de
+         fundo, maior; a edição/upload de avatar saiu daqui e foi pra
+         Configurações (ver settings-avatar-grid lá). Clicar em qualquer
+         parte (foto ou nome) abre Configurações — mesmo comportamento de
+         antes, só que agora sem popover próprio aqui. -->
+    <div class="sidebar-profile-card sidebar-profile-card-plain" id="sidebar-user">
+      <div class="user-avatar-fallback sidebar-profile-avatar" id="user-avatar-fallback">U</div>
+      <img class="user-avatar sidebar-profile-avatar" id="user-avatar-img" style="display:none" alt="Avatar" />
       <span class="sidebar-profile-name" id="sidebar-user-name">…</span>
-      <div class="avatar-picker sidebar-profile-picker" id="avatar-picker" style="display:none">
-        <div class="avatar-picker-title">Escolher avatar</div>
-        <div class="avatar-picker-grid">
-          <button class="avatar-picker-option" id="avatar-opt-default" data-avatar="" title="Padrão"></button>
-          <button class="avatar-picker-option" data-avatar="avatars/miku.png" title="Hatsune Miku"><img src="avatars/miku.png" /></button>
-          <button class="avatar-picker-option" data-avatar="avatars/dandadan.jpg" title="DanDaDan"><img src="avatars/dandadan.jpg" /></button>
-          <button class="avatar-picker-option" data-avatar="avatars/luffy.png" title="One Piece"><img src="avatars/luffy.png" /></button>
-          <button class="avatar-picker-option avatar-picker-upload" id="avatar-upload-btn-sidebar" title="Enviar sua imagem">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" style="pointer-events:none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
-          </button>
-        </div>
-      </div>
     </div>
 
     <div class="update-banner" id="monitor-detected-banner" style="display:none;">
@@ -569,6 +555,24 @@
       <div class="panel-header"><h2>Configurações</h2></div>
       <div class="settings-body">
 
+        <!-- Movido pra cá — pedido explícito do usuário: o avatar na
+             sidebar deve só MOSTRAR a foto (sem moldura, maior), a edição/
+             upload fica só aqui em Configurações. Grade sempre visível
+             (não é mais um popover escondido atrás de clique). -->
+        <div class="settings-section-title">Perfil</div>
+        <div class="setting-row">
+          <div><div class="setting-label">Avatar</div><div class="setting-desc">Escolha um dos personagens ou envie sua própria imagem.</div></div>
+        </div>
+        <div class="avatar-picker-grid settings-avatar-grid" id="settings-avatar-grid">
+          <button class="avatar-picker-option" id="avatar-opt-default" data-avatar="" title="Padrão"></button>
+          <button class="avatar-picker-option" data-avatar="avatars/miku.png" title="Hatsune Miku"><img src="avatars/miku.png" /></button>
+          <button class="avatar-picker-option" data-avatar="avatars/dandadan.jpg" title="DanDaDan"><img src="avatars/dandadan.jpg" /></button>
+          <button class="avatar-picker-option" data-avatar="avatars/luffy.png" title="One Piece"><img src="avatars/luffy.png" /></button>
+          <button class="avatar-picker-option avatar-picker-upload" id="avatar-upload-btn-sidebar" title="Enviar sua imagem">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" style="pointer-events:none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+          </button>
+        </div>
+
         <div class="settings-section-title">Áudio</div>
         <div class="setting-row">
           <div><div class="setting-label">Áudio Reativo</div><div class="setting-desc">Envia áudio do sistema para wallpapers Web (Lively)</div></div>
@@ -583,6 +587,10 @@
         </div>
 
         <div class="settings-section-title">Comportamento</div>
+        <div class="setting-row">
+          <div><div class="setting-label">Modo Jogo (Steam)</div><div class="setting-desc">Descarrega o wallpaper da memória assim que você inicia qualquer jogo pela Steam — a partida inteira, mesmo em janela — e recarrega ao fechar. Detecta direto pela Steam, não depende de tela cheia nem de cadastrar cada jogo.</div></div>
+          <label class="toggle"><input type="checkbox" id="set-game-detect-steam" checked /><div class="toggle-slider"></div></label>
+        </div>
         <div class="setting-row">
           <div><div class="setting-label">Pausar ao fullscreen</div><div class="setting-desc">Pausa o wallpaper quando um app cobre a tela</div></div>
           <label class="toggle"><input type="checkbox" id="set-pause-fs" checked /><div class="toggle-slider"></div></label>

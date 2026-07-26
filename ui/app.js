@@ -792,6 +792,7 @@ const setVolumeV = document.getElementById('set-volume-val');
 // em Configurações, só sem precisar abrir a tela pra ajustar toda vez) —
 // mantido em sincronia nos dois sentidos com o slider de Configurações.
 const libVolumeSlider = document.getElementById('lib-volume-slider');
+const setGameDetectSteam = document.getElementById('set-game-detect-steam');
 const setPauseFs = document.getElementById('set-pause-fs');
 const setPerfModeFs = document.getElementById('set-performance-mode-fs');
 const setMuteFs  = document.getElementById('set-mute-fs');
@@ -863,6 +864,7 @@ async function saveSettings() {
   settings = {
     ...settings,
     volume: +setVolume.value,
+    gameDetectionSteam: setGameDetectSteam.checked,
     pauseOnFullscreen: setPauseFs.checked,
     performanceModeFullscreen: setPerfModeFs.checked,
     muteOnFullscreen: setMuteFs.checked,
@@ -883,7 +885,7 @@ async function saveSettings() {
   };
   await ipc('set-settings', settings);
 }
-[setVolume, setPauseFs, setPerfModeFs, setMuteFs, setWebview2Compat, setStartup, setHideTaskbar, setAudioRe,
+[setVolume, setGameDetectSteam, setPauseFs, setPerfModeFs, setMuteFs, setWebview2Compat, setStartup, setHideTaskbar, setAudioRe,
  clockEnabled, clockPosition, clockFormat24h, clockSeconds, clockDate, clockDayName, clockColor, clockFontSize
 ].forEach(el => el.addEventListener('change', saveSettings));
 
@@ -1549,31 +1551,29 @@ document.addEventListener('DOMContentLoaded', () => {
 // sidebar (EXPLORAR ligado aos filtros reais, painel SISTEMA com CPU/RAM/FPS
 // de verdade) — tudo aqui usa dado real, nada inventado (ver main.js's
 // 'system-stats'/'get-steam-status' e wallpaper.js's 'wallpaper-fps').
-// Seletor de avatar da sidebar — persiste em settings.userAvatar (string
-// vazia = usa o círculo com a inicial do nome, "Padrão"). Busca settings
-// direto via IPC em vez de depender da variável global `settings` (que só
-// fica populada depois que init() resolve, em paralelo com isto) — tanto
-// pra aplicar o avatar salvo ao carregar quanto pra nunca sobrescrever
-// outras configurações com um objeto ainda incompleto ao salvar.
-// Dois lugares mostram/trocam o avatar agora: o widget original da sidebar
-// (pedido do usuário: "fica muito escondido") e um novo, maior, ao lado da
-// saudação no topo do Descobrir. Cada `applyAvatar` local só atualiza SEU
-// próprio par img/fallback+picker — sem um registro compartilhado, trocar o
-// avatar num widget deixava o outro maluco (mostrando o valor antigo) até a
-// próxima navegação. `_avatarApplyFns` guarda um applyAvatar por widget
-// inicializado; qualquer escolha (nos dois lugares, incluindo upload) chama
-// todos eles, então os dois sempre refletem o mesmo estado na hora.
+// Avatar — persiste em settings.userAvatar (string vazia = usa o círculo com
+// a inicial do nome, "Padrão"). Busca settings direto via IPC em vez de
+// depender da variável global `settings` (que só fica populada depois que
+// init() resolve, em paralelo com isto) — tanto pra aplicar o avatar salvo
+// ao carregar quanto pra nunca sobrescrever outras configurações com um
+// objeto ainda incompleto ao salvar.
+// A sidebar só EXIBE o avatar (initAvatarDisplay); a edição/escolha/upload
+// vive só em Configurações (initAvatarSettingsGrid), pedido do usuário.
+// `_avatarApplyFns` guarda um applyAvatar por widget inicializado; qualquer
+// escolha em Configurações chama todos eles, então a sidebar reflete a
+// troca na hora sem precisar navegar.
 const _avatarApplyFns = [];
 function _applyAvatarEverywhere(src) {
   for (const fn of _avatarApplyFns) fn(src);
 }
 
-function initAvatarWidget(btnId, pickerId, fallbackId, imgId, uploadBtnId) {
-  const btn = document.getElementById(btnId);
-  const picker = document.getElementById(pickerId);
+// Sidebar agora só EXIBE o avatar (sem popover/upload) — pedido do usuário:
+// edição/upload ficou só em Configurações. Clicar no card já abre Configurações
+// (listener próprio em sidebarProfileCard), então não precisa de handler de clique aqui.
+function initAvatarDisplay(fallbackId, imgId) {
   const fallback = document.getElementById(fallbackId);
   const img = document.getElementById(imgId);
-  if (!btn || !picker || !fallback || !img) return;
+  if (!fallback || !img) return;
 
   function applyAvatar(src) {
     if (src) {
@@ -1584,33 +1584,33 @@ function initAvatarWidget(btnId, pickerId, fallbackId, imgId, uploadBtnId) {
       img.style.display = 'none';
       fallback.style.display = 'flex';
     }
-    picker.querySelectorAll('.avatar-picker-option').forEach(opt => {
+  }
+  _avatarApplyFns.push(applyAvatar);
+  ipc('get-settings').then((s) => applyAvatar((s && s.userAvatar) || ''));
+}
+
+// Grade de avatares em Configurações — sempre visível (não é mais popover
+// escondido atrás de clique), então não precisa de toggle show/hide.
+function initAvatarSettingsGrid(gridId, uploadBtnId) {
+  const grid = document.getElementById(gridId);
+  if (!grid) return;
+
+  function applyAvatar(src) {
+    grid.querySelectorAll('.avatar-picker-option').forEach(opt => {
       opt.classList.toggle('active', !!opt.dataset.avatar && opt.dataset.avatar === src);
     });
   }
   _avatarApplyFns.push(applyAvatar);
-
   ipc('get-settings').then((s) => applyAvatar((s && s.userAvatar) || ''));
 
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    picker.style.display = picker.style.display === 'none' ? 'block' : 'none';
-  });
-  document.addEventListener('click', (e) => {
-    if (picker.style.display !== 'none' && !picker.contains(e.target) && !btn.contains(e.target)) {
-      picker.style.display = 'none';
-    }
-  });
-
   async function chooseAvatar(src) {
-    picker.style.display = 'none';
     _applyAvatarEverywhere(src);
     const current = await ipc('get-settings');
     settings = { ...(current || {}), userAvatar: src };
     await ipc('set-settings', settings);
   }
 
-  picker.querySelectorAll('.avatar-picker-option').forEach(opt => {
+  grid.querySelectorAll('.avatar-picker-option').forEach(opt => {
     if (opt.id === uploadBtnId) return; // tratado à parte, abaixo
     opt.addEventListener('click', (e) => { e.stopPropagation(); chooseAvatar(opt.dataset.avatar || ''); });
   });
@@ -1629,7 +1629,8 @@ function initAvatarWidget(btnId, pickerId, fallbackId, imgId, uploadBtnId) {
 }
 
 function initAvatarPicker() {
-  initAvatarWidget('user-avatar-btn', 'avatar-picker', 'user-avatar-fallback', 'user-avatar-img', 'avatar-upload-btn-sidebar');
+  initAvatarDisplay('user-avatar-fallback', 'user-avatar-img');
+  initAvatarSettingsGrid('settings-avatar-grid', 'avatar-upload-btn-sidebar');
 }
 
 function initHeaderAndSystemPanel() {
@@ -1686,9 +1687,8 @@ function initHeaderAndSystemPanel() {
     });
   }
 
-  // Clicar em qualquer parte do card de perfil (nome, fundo) abre
-  // Configurações — o botão do avatar tem seu próprio clique com
-  // stopPropagation (ver initAvatarWidget), então não dispara os dois.
+  // Clicar em qualquer parte do card de perfil (foto ou nome) abre
+  // Configurações — é lá que a edição/upload do avatar agora vive.
   const sidebarProfileCard = document.getElementById('sidebar-user');
   if (sidebarProfileCard) {
     sidebarProfileCard.addEventListener('click', () => {
@@ -3139,6 +3139,7 @@ async function init() {
     if (libVolumeSlider) libVolumeSlider.value = settings.volume ?? 50;
     if ((settings.volume ?? 50) > 0) _lastNonZeroVolume = settings.volume;
     updateLibVolumeMuteIcon();
+    setGameDetectSteam.checked = settings.gameDetectionSteam ?? true;
     setPauseFs.checked = settings.pauseOnFullscreen ?? true;
     setPerfModeFs.checked = settings.performanceModeFullscreen ?? false;
     setMuteFs.checked  = settings.muteOnFullscreen  ?? false;

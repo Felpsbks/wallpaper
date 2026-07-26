@@ -195,43 +195,28 @@ body::after {
 }
 .update-banner-close:hover { background: rgba(255,255,255,0.08); color: var(--text); }
 
-/* Card de perfil — visível na sidebar (histórico: pequeno no rodapé foi
-   achado "muito escondido"; flutuando por cima do conteúdo foi achado "feio,
-   ofuscando tudo"; grande no topo funcionou, mas o usuário preferiu de volta
-   embaixo do SISTEMA — mesmo visual grande, só reposicionado. Permanente em
-   toda tela porque a sidebar é permanente). */
+/* Card de perfil — visível na sidebar, embaixo do SISTEMA. Pedido do
+   usuário: só mostra a foto (sem moldura/fundo), maior — a edição/upload
+   do avatar saiu daqui e foi pra Configurações (.settings-avatar-grid). */
 .sidebar-profile-card {
-  margin: 4px 12px 14px; padding: 10px 12px; position: relative;
-  display: flex; align-items: center; gap: 10px;
-  background: linear-gradient(135deg, rgba(124,58,237,0.18), rgba(45,27,84,0.35));
-  border: 1px solid var(--border); border-radius: 14px; cursor: pointer;
+  margin: 4px 12px 14px; padding: 6px 12px; position: relative;
+  display: flex; align-items: center; gap: 10px; cursor: pointer;
 }
-.sidebar-profile-card:hover { border-color: var(--accent); }
-.sidebar-profile-avatar { width: 44px; height: 44px; font-size: 17px; flex-shrink: 0; }
-.sidebar-profile-avatar-btn { flex-shrink: 0; }
 .sidebar-profile-name { font-size: 14px; font-weight: 700; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.user-avatar { width:36px; height:36px; border-radius:50%; border: 2px solid var(--accent); object-fit:cover; }
+/* .sidebar-profile-avatar controla o tamanho (única usuária hoje é o card da
+   sidebar); estas duas só cuidam de forma/cor — sem width/height próprios
+   pra não brigar com .sidebar-profile-avatar por especificidade de CSS. */
+.user-avatar { border-radius:50%; border: 2px solid var(--accent); object-fit:cover; }
 .user-avatar-fallback {
-  width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
+  border-radius: 50%;
   background: linear-gradient(135deg, var(--accent), var(--accent2));
   display: flex; align-items: center; justify-content: center;
-  font-size: 14px; font-weight: 700; color: #fff;
+  font-weight: 700; color: #fff;
 }
-.user-avatar-btn { background: none; border: none; padding: 0; cursor: pointer; flex-shrink: 0; border-radius: 50%; }
-.user-avatar-btn:hover { filter: brightness(1.15); }
+.sidebar-profile-avatar { width: 64px; height: 64px; font-size: 22px; flex-shrink: 0; }
 
-/* Seletor de avatar — abre pra BAIXO por padrão, mas o card de perfil agora
-   vive no rodapé da sidebar (pedido do usuário) — abrindo pra baixo ali
-   esbarraria no fim da janela, então esse modificador inverte pra cima. */
-.sidebar-profile-card-bottom .avatar-picker { top: auto; bottom: calc(100% + 8px); }
-
-.avatar-picker {
-  position: absolute; top: calc(100% + 8px); left: 0; right: 0;
-  background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
-  padding: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); z-index: 20;
-  cursor: default;
-}
-.avatar-picker-title { font-size: 11px; font-weight: 600; color: var(--text2); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.03em; }
+/* Grade de avatares em Configurações — mesmas opções redondas de antes,
+   agora sempre visível ao invés de escondida atrás de um popover. */
 .avatar-picker-grid { display: flex; gap: 8px; }
 .avatar-picker-option {
   width: 40px; height: 40px; border-radius: 50%; padding: 0; cursor: pointer;
@@ -243,6 +228,7 @@ body::after {
 .avatar-picker-option img { width: 100%; height: 100%; object-fit: cover; object-position: top center; display: block; }
 .avatar-picker-option:hover { border-color: var(--text2); }
 .avatar-picker-option.active { border-color: var(--accent); }
+.settings-avatar-grid { margin-top: 4px; }
 
 /* Sidebar: seção EXPLORAR + painel SISTEMA (uso real de CPU/RAM/FPS) */
 .nav-section-label { font-size: 10px; font-weight: 700; letter-spacing: .06em; color: var(--text2); opacity: .7; padding: 10px 12px 4px; }
