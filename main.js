@@ -691,18 +691,26 @@ function spawnWallpaperWindow(display) {
 
   // Achado ao vivo (2026-07-25): investigando um caso real de tela preta,
   // NENHUM log apareceu (nem embutimento inicial, nem vídeo, nem
-  // wallpaper-set-attempt) — só o watchdog reencaixando a janela ~3s depois.
-  // Só a janela de controle tinha esse handler; a de wallpaper nunca teve
-  // nenhum. Se wallpaper/index.html falhar ao carregar por qualquer motivo
-  // nesse estado de GPU degradada, did-finish-load nunca dispara — e sem
-  // isso, nem o embutimento inicial roda nem 'set-wallpaper' é mandado,
-  // exatamente o padrão observado, e sem NENHUM rastro em lugar nenhum até
-  // agora.
+  // wallpaper-set-attempt) — só o watchdog reencaixando a janela ~3s depois
+  // (operação Win32 pura, não depende da página ter carregado). did-fail-load
+  // TAMBÉM nunca disparou — não é uma falha, é uma TRAVA silenciosa no
+  // carregamento, sem sucesso nem erro, pra sempre. Só a janela de controle
+  // tinha handler de falha de carregamento; a de wallpaper nunca teve
+  // nenhum, então isso ficou invisível até agora.
+  //
+  // Rede de segurança: se nem did-finish-load NEM did-fail-load disparar
+  // dentro de 8s, força um reload — o encaixe atrás do desktop (watchdog)
+  // já se auto-recupera sozinho, isso faz o mesmo pro carregamento da
+  // própria página.
+  let _loadWatchdogTimer = setTimeout(() => {
+    appLog.err(`Janela de wallpaper travou carregando (displayId=${display.id}, sem did-finish-load nem did-fail-load em 8s) — forçando reload.`);
+    if (!win.isDestroyed()) win.webContents.reload();
+  }, 8000);
+  const _clearLoadWatchdog = () => { if (_loadWatchdogTimer) { clearTimeout(_loadWatchdogTimer); _loadWatchdogTimer = null; } };
+
   win.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    _clearLoadWatchdog();
     appLog.err(`Janela de wallpaper falhou ao carregar (displayId=${display.id}): code=${code} desc=${desc} url=${url}`);
-  });
-  win.webContents.on('render-process-gone', (_e, details) => {
-    appLog.err(`Janela de wallpaper: processo do renderer sumiu (displayId=${display.id}): reason=${details.reason}`);
   });
 
   if (_isScreensaver) {
@@ -715,6 +723,7 @@ function spawnWallpaperWindow(display) {
   }
 
   win.webContents.on('did-finish-load', () => {
+    _clearLoadWatchdog();
     appLog.debug(`Janela de wallpaper carregou (displayId=${display.id})`);
     if (!_isScreensaver) embedWallpaperBehindDesktop(win, display.id);
 
@@ -732,10 +741,14 @@ function spawnWallpaperWindow(display) {
   // fell back to the plain Windows wallpaper" (you're just seeing through to
   // the real desktop background underneath our now-blank window).
   win.webContents.on('render-process-gone', (_event, details) => {
-    console.error(`[main] wallpaper renderer for display ${display.id} is gone: reason=${details.reason} exitCode=${details.exitCode}`);
+    const msg = `[main] wallpaper renderer for display ${display.id} is gone: reason=${details.reason} exitCode=${details.exitCode}`;
+    console.error(msg);
+    appLog.err(msg);
   });
   win.webContents.on('unresponsive', () => {
-    console.error(`[main] wallpaper renderer for display ${display.id} became unresponsive`);
+    const msg = `[main] wallpaper renderer for display ${display.id} became unresponsive`;
+    console.error(msg);
+    appLog.err(msg);
   });
 
   wallpaperWindows.set(display.id, win);
