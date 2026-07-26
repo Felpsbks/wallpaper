@@ -1283,14 +1283,6 @@ ipcRenderer.on('wallpaper-changed', (_, w) => {
 });
 
 // ---- Terminal de Logs + status de download (Descobrir) ----
-// "ws-status-bar" é usado pelo fluxo real de download da aba Descobrir
-// (showWallpaperModal/startWorkshopDownload/download-progress) — não tem
-// mais um painel próprio (a Oficina virou o editor visual), então
-// setWsStatus() abaixo é um no-op seguro caso o elemento não exista.
-const wsStatus      = document.getElementById('ws-status-bar');
-const wsStatusText   = document.getElementById('ws-status-text');
-const wsStatusDetail = document.getElementById('ws-status-detail');
-const wsProgressFill = document.getElementById('ws-progress-fill');
 const wsLogLines     = document.getElementById('ws-log-lines');
 const wsLogCount     = document.getElementById('ws-log-count');
 
@@ -1377,22 +1369,37 @@ document.getElementById('btn-log-clear').addEventListener('click', () => {
 });
 
 
-function setWsStatus(text, detail = '', pct = null, color = 'var(--accent)') {
-  if (!wsStatus) return;
-  wsStatus.style.display = 'block';
-  wsStatus.style.background = color;
-  wsStatus.style.color = color === 'var(--accent)' ? '#000' : '#fff';
-  wsStatusText.textContent = text;
-  wsStatusDetail.textContent = detail;
-  wsProgressFill.style.width = pct !== null ? Math.min(100, Math.round(pct * 100)) + '%' : '0%';
+// #ws-status-bar foi removido do HTML numa reforma antiga da UI, e o guard
+// de null aqui virou um buraco funcional silencioso: TODA mensagem de status
+// do Workshop/SteamCMD (ex.: "📱 Aprove o login no celular", erros de
+// download, "já instalado") simplesmente não aparecia pra ninguém — achado
+// na auditoria estrutural 2026-07-26. Agora o toast se cria sozinho na
+// primeira necessidade (mesmo padrão do wallpaper-interactive-toast), fixo
+// acima da barra de controle, sem depender de HTML estático.
+function _ensureWsStatusEl() {
+  let el = document.getElementById('ws-status-bar');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'ws-status-bar';
+    el.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:86px;z-index:10000;display:none;min-width:320px;max-width:560px;padding:10px 16px;border-radius:10px;font-size:13px;font-weight:600;box-shadow:0 8px 24px rgba(0,0,0,0.45);';
+    el.innerHTML = '<div id="ws-status-text"></div>'
+      + '<div id="ws-status-detail" style="font-size:11px;font-weight:400;opacity:0.85;margin-top:2px"></div>'
+      + '<div style="height:3px;background:rgba(0,0,0,0.25);border-radius:2px;margin-top:6px;overflow:hidden"><div id="ws-progress-fill" style="height:100%;width:0%;background:rgba(255,255,255,0.9);transition:width .2s"></div></div>';
+    document.body.appendChild(el);
+  }
+  return el;
 }
-// #ws-status-bar não existe mais no HTML atual (removido numa reforma
-// anterior da UI) — wsStatus fica sempre null. setWsStatus() já se protegia
-// pra isso, mas vários pontos espalhados faziam `wsStatus.style...` direto,
-// sem checar null, e quebravam com "Cannot read properties of null"
-// (confirmado ao vivo, main.js/app.js:1513). Helper seguro pra esconder,
-// reusado em todos esses pontos.
-function hideWsStatus() { if (wsStatus) wsStatus.style.display = 'none'; }
+
+function setWsStatus(text, detail = '', pct = null, color = 'var(--accent)') {
+  const el = _ensureWsStatusEl();
+  el.style.display = 'block';
+  el.style.background = color;
+  el.style.color = color === 'var(--accent)' ? '#000' : '#fff';
+  document.getElementById('ws-status-text').textContent = text;
+  document.getElementById('ws-status-detail').textContent = detail;
+  document.getElementById('ws-progress-fill').style.width = pct !== null ? Math.min(100, Math.round(pct * 100)) + '%' : '0%';
+}
+function hideWsStatus() { const el = document.getElementById('ws-status-bar'); if (el) el.style.display = 'none'; }
 
 
 const WA_TYPE_LABELS = {
@@ -3303,29 +3310,10 @@ ipcRenderer.on('update-apply-progress', (_e, data) => {
   }
 });
 
-document.getElementById('btn-sync-steam')?.addEventListener('click', async () => {
-  const btn = document.getElementById('btn-sync-steam');
-  const oldText = btn.innerHTML;
-  btn.innerHTML = 'Sincronizando...';
-  btn.disabled = true;
-  try {
-    const res = await ipc('sync-steam-desktop');
-    if (res.error) {
-      alert('Erro ao sincronizar: ' + res.error);
-    } else if (res.count === 0) {
-      alert('Nenhum wallpaper novo encontrado na pasta da Steam. Você já tem todos ou ainda não se inscreveu em nenhum!');
-    } else {
-      alert(`Sincronização concluída! ${res.count} novo(s) wallpaper(s) importado(s).`);
-      library = await ipc('get-library');
-      renderLibrary();
-    }
-  } catch (e) {
-    alert('Erro: ' + e.message);
-  } finally {
-    btn.innerHTML = oldText;
-    btn.disabled = false;
-  }
-});
+// (Listener do antigo #btn-sync-steam removido na auditoria 2026-07-26 — o
+// botão saiu do HTML numa reforma anterior e o handler ficou morto. O
+// handler 'sync-steam-desktop' do main.js segue existindo caso a UI de
+// importar da pasta da Steam volte um dia.)
 
 // Tela de carregamento cheia na abertura do app — fica visível até a
 // biblioteca local (rápida) e a vitrine da Steam (mais lenta, depende de
