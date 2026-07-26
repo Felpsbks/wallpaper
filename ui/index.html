@@ -159,43 +159,48 @@
     <!-- ===== DESCOBRIR (NOVO) ===== -->
     <div class="panel active" id="panel-discover">
       <div class="discover-main">
-        <!-- Header interno transparente -->
-        <div class="discover-header discover-header-new">
-          <div class="greeting">
-            <h2 id="discover-greeting">Olá 👋</h2>
-            <p class="greeting-sub">Encontre wallpapers incríveis para seu desktop.</p>
-          </div>
-          <div class="header-right">
-            <div class="search-wrap" style="position:relative;">
-              <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-              <input type="text" id="discover-search-input" placeholder="Pesquisar wallpapers..." autocomplete="off" />
-              <kbd class="search-kbd">Ctrl+K</kbd>
-              <div id="discover-search-dropdown" class="discover-search-dropdown"></div>
+        <!-- Cabeçalho + pills fixos no topo ao rolar (position:sticky) —
+             pedido explícito do usuário. Precisam de fundo sólido (não
+             transparente) pra tapar o conteúdo passando por baixo. -->
+        <div class="discover-sticky-header">
+          <!-- Header interno transparente -->
+          <div class="discover-header discover-header-new">
+            <div class="greeting">
+              <h2 id="discover-greeting">Olá 👋</h2>
+              <p class="greeting-sub">Encontre wallpapers incríveis para seu desktop.</p>
             </div>
-            <button class="icon-btn" id="btn-header-logs" title="Log">
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
-            </button>
-            <button class="icon-btn" id="btn-header-settings" title="Configurações">
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-            </button>
-            <div class="steam-status-badge" id="steam-status-badge" title="Status da sessão Steam">
-              <span class="steam-status-dot"></span><span id="steam-status-label">Steam</span>
+            <div class="header-right">
+              <div class="search-wrap" style="position:relative;">
+                <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                <input type="text" id="discover-search-input" placeholder="Pesquisar wallpapers..." autocomplete="off" />
+                <kbd class="search-kbd">Ctrl+K</kbd>
+                <div id="discover-search-dropdown" class="discover-search-dropdown"></div>
+              </div>
+              <button class="icon-btn" id="btn-header-logs" title="Log">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+              </button>
+              <button class="icon-btn" id="btn-header-settings" title="Configurações">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+              </button>
+              <div class="steam-status-badge" id="steam-status-badge" title="Status da sessão Steam">
+                <span class="steam-status-dot"></span><span id="steam-status-label">Steam</span>
+              </div>
             </div>
           </div>
-        </div>
 
-        <!-- Pills de filtro rápido — usam as mesmas tags reais já validadas
-             contra a Steam (ver applyDiscoverFilter/initCategoryPills em app.js) -->
-        <div class="filter-pills" id="filter-pills">
-          <div class="pill active" data-clear="1">Todos</div>
-          <div class="pill" data-tag="Anime">Anime</div>
-          <div class="pill" data-tag="Game">Jogos</div>
-          <div class="pill" data-tag="Landscape">Paisagens</div>
-          <div class="pill" data-search="4k">4K</div>
-          <div class="pill" data-tag="Video">Vídeo</div>
-          <div class="pill" data-tag="Abstract">Abstrato</div>
-          <div class="pill" data-tag="Sci-Fi">Sci-Fi</div>
-          <div class="pill" data-search="minimalist">Minimalista</div>
+          <!-- Pills de filtro rápido — usam as mesmas tags reais já validadas
+               contra a Steam (ver applyDiscoverFilter/initCategoryPills em app.js) -->
+          <div class="filter-pills" id="filter-pills">
+            <div class="pill active" data-clear="1">Todos</div>
+            <div class="pill" data-tag="Anime">Anime</div>
+            <div class="pill" data-tag="Game">Jogos</div>
+            <div class="pill" data-tag="Landscape">Paisagens</div>
+            <div class="pill" data-search="4k">4K</div>
+            <div class="pill" data-tag="Video">Vídeo</div>
+            <div class="pill" data-tag="Abstract">Abstrato</div>
+            <div class="pill" data-tag="Sci-Fi">Sci-Fi</div>
+            <div class="pill" data-search="minimalist">Minimalista</div>
+          </div>
         </div>
 
         <!-- Seções de navegação padrão — somem temporariamente quando uma busca é confirmada (Enter), voltam quando a busca é limpa -->

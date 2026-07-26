@@ -470,6 +470,16 @@ body::after {
   padding-right: 8px;
 }
 
+/* Fica fixo no topo do scroll de .discover-main ao rolar — precisa de fundo
+   sólido (mesma cor do painel) pra tapar os cards passando por baixo. */
+.discover-sticky-header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg);
+  padding-top: 2px;
+}
+
 /* Header Transparente */
 .discover-header {
   display: flex;
