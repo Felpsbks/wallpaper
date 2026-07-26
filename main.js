@@ -1842,6 +1842,19 @@ ipcMain.handle('we-scene-save-overrides', (_, { wallpaperId, overrides }) => {
   return { ok: true };
 });
 
+// Preview ao vivo de propriedade NÃO-nativa do diálogo de Propriedades
+// (ex.: volume por item de vídeo) — achado na auditoria estrutural
+// 2026-07-26: ui/app.js's sendLivePropUpdate() invocava 'update-settings'
+// e NUNCA existiu um handler com esse nome aqui (só o canal main->renderer
+// homônimo) — toda mexida num slider não-nativo rejeitava a Promise (erro
+// "No handler registered" na aba Log) e o preview simplesmente não
+// acontecia. Só repassa pros wallpapers ativos, sem persistir nada — o
+// salvar de verdade continua sendo o botão Salvar do diálogo.
+ipcMain.handle('update-settings', (_, partial) => {
+  sendToAllWallpapers('update-settings', partial || {});
+  return true;
+});
+
 ipcMain.on('update-native-prop', (_, data) => {
   sendToAllWallpapers('update-native-prop', data);
   // Wallpaper "web" (BrowserView) não passa pelo listener da própria janela

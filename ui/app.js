@@ -2166,11 +2166,6 @@ ipcRenderer.on('download-progress', async (_, data) => {
       previewWrap.style.display = 'none';
     }
     document.getElementById('modal-steam-login').classList.add('open');
-  } else if (data.state === 'needs-2fa') {
-    _slPending = { workshopId: data.workshopId, name: data.name, previewUrl: data.previewUrl };
-    document.getElementById('sl-2fa-wrap').style.display = 'block';
-    document.getElementById('sl-2fa').value = '';
-    document.getElementById('modal-steam-login').classList.add('open');
   } else if (data.state === 'needs-mobile-auth') {
     setWsStatus('📱 Aprove o login no aplicativo da Steam no celular...', '', null, '#ff9800');
   } else if (data.state === 'error') {
