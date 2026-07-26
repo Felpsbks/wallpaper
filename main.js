@@ -689,6 +689,22 @@ function spawnWallpaperWindow(display) {
   win.loadFile(path.join(__dirname, 'wallpaper', 'index.html'));
   win.setIgnoreMouseEvents(_isScreensaver ? false : !_wallpaperInteractive);
 
+  // Achado ao vivo (2026-07-25): investigando um caso real de tela preta,
+  // NENHUM log apareceu (nem embutimento inicial, nem vídeo, nem
+  // wallpaper-set-attempt) — só o watchdog reencaixando a janela ~3s depois.
+  // Só a janela de controle tinha esse handler; a de wallpaper nunca teve
+  // nenhum. Se wallpaper/index.html falhar ao carregar por qualquer motivo
+  // nesse estado de GPU degradada, did-finish-load nunca dispara — e sem
+  // isso, nem o embutimento inicial roda nem 'set-wallpaper' é mandado,
+  // exatamente o padrão observado, e sem NENHUM rastro em lugar nenhum até
+  // agora.
+  win.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    appLog.err(`Janela de wallpaper falhou ao carregar (displayId=${display.id}): code=${code} desc=${desc} url=${url}`);
+  });
+  win.webContents.on('render-process-gone', (_e, details) => {
+    appLog.err(`Janela de wallpaper: processo do renderer sumiu (displayId=${display.id}): reason=${details.reason}`);
+  });
+
   if (_isScreensaver) {
     win.webContents.on('before-input-event', () => app.exit(0));
     win.on('mousemove', () => app.exit(0)); // Exit on mouse move
@@ -699,6 +715,7 @@ function spawnWallpaperWindow(display) {
   }
 
   win.webContents.on('did-finish-load', () => {
+    appLog.debug(`Janela de wallpaper carregou (displayId=${display.id})`);
     if (!_isScreensaver) embedWallpaperBehindDesktop(win, display.id);
 
     // Per-display wallpaper, fallback to global current
