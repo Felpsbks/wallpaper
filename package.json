@@ -1,6 +1,6 @@
 {
   "name": "engine-wallpaper",
-  "version": "1.0.49",
+  "version": "1.0.50",
   "description": "Live wallpaper engine for Windows",
   "main": "main.js",
   "scripts": {

@@ -13,6 +13,14 @@ const transitionEl = document.getElementById('transition-overlay');
 
 let currentScene   = null;
 let currentWeScene  = null;
+// Volume da SESSÃO (o slider global de Configurações/Biblioteca) — vive aqui
+// no nível do módulo de propósito, pra sobreviver a troca de wallpaper.
+// Bug real corrigido 2026-07-25: showVideo() sobrescrevia isso com
+// `wallpaper.volume` (uma propriedade POR ITEM, com padrão 50%, editável no
+// diálogo de Propriedades de cada wallpaper) toda vez que um vídeo carregava
+// — por isso o volume "voltava ao padrão" ao trocar de wallpaper ou reabrir
+// o app, mesmo com o valor certo já salvo em settings.volume. Agora
+// showVideo() nunca mais reseta savedVolume a partir do item.
 let savedVolume = 0.5;
 // Wallpaper tipo "web" (BrowserView, controlado pelo main.js — ver showWeb).
 // Só existe no host Electron; no WallpaperHost.exe (WebView2), type:'url' é
@@ -166,6 +174,11 @@ function applyClockOverlay(cfg) {
 hostBridge.invoke('get-settings').then(s => {
   if (s && s.audioReactive) initAudioVisualizer();
   if (s && s.clockOverlay) applyClockOverlay(s.clockOverlay);
+  if (s && s.volume !== undefined) {
+    savedVolume = s.volume / 100;
+    videoEl.volume = savedVolume;
+    videoEl.muted = savedVolume <= 0;
+  }
 });
 
 function hideAll() {
@@ -253,7 +266,11 @@ function showVideo(wallpaper) {
   recreateVideoElements();
   videoEl.style.display = 'block';
   videoEl.src = toPlayableSrc(wallpaper.src);
-  savedVolume = (wallpaper.volume ?? 50) / 100;
+  // savedVolume é o volume da SESSÃO (settings.volume, ver o get-settings lá
+  // em cima e os handlers 'unmute'/'update-settings' mais abaixo) — não
+  // reseta a partir de `wallpaper.volume` (propriedade por item) mais, isso
+  // era o bug que fazia o volume "voltar ao padrão" a cada troca de
+  // wallpaper/reabertura do app.
   videoEl.volume = savedVolume;
   videoEl.loop = true;
   // makeVideoElement() sempre cria o elemento com muted=true — obrigatório
