@@ -1740,6 +1740,24 @@ function initHeaderAndSystemPanel() {
     if (fpsVal) fpsVal.textContent = fps;
   });
 
+  // Sistema de nível cosmético no avatar (ver src/level-system.js): anel
+  // verde = progresso das 4h ativas de hoje, número no canto = nível atual.
+  function applyLevelStatus(data) {
+    if (!data) return;
+    const ring = document.getElementById('sidebar-avatar-ring');
+    const badge = document.getElementById('sidebar-level-badge');
+    if (badge) badge.textContent = data.level;
+    const pct = data.goalMs ? Math.min(100, Math.round((data.activeMs / data.goalMs) * 100)) : 0;
+    if (ring) {
+      ring.style.setProperty('--level-pct', pct);
+      const hoje = (data.activeMs / 3600000).toFixed(1);
+      const meta = (data.goalMs / 3600000).toFixed(0);
+      ring.title = `Nível ${data.level} — ${hoje}h de ${meta}h hoje`;
+    }
+  }
+  ipc('get-level-status').then(applyLevelStatus).catch(() => {});
+  ipcRenderer.on('level-status', (_, data) => applyLevelStatus(data));
+
   // Sidebar "EXPLORAR": troca pra aba Descobrir e aplica o mesmo filtro que
   // os chips/pills já usam (tendência/mais recentes/rolar até Categorias).
   document.querySelectorAll('.nav-item-sm[data-discover-sort]').forEach((item) => {

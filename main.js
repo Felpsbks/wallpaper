@@ -176,6 +176,7 @@ const TRIGGERS = require('./src/routines');
 const { getRunningProcesses } = require('./src/routines/_processMatch');
 const { reconcilePlaybackControls, appRulesNeedProcesses, setAppStatePause } = require('./src/playback-rules');
 const youtubeDownload = require('./src/youtube-download');
+const { tickLevelSystem, getLevelState, ACTIVE_GOAL_MS: LEVEL_ACTIVE_GOAL_MS } = require('./src/level-system');
 
 // Nudge the OS scheduler to favor this process over other startup apps
 // competing for CPU/disk right after login — part of "start fast like
@@ -1955,7 +1956,15 @@ function sampleSystemStats() {
 }
 setInterval(() => {
   if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('system-stats', sampleSystemStats());
+  const levelState = tickLevelSystem(store, 2000);
+  if (controlWin && !controlWin.isDestroyed()) {
+    controlWin.webContents.send('level-status', { level: levelState.level, activeMs: levelState.activeMs, goalMs: LEVEL_ACTIVE_GOAL_MS });
+  }
 }, 2000);
+ipcMain.handle('get-level-status', () => {
+  const s = getLevelState(store);
+  return { level: s.level, activeMs: s.activeMs, goalMs: LEVEL_ACTIVE_GOAL_MS };
+});
 
 // Status real da sessão Steam (usada pro badge no cabeçalho) — mesmos
 // campos que já guardamos pra baixar/logar, só expostos pra UI conferir.
@@ -2795,7 +2804,7 @@ ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedU
 // não tem "novidade" pra quem tá abrindo o app pela primeira vez.
 const WHATS_NEW = {
   version: APP_VERSION,
-  text: 'Novo: Modo Jogo — detecta direto pela Steam quando você começa a jogar (mesmo em janela) e descarrega o wallpaper da memória na hora, recarregando só quando você fecha o jogo, pra não roubar desempenho da sua partida. Avatar da sidebar agora só mostra a foto, sem moldura, com status da Steam e um atalho rápido de sair logo abaixo. Corrigido: baixar uma atualização podia travar pra sempre em "0%" se a conexão engasgasse.',
+  text: 'Novo: Modo Jogo — detecta direto pela Steam quando você começa a jogar e descarrega o wallpaper da memória na hora. Avatar da sidebar ganhou um sistema de nível cosmético (anel verde mostra o progresso das 4h ativas do dia, o número é o nível — sobe 1 se bateu 4h no dia, desce 1 se não bateu). Corrigido: baixar uma atualização podia travar pra sempre em "0%" se a conexão engasgasse.',
 };
 ipcMain.handle('get-whats-new', () => {
   if (store.get('lastSeenWhatsNewVersion') === WHATS_NEW.version) return null;

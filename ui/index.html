@@ -123,8 +123,14 @@
          botão de sair rápido adicionados pra preencher o espaço que ficou
          vazio depois que a moldura saiu (pedido do usuário). -->
     <div class="sidebar-profile-card sidebar-profile-card-plain" id="sidebar-user">
-      <div class="user-avatar-fallback sidebar-profile-avatar" id="user-avatar-fallback">U</div>
-      <img class="user-avatar sidebar-profile-avatar" id="user-avatar-img" style="display:none" alt="Avatar" />
+      <!-- Anel verde = progresso das 4h ativas de hoje (sistema de nível
+           cosmético pedido pelo usuário, ver src/level-system.js); o número
+           no canto é o nível em si. title mostra os detalhes em texto. -->
+      <div class="sidebar-profile-avatar-ring" id="sidebar-avatar-ring" title="Nível 0 — 0h de 4h hoje">
+        <div class="user-avatar-fallback sidebar-profile-avatar" id="user-avatar-fallback">U</div>
+        <img class="user-avatar sidebar-profile-avatar" id="user-avatar-img" style="display:none" alt="Avatar" />
+        <span class="sidebar-profile-level-badge" id="sidebar-level-badge">0</span>
+      </div>
       <div class="sidebar-profile-info">
         <span class="sidebar-profile-name" id="sidebar-user-name">…</span>
         <span class="sidebar-profile-status" id="sidebar-user-status">--</span>

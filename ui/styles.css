@@ -212,10 +212,28 @@ body::after {
   display: flex; align-items: center; justify-content: center;
 }
 .sidebar-profile-quit-btn:hover { background: rgba(255,255,255,0.08); color: #f87171; }
+/* Anel de progresso do "sistema de nível" cosmético (ver
+   src/level-system.js) — conic-gradient preenche em verde conforme
+   --level-pct (0 a 100, definido via JS) se aproxima das 4h ativas do dia.
+   O badge no canto mostra o nível em si (sobe/desce 1 por dia). */
+.sidebar-profile-avatar-ring {
+  position: relative; flex-shrink: 0;
+  width: 48px; height: 48px; border-radius: 50%; padding: 3px; box-sizing: border-box;
+  background: conic-gradient(#4ade80 calc(var(--level-pct, 0) * 1%), rgba(255,255,255,0.1) 0);
+  display: flex; align-items: center; justify-content: center;
+}
+.sidebar-profile-level-badge {
+  position: absolute; bottom: -2px; right: -2px; box-sizing: border-box;
+  min-width: 18px; height: 18px; padding: 0 4px;
+  border-radius: 999px; background: #4ade80; color: #0a0a0f;
+  font-size: 10px; font-weight: 800; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  border: 2px solid #0d0618;
+}
 /* .sidebar-profile-avatar controla o tamanho (única usuária hoje é o card da
    sidebar); estas duas só cuidam de forma/cor — sem width/height próprios
    pra não brigar com .sidebar-profile-avatar por especificidade de CSS. */
-.user-avatar { border-radius:50%; border: 2px solid var(--accent); object-fit:cover; }
+.user-avatar { border-radius:50%; object-fit:cover; }
 .user-avatar-fallback {
   border-radius: 50%;
   background: linear-gradient(135deg, var(--accent), var(--accent2));
