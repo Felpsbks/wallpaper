@@ -906,11 +906,57 @@ ipcRenderer.on('wallpaperhost-install-progress', (_e, data) => {
   } else if (data.status === 'done') {
     webview2InstallStatus.textContent = 'Componente instalado.';
     setTimeout(() => { webview2InstallStatus.style.display = 'none'; }, 3000);
+    refreshWebview2ComponentBtn();
   } else if (data.status === 'error') {
     webview2InstallStatus.textContent = 'Falha ao baixar o componente — usando o modo padrão por enquanto. Tente ligar de novo mais tarde.';
     setTimeout(() => { webview2InstallStatus.style.display = 'none'; }, 6000);
+    refreshWebview2ComponentBtn();
   }
 });
+
+// Instalar/desinstalar o componente WebView2 manualmente (pedido do usuário:
+// poder liberar os ~200 MB do disco quando não usa o modo — antes, uma vez
+// baixado, ficava lá pra sempre sem nenhum jeito de remover pela UI).
+const btnWebview2Component = document.getElementById('btn-webview2-component');
+async function refreshWebview2ComponentBtn() {
+  if (!btnWebview2Component) return;
+  const st = await ipc('get-wallpaperhost-status');
+  btnWebview2Component.style.display = 'inline-block';
+  btnWebview2Component.dataset.installed = st.installed ? '1' : '';
+  btnWebview2Component.textContent = st.installed
+    ? `Desinstalar motor (libera ${st.sizeMB} MB)`
+    : 'Instalar motor agora';
+}
+btnWebview2Component?.addEventListener('click', async () => {
+  btnWebview2Component.disabled = true;
+  try {
+    if (btnWebview2Component.dataset.installed) {
+      const confirmed = await showConfirm(
+        'O motor alternativo será removido do disco e o Modo de compatibilidade desligado (se estiver ligado). Pra usar de novo é só reativar o toggle — ele baixa sozinho.',
+        'Desinstalar motor WebView2?'
+      );
+      if (confirmed) {
+        const res = await ipc('uninstall-wallpaperhost');
+        if (res && res.ok) {
+          setWebview2Compat.checked = false;
+          settings.webview2CompatMode = false;
+        } else if (res && res.message) {
+          webview2InstallStatus.style.display = 'block';
+          webview2InstallStatus.textContent = res.message;
+          setTimeout(() => { webview2InstallStatus.style.display = 'none'; }, 6000);
+        }
+      }
+    } else {
+      // Instala sem ligar o modo — o progresso aparece pelo listener de
+      // 'wallpaperhost-install-progress' acima, igual ao fluxo do toggle.
+      await ipc('install-wallpaperhost');
+    }
+  } finally {
+    btnWebview2Component.disabled = false;
+    refreshWebview2ComponentBtn();
+  }
+});
+refreshWebview2ComponentBtn();
 
 if (btnInstallScr) {
   btnInstallScr.addEventListener('click', async () => {

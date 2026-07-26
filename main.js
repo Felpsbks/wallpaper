@@ -584,6 +584,73 @@ async function ensureWallpaperHostInstalled(onProgress) {
   }
 }
 
+// Instalar/desinstalar manualmente o componente WebView2 pelas Configurações
+// (pedido do usuário 2026-07-26): uma vez baixado, o wallpaperhost/ (~200MB
+// extraído) ficava no disco pra sempre, mesmo com o modo desligado e sem
+// nenhum jeito de remover sem fuçar na pasta do app à mão.
+function _wallpaperHostDirSizeBytes(dir) {
+  let total = 0;
+  for (const e of fs.readdirSync(dir)) {
+    const p = path.join(dir, e);
+    const s = fs.statSync(p);
+    total += s.isDirectory() ? _wallpaperHostDirSizeBytes(p) : s.size;
+  }
+  return total;
+}
+
+ipcMain.handle('get-wallpaperhost-status', () => {
+  const dir = path.join(path.dirname(process.execPath), 'wallpaperhost');
+  if (!fs.existsSync(path.join(dir, 'WallpaperHost.exe'))) return { installed: false, sizeMB: 0 };
+  let sizeMB = 0;
+  try { sizeMB = Math.round(_wallpaperHostDirSizeBytes(dir) / 1024 / 1024); } catch (_) { /* tamanho é cosmético */ }
+  return { installed: true, sizeMB };
+});
+
+ipcMain.handle('install-wallpaperhost', async () => {
+  return ensureWallpaperHostInstalled((progress) => {
+    if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('wallpaperhost-install-progress', progress);
+  });
+});
+
+ipcMain.handle('uninstall-wallpaperhost', async () => {
+  const dir = path.join(path.dirname(process.execPath), 'wallpaperhost');
+  if (!fs.existsSync(dir)) return { ok: true, freedMB: 0 };
+
+  let freedMB = 0;
+  try { freedMB = Math.round(_wallpaperHostDirSizeBytes(dir) / 1024 / 1024); } catch (_) {}
+
+  // Com o modo ligado, desliga primeiro e recria as janelas no motor padrão
+  // — recreateWallpaperWindows() já mata os processos WallpaperHost.exe que
+  // este app conhece (win.kill() nos isWebView2Host).
+  const settings = store.get('settings') || {};
+  if (settings.webview2CompatMode) {
+    settings.webview2CompatMode = false;
+    store.set('settings', settings);
+    recreateWallpaperWindows();
+  }
+  // Rede de segurança pra algum processo órfão de sessão anterior ainda
+  // segurando arquivos da pasta — mesmo taskkill que o apply-update usa.
+  try { require('child_process').execSync('taskkill /F /IM WallpaperHost.exe', { windowsHide: true, stdio: 'ignore' }); } catch (_) { /* não existir é o esperado */ }
+
+  // O kill acima é assíncrono do ponto de vista do file lock — tenta com
+  // pequenas pausas em vez de falhar na primeira (mesma classe de corrida
+  // já vista no build, ver copyDirWithVerify em build-dist.js).
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      break;
+    } catch (_) {
+      if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * attempt));
+    }
+  }
+  if (fs.existsSync(dir)) {
+    appLog.err('Não consegui remover a pasta wallpaperhost/ — algum arquivo ainda está em uso. Tente de novo em alguns segundos.');
+    return { ok: false, message: 'Pasta ainda em uso — tente de novo em alguns segundos.' };
+  }
+  appLog.ok(`Componente WebView2 desinstalado (${freedMB} MB liberados). Pra usar o Modo de compatibilidade de novo, é só ligar o toggle — ele baixa sozinho.`);
+  return { ok: true, freedMB };
+});
+
 function spawnWallpaperWindowOrHost(display) {
   const settings = store.get('settings') || {};
   if (settings.webview2CompatMode && process.platform === 'win32' && !_isScreensaver && !_isConfigMode) {
