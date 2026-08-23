@@ -2804,7 +2804,7 @@ ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedU
 // não tem "novidade" pra quem tá abrindo o app pela primeira vez.
 const WHATS_NEW = {
   version: APP_VERSION,
-  text: 'Novo: Modo Jogo — detecta direto pela Steam quando você começa a jogar e descarrega o wallpaper da memória na hora. Avatar da sidebar ganhou um sistema de nível cosmético (anel verde mostra o progresso das 4h ativas do dia, o número é o nível — sobe 1 se bateu 4h no dia, desce 1 se não bateu). Corrigido: baixar uma atualização podia travar pra sempre em "0%" se a conexão engasgasse.',
+  text: 'Corrigido: uma queda de energia no meio de uma gravação podia corromper o arquivo de configuração e apagar a licença ativada, forçando reativação que falhava com "chave em uso em outro PC". Gravação agora é atômica (nunca mais trava com o arquivo pela metade) e um arquivo corrompido vira backup em vez de ser destruído.',
 };
 ipcMain.handle('get-whats-new', () => {
   if (store.get('lastSeenWhatsNewVersion') === WHATS_NEW.version) return null;

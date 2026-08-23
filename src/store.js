@@ -15,13 +15,33 @@ class Store {
       if (fs.existsSync(this.filePath)) {
         return JSON.parse(fs.readFileSync(this.filePath, 'utf-8'));
       }
-    } catch (_) {}
+    } catch (err) {
+      // JSON corrompido (ex: queda de energia no meio de uma escrita antiga,
+      // antes do rename atômico acima existir) — guarda uma cópia antes de
+      // resetar pra {}, em vez de destruir a evidência silenciosamente. Não
+      // tenta recuperar automaticamente (arquivo truncado pode não ter jeito
+      // de recuperar de forma confiável), só preserva pra inspeção manual.
+      try {
+        fs.copyFileSync(this.filePath, this.filePath + '.corrupted-' + Date.now());
+      } catch (_) {}
+      console.error('[store] config.json corrompido, resetando (backup salvo):', err.message);
+    }
     return {};
   }
 
+  // Escreve num arquivo temporário e troca com rename() — atômico no mesmo
+  // volume, então uma queda de luz no meio da escrita nunca deixa o
+  // config.json real truncado. Bug real encontrado: writeFileSync direto no
+  // arquivo final deixava uma janela onde uma queda de energia corrompia o
+  // JSON; _load() então falhava o parse e resetava TUDO pra {} (perdendo
+  // machineId + licença), forçando reativação que falhava com
+  // "chave em uso em outro PC" (o servidor ainda lembrava do machineId
+  // antigo). Ver license-server/store.js's validateKey.
   _save() {
     try {
-      fs.writeFileSync(this.filePath, JSON.stringify(this._data, null, 2), 'utf-8');
+      const tmpPath = this.filePath + '.tmp';
+      fs.writeFileSync(tmpPath, JSON.stringify(this._data, null, 2), 'utf-8');
+      fs.renameSync(tmpPath, this.filePath);
     } catch (err) {
       console.error('[store] Save error:', err.message);
     }
