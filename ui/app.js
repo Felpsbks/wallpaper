@@ -1169,7 +1169,9 @@ function renderSteamList() {
     item.className = 'steam-item' + (already ? ' steam-already' : '');
     const previewSrc = wp.preview ? toFileUrl(wp.preview) : '';
     const badgeLabel = wp.type === 'video' ? 'Vídeo' : wp.type === 'scene' ? 'Cena' : 'Web';
-    const sceneNote  = wp.type === 'scene' ? ' · preview estático' : '';
+    // Cena com dados legíveis roda ao vivo; só cai pra imagem estática
+    // quando o pacote não pôde ser aberto (sem weSceneDir).
+    const sceneNote  = wp.type === 'scene' && !wp.weSceneDir ? ' · preview estático' : '';
     item.innerHTML = `
       <input type="checkbox" class="steam-check" ${already ? 'disabled' : ''} />
       <div class="steam-thumb">${previewSrc ? `<img src="${previewSrc}" onerror="this.parentNode.innerHTML=''" />` : ''}<span class="steam-badge steam-badge-${wp.type}">${badgeLabel}</span></div>

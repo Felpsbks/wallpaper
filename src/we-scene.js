@@ -64,11 +64,92 @@ function expandToRgba(raw, bytesPerPixel, pixelCount) {
     if (bytesPerPixel === 1) {
       const g = raw[i];
       out[i * 4] = g; out[i * 4 + 1] = g; out[i * 4 + 2] = g; out[i * 4 + 3] = g;
+    } else if (bytesPerPixel === 2) {
+      // RG88 (formato 8 do WE): mesma conversão do shader real
+      // (common_fragment.h ConvertTexture0Format: `_sample.rrrg`) — R é a
+      // luminância, G é o alfa. Usado por sprites de partícula em escala de
+      // cinza com transparência (flare, névoa, feixes): 51 das 229 texturas
+      // de estoque do WE não decodificavam sem isso (2026-10-13).
+      const l = raw[i * 2], a = raw[i * 2 + 1];
+      out[i * 4] = l; out[i * 4 + 1] = l; out[i * 4 + 2] = l; out[i * 4 + 3] = a;
     } else { // 3 (RGB888)
       out[i * 4] = raw[i * 3]; out[i * 4 + 1] = raw[i * 3 + 1]; out[i * 4 + 2] = raw[i * 3 + 2]; out[i * 4 + 3] = 255;
     }
   }
   return out;
+}
+
+// Descompressão DXT1/DXT3/DXT5 (BC1/BC2/BC3) pra RGBA. O formato vem do
+// cabeçalho TEXV (u32 logo após "TEXV0005\0TEXI0001\0"): 4 = DXT5, 6 = DXT3,
+// 7 = DXT1. DXT5/DXT3 ocupam 1 byte por pixel — o mesmo tamanho de R8 —
+// então o tamanho sozinho não diferencia: sem isso as texturas DXT5 da cena
+// 3762437755 (cenário 4K, personagem) saíam como listras cinzas (2026-10-16).
+function decodeDxtToRgba(data, width, height, format) {
+  const blockBytes = format === 7 ? 8 : 16;
+  const bw = Math.ceil(width / 4), bh = Math.ceil(height / 4);
+  if (data.length < bw * bh * blockBytes) throw new Error('DXT data too short');
+  const out = Buffer.alloc(width * height * 4);
+  const c = new Uint8Array(16), a = new Uint8Array(16);
+  const rgb565 = (v, o) => {
+    const r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
+    c[o] = (r << 3) | (r >> 2); c[o + 1] = (g << 2) | (g >> 4); c[o + 2] = (b << 3) | (b >> 2); c[o + 3] = 255;
+  };
+  for (let by = 0; by < bh; by++) {
+    for (let bx = 0; bx < bw; bx++) {
+      let p = (by * bw + bx) * blockBytes;
+      const alpha = new Uint8Array(16).fill(255);
+      if (format === 4) { // DXT5: alfa interpolado de 2 extremos + índices de 3 bits
+        a[0] = data[p]; a[1] = data[p + 1];
+        if (a[0] > a[1]) for (let i = 1; i < 7; i++) a[i + 1] = ((7 - i) * a[0] + i * a[1] + 3) / 7 | 0;
+        else { for (let i = 1; i < 5; i++) a[i + 1] = ((5 - i) * a[0] + i * a[1] + 2) / 5 | 0; a[6] = 0; a[7] = 255; }
+        let bits = 0, nbits = 0, q = p + 2;
+        for (let i = 0; i < 16; i++) {
+          if (nbits < 3) { bits |= data[q++] << nbits; nbits += 8; }
+          alpha[i] = a[bits & 7]; bits >>= 3; nbits -= 3;
+        }
+        p += 8;
+      } else if (format === 6) { // DXT3: alfa explícito de 4 bits
+        for (let i = 0; i < 16; i++) { const v = (data[p + (i >> 1)] >> ((i & 1) * 4)) & 15; alpha[i] = v * 17; }
+        p += 8;
+      }
+      const c0 = data[p] | (data[p + 1] << 8), c1 = data[p + 2] | (data[p + 3] << 8);
+      rgb565(c0, 0); rgb565(c1, 4);
+      if (c0 > c1 || format !== 7) {
+        for (let k = 0; k < 3; k++) { c[8 + k] = (2 * c[k] + c[4 + k] + 1) / 3 | 0; c[12 + k] = (c[k] + 2 * c[4 + k] + 1) / 3 | 0; }
+        c[11] = 255; c[15] = 255;
+      } else {
+        for (let k = 0; k < 3; k++) c[8 + k] = (c[k] + c[4 + k]) >> 1;
+        c[11] = 255; c[12] = c[13] = c[14] = 0; c[15] = 0; // DXT1 com transparência de 1 bit
+      }
+      const idx = data[p + 4] | (data[p + 5] << 8) | (data[p + 6] << 16) | (data[p + 7] << 24);
+      for (let i = 0; i < 16; i++) {
+        const x = bx * 4 + (i & 3), y = by * 4 + (i >> 2);
+        if (x >= width || y >= height) continue;
+        const ci = ((idx >>> (i * 2)) & 3) * 4, o = (y * width + x) * 4;
+        out[o] = c[ci]; out[o + 1] = c[ci + 1]; out[o + 2] = c[ci + 2];
+        out[o + 3] = format === 7 ? c[ci + 3] : alpha[i];
+      }
+    }
+  }
+  return out;
+}
+
+// A textura alocada é arredondada pra potência de 2 (ex: 1024×1024) mas a
+// imagem útil pode ser menor (ex: 1000×1000) — o resto é preenchimento que o
+// WE nunca mostra (o UV dele vai só até imgW/texW). O cabeçalho TEXV traz os
+// dois tamanhos (u32 em 26/30 = textura, 34/38 = imagem). Sem recortar, a
+// imagem inteira ficava esticada no objeto, com borda vazia — 91 das 365
+// texturas do cache têm preenchimento (2026-10-16).
+function encodeTexRgba(texBuffer, rgba, width, height) {
+  if (texBuffer.length >= 42 && texBuffer.toString('latin1', 0, 4) === 'TEXV') {
+    const imgW = texBuffer.readUInt32LE(34), imgH = texBuffer.readUInt32LE(38);
+    if (imgW > 0 && imgH > 0 && imgW <= width && imgH <= height && (imgW < width || imgH < height)) {
+      const out = Buffer.alloc(imgW * imgH * 4);
+      for (let y = 0; y < imgH; y++) rgba.copy(out, y * imgW * 4, y * width * 4, y * width * 4 + imgW * 4);
+      return encodeRgbaToPng(out, imgW, imgH);
+    }
+  }
+  return encodeRgbaToPng(rgba, width, height);
 }
 
 function encodeRgbaToPng(rgba, width, height) {
@@ -176,6 +257,25 @@ function decodeTexToPng(texBuffer) {
   if (texbIdx !== -1) {
     const version = texBuffer.toString('latin1', texbIdx + 4, texbIdx + 8);
     const fieldsStart = texbIdx + 9; // "TEXBxxxx\0"
+
+    // TEXB0001 (container antigo, ex: textura de estoque util/noflow.tex que
+    // o efeito "shake" usa como mapa de direção padrão — sem isso o shake
+    // falhava em toda cena que não traz o próprio mapa). Layout lido dos
+    // bytes reais (2026-10-13): [u32 imagens][u32 mips][u32 largura]
+    // [u32 altura][u32 tamanho] + pixels CRUS (sem LZ4), 1/3/4 bytes por pixel.
+    if (version === '0001' && fieldsStart + 20 <= texBuffer.length) {
+      const width = texBuffer.readUInt32LE(fieldsStart + 8);
+      const height = texBuffer.readUInt32LE(fieldsStart + 12);
+      const dataLength = texBuffer.readUInt32LE(fieldsStart + 16);
+      const dataStart = fieldsStart + 20;
+      const pixelCount = width * height;
+      const bpp = pixelCount > 0 ? dataLength / pixelCount : 0;
+      if (dataStart + dataLength <= texBuffer.length && (bpp === 1 || bpp === 2 || bpp === 3 || bpp === 4)) {
+        const raw = texBuffer.subarray(dataStart, dataStart + dataLength);
+        return encodeTexRgba(texBuffer, bpp === 4 ? raw : expandToRgba(raw, bpp, pixelCount), width, height);
+      }
+    }
+
     const layouts = version === '0003'
       ? { formatOff: 4, widthOff: 12, heightOff: 16, uncompOff: 24, lenOff: 28, headerSize: 32 }
       : version === '0002'
@@ -194,6 +294,20 @@ function decodeTexToPng(texBuffer) {
         return texBuffer.slice(dataStart, dataStart + dataLength);
       }
 
+      // DXT: o formato está no cabeçalho TEXV, não no TEXB (ver decodeDxtToRgba).
+      const texvFormat = texBuffer.toString('latin1', 0, 4) === 'TEXV' && texBuffer.length >= 22 ? texBuffer.readUInt32LE(18) : -1;
+      if ((texvFormat === 4 || texvFormat === 6 || texvFormat === 7) && format !== 2 && width > 0 && height > 0
+          && dataLength > 0 && dataStart + dataLength <= texBuffer.length) {
+        const flagOff = version === '0003' ? 20 : version === '0002' ? 16 : 24; // campo "flag": 1 = LZ4
+        const lz4 = texBuffer.readUInt32LE(fieldsStart + flagOff) === 1;
+        try {
+          const data = lz4
+            ? lz4BlockDecompress(texBuffer, dataStart, dataLength, uncompressedSize)
+            : texBuffer.subarray(dataStart, dataStart + dataLength);
+          return encodeTexRgba(texBuffer, decodeDxtToRgba(data, width, height, texvFormat), width, height);
+        } catch (_) { /* cai no scan cego abaixo */ }
+      }
+
       // Formato "cru + LZ4" também é usado por texturas de 1 canal (máscaras
       // de opacidade em escala de cinza, ex: effects/foliagesway's g_Texture1)
       // e de 3 canais (RGB sem alfa) — não só RGBA8888. bytesPerPixel vem do
@@ -203,11 +317,11 @@ function decodeTexToPng(texBuffer) {
       const pixelCount = width * height;
       const bytesPerPixel = pixelCount > 0 ? uncompressedSize / pixelCount : 0;
       if (dataLength > 0 && dataStart + dataLength <= texBuffer.length && width > 0 && height > 0
-          && Number.isInteger(bytesPerPixel) && (bytesPerPixel === 1 || bytesPerPixel === 3 || bytesPerPixel === 4)) {
+          && Number.isInteger(bytesPerPixel) && (bytesPerPixel === 1 || bytesPerPixel === 2 || bytesPerPixel === 3 || bytesPerPixel === 4)) {
         try {
           const raw = lz4BlockDecompress(texBuffer, dataStart, dataLength, uncompressedSize);
           const rgba = bytesPerPixel === 4 ? raw : expandToRgba(raw, bytesPerPixel, pixelCount);
-          return encodeRgbaToPng(rgba, width, height);
+          return encodeTexRgba(texBuffer, rgba, width, height);
         } catch (_) { /* falls through to the blind scan below */ }
       }
     }
@@ -303,188 +417,358 @@ function unpackPkg(pkgPath, outDir) {
     written.push(outPath);
 
     if (e.name.toLowerCase().endsWith('.tex')) {
-      const png = decodeTexToPng(data);
-      if (png) fs.writeFileSync(outPath + '.png', png);
+      const video = extractTexVideo(data);
+      if (video) fs.writeFileSync(outPath + '.mp4', video);
+      else {
+        const png = decodeTexToPng(data);
+        if (png) fs.writeFileSync(outPath + '.png', png);
+      }
     }
   }
+  markSceneCacheCurrent(outDir);
   return written;
+}
+
+// Versão do decodificador de .tex gravada no cache por unpackPkg. Quando o
+// decodificador passa a entender um formato novo, os .tex.png antigos do
+// cache ficam errados (ex: DXT5 gravado como listras cinzas até 2026-10-16) —
+// subir este número faz o main desempacotar de novo, uma vez por cena.
+const TEX_DECODER_VERSION = 3; // 3: recorte do preenchimento (encodeTexRgba)
+const TEX_DECODER_MARKER = '.tex-decoder-version';
+function isSceneCacheCurrent(cacheDir) {
+  try { return fs.readFileSync(path.join(cacheDir, TEX_DECODER_MARKER), 'utf-8').trim() === String(TEX_DECODER_VERSION); }
+  catch { return false; }
+}
+function markSceneCacheCurrent(cacheDir) {
+  fs.writeFileSync(path.join(cacheDir, TEX_DECODER_MARKER), String(TEX_DECODER_VERSION));
+}
+// .tex cujo .png o decodificador antigo gravava errado (DXT1/3/5).
+function isDxtTex(buf) {
+  return buf.length >= 22 && buf.toString('latin1', 0, 4) === 'TEXV' && [4, 6, 7].includes(buf.readUInt32LE(18));
 }
 
 // Puppet ("*_puppet.mdl") — Wallpaper Engine's 2D rigged mesh format,
 // referenced by a model.json's "puppet" field alongside its usual
 // "material". Shares the "MDLV" magic family with the rigid 3D .mdl format
 // (confirmed MDLV0017 there vs MDLV0016 here) but this is a separate,
-// simpler layout. Mesh (bind-pose vertices/indices) + skeleton (bone
-// hierarchy + bind matrices, see decodePuppetSkeleton below) are both
-// decoded now (2026-07-20) — enough to assemble the puppet correctly in
-// its bind pose (each body part transformed to its real bone position,
-// not the scattered raw-mesh look from before). A THIRD block
-// ("MDLA0003", a named/looping keyframe animation clip) still follows the
-// skeleton and is NOT decoded — its field layout (frame count, per-bone
-// keyframe stride, interpolation) hasn't been reverse-engineered yet, so
-// the puppet renders articulated but static (no time-based animation).
+// simpler layout. Three blocks are decoded: mesh (bind-pose
+// vertices/indices), skeleton (bone hierarchy + bind matrices, see
+// decodePuppetSkeleton) and keyframe animation ("MDLAxxxx", see
+// decodePuppetAnimations — layout read from WE's own loader, 2026-10-13).
+// The bind pose of many puppets is a spread-out "cut-out sheet" of parts;
+// it's the animation (skinned in we-scene-render.js) that assembles the
+// character — confirmed live with the Miku puppet (3005028837).
 //
-// Layout, validated byte-exact against 4 real MDLV0016 files (2998757800's
-// 眉毛/眼睛/睫毛/lituoliao_5_rw_puppet.mdl — 70/480/597/4077 vertices): for
-// every one, the max index value in the index block equals vertexCount-1
-// exactly (no out-of-bounds reference), and the smallest one's vertex x/y
-// range sits inside its material texture's own decoded pixel dimensions
-// (眉毛's verts span x∈[160,308] y∈[802,860], its material texture decodes
-// to exactly 1415×2047 — matching the owning scene object's own "size"
-// field exactly). So vertex.xy is already in texture-pixel space, same as
-// the flat-quad image case.
+// Layout lido do próprio loader do Wallpaper Engine (wallpaper64.exe,
+// FUN_140261880, decompilado via REA/Ghidra em 2026-10-16) e validado contra
+// os 12 puppets reais do cache (MDLV0016 e MDLV0023, MDLS0002 e MDLS0004,
+// MDLA0003 e MDLA0006): todas as trilhas passam nas mesmas checagens de
+// tamanho que o WE faz, e a leitura termina exatamente no bloco seguinte.
+// Antes disso o parser procurava uma "tag" e assumia stride 52 fixo, o que
+// recusava todo MDLV0023 (puppets viravam blocos brancos).
 //
-// NOTE: the embedded UV field (see below) does NOT agree with that same
-// x/y-as-texture-pixel reading (e.g. y=802/2047=39% down vs v=9.8%) — it
-// most likely addresses a separate shared rig atlas this decoder doesn't
-// have access to, not the per-part material texture. Left decoded for
-// completeness, but callers should derive their own UV from x/y against the
-// material texture's own dimensions instead of trusting this field.
+//   "MDLVxxxx\0" (magic como string C, versão = os 4 dígitos)
+//   u32 formato padrão + u32 strings por malha + u32 quantidade de malhas
+//   por malha:
+//     N strings C (a 1ª é o material)
+//     v>=4:  u32 flags (se flags & 2, mais um u32)
+//     v>=17: 6×f32 bbox + u32 formato do vértice; v15/16: só o u32 formato
+//     u32 tamanho + bloco de vértices; u32 tamanho + índices u16
+//     v>20:  bool → (u32 + blob); bool → blob
+//     v>22:  u32 quantidade de morphs (+ registros, pulados — o esqueleto
+//            é localizado pela magic "MDLS" logo depois)
 //
-//   "MDLVxxxx" (8 bytes) + null-terminated UTF-8 material path string
-//   (starting at a fixed offset 21 — the 13 bytes in between were constant
-//   across every sample seen) + a chunk tag whose low byte varies but whose
-//   next 3 bytes are always [0x00, 0x80, 0x01] (searched for, not assumed
-//   at a fixed offset — see findVertexChunkTag) + u32 vertex-block byte
-//   length N + N bytes of vertex data (stride 52 = 13x float32: pos.xyz,
-//   boneIndices.xyzw, boneWeights.xyzw, uv.xy) + u32 index-block byte
-//   length M + M bytes of uint16 LE triangle-list indices.
+// O formato do vértice é uma máscara de bits; os atributos vêm nesta ordem:
+// posição 12 (0x1), normal 12 (0x2), tangente 16 (0x4), índices de osso
+// u32×4 (0x800000), pesos f32×4 (0x1000000), uv 8 (0x8). MDLV0016 usa
+// 0x1800009 (stride 52), MDLV0023 usa 0x180000f (stride 80). Os índices de
+// osso são inteiros de verdade (lidos como float dão denormais tipo 5.6e-45).
 //
-// A second real sub-format was found in the wild (MDLV0023, seen on two
-// other Workshop items) with a different, still-undeciphered vertex stride
-// (48 bytes, not 52) whose index block does NOT reference every vertex —
-// the self-consistency check below (maxIndex === vertexCount-1) catches
-// and rejects it rather than risk drawing a corrupted mesh from a wrong
-// guess. Only MDLV0016-shaped puppets render today; others fail loudly so
-// the caller can fall back, same as any other unsupported asset.
-function findVertexChunkTag(buf, from) {
-  const limit = Math.min(buf.length - 8, from + 256);
-  for (let i = from; i < limit; i++) {
-    if (buf[i + 1] === 0x00 && buf[i + 2] === 0x80 && buf[i + 3] === 0x01) return i;
+// vertex.xy está no espaço de pixels da textura do material (igual ao quad
+// de imagem); o uv embutido é o real, mas com v invertido (ver
+// we-scene-render.js, que usa 1 - v).
+const PUPPET_VERTEX_ATTRS = [
+  // [bit, bytes, campo] — na ordem em que o WE grava os atributos
+  [0x1, 12, 'pos'], [0x2, 12, 'normal'], [0x4, 16, 'tangent'],
+  [0x800000, 16, 'bones'], [0x1000000, 16, 'weights'], [0x8, 8, 'uv'],
+];
+
+function puppetVertexLayout(format) {
+  const known = PUPPET_VERTEX_ATTRS.reduce((m, [bit]) => m | bit, 0);
+  if (format & ~known) throw new Error(`Puppet vertex format 0x${format.toString(16)} has unsupported attributes`);
+  const offsets = {};
+  let stride = 0;
+  for (const [bit, size, field] of PUPPET_VERTEX_ATTRS) {
+    if (format & bit) { offsets[field] = stride; stride += size; }
   }
-  return -1;
+  if (offsets.pos === undefined) throw new Error('Puppet vertex format has no position');
+  return { stride, offsets };
+}
+
+function readMagicVersion(buf, offset, prefix) {
+  const { str, next } = readCString(buf, offset);
+  const version = parseInt(str.slice(4), 10);
+  if (!str.startsWith(prefix) || !Number.isInteger(version)) throw new Error(`Unrecognized block magic: ${str}`);
+  return { version, next };
 }
 
 function decodePuppetMdl(buf) {
-  const magic = buf.toString('ascii', 0, 8);
-  if (!magic.startsWith('MDLV')) throw new Error(`Unsupported puppet .mdl magic: ${magic}`);
-
-  const mat = readCString(buf, 21);
-  const tagOff = findVertexChunkTag(buf, mat.next);
-  if (tagOff === -1) throw new Error(`Puppet vertex chunk tag not found (unrecognized layout, magic ${magic})`);
-
-  const VERTEX_STRIDE = 52;
-  let offset = tagOff + 4;
-  const vlen = buf.readUInt32LE(offset); offset += 4;
-  const vertexCount = vlen / VERTEX_STRIDE;
-  if (!Number.isInteger(vertexCount) || vertexCount <= 0) {
-    throw new Error(`Puppet vertex block size is not a multiple of the vertex stride (unrecognized layout, magic ${magic})`);
+  const head = readMagicVersion(buf, 0, 'MDLV');
+  const version = head.version;
+  let offset = head.next;
+  const defaultFormat = buf.readUInt32LE(offset);
+  const stringsPerMesh = buf.readUInt32LE(offset + 4);
+  const meshCount = buf.readUInt32LE(offset + 8);
+  offset += 12;
+  if (!(meshCount >= 1 && meshCount < 64) || !(stringsPerMesh >= 1 && stringsPerMesh < 16)) {
+    throw new Error(`Implausible puppet header (meshes=${meshCount}, strings=${stringsPerMesh}, magic MDLV${version})`);
   }
 
+  // Todos os puppets vistos têm 1 malha; se vier mais de uma, só a 1ª é
+  // desenhada (o resto é lido só pra achar onde o esqueleto começa).
+  let first = null;
+  let morphCount = 0;
+  for (let m = 0; m < meshCount; m++) {
+    const strings = [];
+    for (let k = 0; k < stringsPerMesh; k++) { const s = readCString(buf, offset); strings.push(s.str); offset = s.next; }
+    if (version >= 4) {
+      const flags = buf.readUInt32LE(offset); offset += 4;
+      if (flags & 2) offset += 4;
+    }
+    let format = defaultFormat;
+    if (version >= 17) { offset += 24; format = buf.readUInt32LE(offset); offset += 4; }
+    else if (version >= 15) { format = buf.readUInt32LE(offset); offset += 4; }
+
+    const vlen = buf.readUInt32LE(offset); offset += 4;
+    const vstart = offset; offset += vlen;
+    const ilen = buf.readUInt32LE(offset); offset += 4;
+    const istart = offset; offset += ilen;
+    if (offset > buf.length) throw new Error(`Puppet mesh block overruns the file (magic MDLV${version})`);
+    if (version > 20) {
+      if (buf[offset++]) { offset += 4; offset += 4 + buf.readUInt32LE(offset); }
+      if (buf[offset++]) { offset += 4 + buf.readUInt32LE(offset); }
+    }
+    if (version > 22) { morphCount = buf.readUInt32LE(offset); offset += 4; }
+    if (!first) first = { materialPath: strings[0], format, vstart, vlen, istart, ilen };
+  }
+
+  const { stride, offsets } = puppetVertexLayout(first.format);
+  const vertexCount = first.vlen / stride;
+  if (!Number.isInteger(vertexCount) || vertexCount <= 0) {
+    throw new Error(`Puppet vertex block size ${first.vlen} is not a multiple of stride ${stride} (magic MDLV${version})`);
+  }
   const vertices = new Array(vertexCount);
   for (let i = 0; i < vertexCount; i++) {
-    const base = offset + i * VERTEX_STRIDE;
-    vertices[i] = {
-      x: buf.readFloatLE(base), y: buf.readFloatLE(base + 4),
-      // boneIndices/boneWeights: documentado no layout acima (offsets
-      // 12-43) desde a decodificação original, mas nunca extraído até
-      // 2026-07-20 — precisava do bloco de esqueleto (ver
-      // decodePuppetSkeleton) decodificado antes de fazer sentido usar.
-      // boneIndices são inteiros de verdade armazenados como uint32 (NÃO
-      // float32, apesar do slot ter 4 bytes como os outros campos —
-      // confirmado real: lido como float dava valores desnormalizados
-      // minúsculos tipo 5.6e-45, que são exatamente o padrão de bits de
-      // inteiros pequenos tipo 4; lido como uint32 bate com índices de
-      // osso válidos (0-28) o tempo todo).
-      boneIndices: [buf.readUInt32LE(base + 12), buf.readUInt32LE(base + 16), buf.readUInt32LE(base + 20), buf.readUInt32LE(base + 24)],
-      boneWeights: [buf.readFloatLE(base + 28), buf.readFloatLE(base + 32), buf.readFloatLE(base + 36), buf.readFloatLE(base + 40)],
-      u: buf.readFloatLE(base + 44), v: buf.readFloatLE(base + 48),
-    };
+    const base = first.vstart + i * stride;
+    const p = base + offsets.pos;
+    const v = { x: buf.readFloatLE(p), y: buf.readFloatLE(p + 4), boneIndices: [0, 0, 0, 0], boneWeights: [1, 0, 0, 0], u: 0, v: 0 };
+    if (offsets.bones !== undefined) {
+      const o = base + offsets.bones;
+      v.boneIndices = [buf.readUInt32LE(o), buf.readUInt32LE(o + 4), buf.readUInt32LE(o + 8), buf.readUInt32LE(o + 12)];
+    }
+    if (offsets.weights !== undefined) {
+      const o = base + offsets.weights;
+      v.boneWeights = [buf.readFloatLE(o), buf.readFloatLE(o + 4), buf.readFloatLE(o + 8), buf.readFloatLE(o + 12)];
+    }
+    if (offsets.uv !== undefined) {
+      const o = base + offsets.uv;
+      v.u = buf.readFloatLE(o); v.v = buf.readFloatLE(o + 4);
+    }
+    vertices[i] = v;
   }
-  offset += vlen;
 
-  const ilen = buf.readUInt32LE(offset); offset += 4;
-  const indexCount = ilen / 2;
+  const indexCount = first.ilen / 2;
   if (!Number.isInteger(indexCount) || indexCount <= 0) {
-    throw new Error(`Puppet index block size is not a multiple of 2 (unrecognized layout, magic ${magic})`);
+    throw new Error(`Puppet index block size is not a multiple of 2 (magic MDLV${version})`);
   }
   const indices = new Uint16Array(indexCount);
   let maxIndex = 0;
   for (let i = 0; i < indexCount; i++) {
-    const v = buf.readUInt16LE(offset + i * 2);
-    indices[i] = v;
-    if (v > maxIndex) maxIndex = v;
+    const idx = buf.readUInt16LE(first.istart + i * 2);
+    indices[i] = idx;
+    if (idx > maxIndex) maxIndex = idx;
   }
-  offset += ilen;
-
-  if (maxIndex !== vertexCount - 1) {
-    throw new Error(`Puppet mesh failed self-consistency check (maxIndex=${maxIndex}, vertexCount=${vertexCount}, magic ${magic}) — unrecognized layout variant, refusing to guess`);
+  if (maxIndex >= vertexCount) {
+    throw new Error(`Puppet index ${maxIndex} out of range (vertexCount=${vertexCount}, magic MDLV${version})`);
   }
 
-  // Esqueleto (bloco "MDLSxxxx", ver decodePuppetSkeleton) — sem ele o
-  // puppet só pode ser desenhado na malha crua, sem articulação nenhuma
-  // (cada vértice fica perto da origem do PRÓPRIO osso, não montado no
-  // lugar certo do personagem). Nunca lança: puppet sem esqueleto
-  // reconhecido cai pro mesmo desenho estático de antes, não quebra nada.
+  // Esqueleto e animação nunca lançam: puppet sem esqueleto/animação
+  // reconhecidos cai pro desenho estático na pose de bind.
   let skeleton = null;
   try {
-    skeleton = decodePuppetSkeleton(buf, offset);
+    const so = buf.indexOf('MDLS', offset, 'ascii');
+    if (so !== -1) skeleton = decodePuppetSkeleton(buf, so);
   } catch { /* sem esqueleto reconhecido — segue sem articulação */ }
 
-  return { materialPath: mat.str, vertices, indices, skeleton };
+  let animations = [];
+  if (skeleton) {
+    try {
+      animations = decodePuppetAnimations(buf, skeleton.end, skeleton.bones.length, skeleton.extras.length, morphCount);
+    } catch { /* animação não reconhecida — segue na pose de bind */ }
+  }
+
+  return { materialPath: first.materialPath, vertices, indices, skeleton, animations };
 }
 
-// Bloco "MDLS0002" — esqueleto do puppet (hierarquia de ossos + pose de
-// bind), começa logo após o bloco de índices. Validado byte-exato contra
-// "miku bod testinhg_puppet.mdl" (29 ossos reais, cadeia de pais
-// confirmada sem ciclos). Formato:
-//   "MDLS0002" (8 bytes) + cabeçalho de 9 bytes (contagem de ossos no byte
-//   de offset 5 — os outros 8 bytes do cabeçalho não foram decodificados,
-//   não são necessários pra montar a pose de bind) + N registros de osso
-//   em sequência (tamanho VARIÁVEL cada um por causa da string no final,
-//   não dá pra indexar por stride fixo):
-//     byte flag (sempre 0 nas amostras vistas) +
-//     u32 tag (sempre 1) +
-//     i32 índice do osso-pai (-1 = raiz; sempre menor que o índice do
-//       próprio osso nas amostras vistas — permite acumular a matriz de
-//       mundo numa única passada 0..N-1, sem precisar de ordenação
-//       topológica de verdade) +
-//     byte tag (0x40) + 3 bytes de padding +
-//     64 bytes = matriz 4x4 row-major LOCAL de bind (relativa ao pai) —
-//       nas amostras vistas sempre rotação/escala identidade, só a
-//       translação (linha 3, offsets 12/13/14 dos 16 floats) varia +
-//     string JSON terminada em \0 (metadados por osso, ex:
-//       {"a":null,"s":null,"tp":"x y z"} — não usada pra montar a pose,
-//       só consumida aqui pra saber onde o próximo registro começa).
-//   Um osso pode ter essa string VAZIA (confirmado real: o osso de índice
-//   28 desse arquivo) — o parser tem que aceitar isso, não assumir que
-//   toda string tem conteúdo.
-function decodePuppetSkeleton(buf, offset) {
-  const magic = buf.toString('ascii', offset, offset + 8);
-  if (magic !== 'MDLS0002') throw new Error(`Unrecognized skeleton block magic: ${magic}`);
-  offset += 8;
+// Quadros de spritesheet embutidos no .tex (bloco "TEXS0002", depois dos
+// pixels): u32 quantidade + por quadro 32 bytes = u32 imagem, f32 tempo,
+// f32 x, f32 y, f32 eixoX.x, f32 eixoX.y, f32 eixoY.x, f32 eixoY.y (em
+// pixels). Conferido em particle/fire/fire1 (64 quadros de 128×128) e fire2
+// (32): o bloco termina exatamente no fim do arquivo. É a fonte real da
+// grade das partículas animadas (antes era chute de células de 128 px).
+function parseTexSpriteFrames(buf) {
+  const i = buf.lastIndexOf('TEXS', buf.length, 'latin1');
+  if (i < 0 || buf.toString('latin1', i, i + 6) !== 'TEXS00') return null;
+  const n = buf.readUInt32LE(i + 9);
+  const start = i + 13;
+  if (!(n > 0 && n < 100000) || start + n * 32 > buf.length) return null;
+  const frames = [];
+  for (let k = 0; k < n; k++) {
+    const o = start + k * 32;
+    const x = buf.readFloatLE(o + 8), y = buf.readFloatLE(o + 12);
+    const w = Math.hypot(buf.readFloatLE(o + 16), buf.readFloatLE(o + 20));
+    const h = Math.hypot(buf.readFloatLE(o + 24), buf.readFloatLE(o + 28));
+    frames.push({ x, y, w, h, time: buf.readFloatLE(o + 4) });
+  }
+  return frames;
+}
 
-  const boneCount = buf[offset + 5];
-  offset += 9;
+// Textura de VÍDEO (flag 32 no cabeçalho TEXV, ex: flags 34 = vídeo +
+// clamp): o conteúdo do TEXB é um MP4 inteiro embutido, não pixels. Achado
+// em 4 texturas reais do cache (3765643610, 3768450569, 3768497818) que nunca
+// decodificavam — o fundo dessas cenas sumia. Devolve os bytes do MP4.
+function extractTexVideo(buf) {
+  if (buf.length < 64 || buf.toString('latin1', 0, 4) !== 'TEXV') return null;
+  if (!(buf.readUInt32LE(22) & 32)) return null;
+  const limit = Math.min(buf.length - 4, 512);
+  for (let i = 8; i < limit; i++) {
+    if (buf[i] === 0x66 && buf.toString('latin1', i, i + 4) === 'ftyp') return buf.subarray(i - 4);
+  }
+  return null;
+}
+
+// Bloco "MDLAxxxx" — animação por keyframes do puppet (mesma fonte: loader
+// do WE via REA). Formato:
+//   "MDLAxxxx\0" + u32 tamanho do bloco + i32 quantidade de animações
+//   por animação:
+//     u64 id (o número que scene.json referencia em
+//       animationlayers[].animation — ex: 143 na Miku)
+//     string nome + string modo ("loop") + f32 fps + i32 numFrames +
+//     i32 flags + i32 quantidade de trilhas (uma por osso)
+//     por trilha: u32 + u32 tamanho + (numFrames+1) quadros de 9×f32 =
+//       posição xyz, rotação xyz (radianos), escala xyz — transformação
+//       LOCAL do osso. O quadro extra fecha o loop.
+//     v>1:  uma trilha 9×f32 por "extra" do esqueleto + uma trilha 1×f32
+//           por morph da malha
+//     v>2:  u32 n + n trilhas 1×f32; bool → uma trilha 1×f32 por osso
+//     v>=4: bool → bloco por malha (não visto em arquivo real; recusado)
+//     v>4:  6×u32 de parâmetros
+//     v>5:  bool → uma trilha 1×f32 por osso
+//     flags & 1: struct extra (não visto em arquivo real; recusado)
+//     u32 n + n eventos (u32 quadro + string nome)
+//   Toda "trilha 1×f32" é u32 + u32 tamanho + (numFrames+1)×f32.
+// A leitura para na primeira animação que não fechar — as anteriores
+// continuam valendo.
+function decodePuppetAnimations(buf, from, boneCount, extraCount = 0, morphCount = 0) {
+  const start = buf.indexOf('MDLA', from, 'ascii');
+  if (start === -1) return [];
+  const head = readMagicVersion(buf, start, 'MDLA');
+  const version = head.version;
+  let offset = head.next + 4; // + tamanho do bloco (o WE só usa como limite)
+  const animCount = buf.readInt32LE(offset); offset += 4;
+  if (!(animCount > 0 && animCount < 1024)) throw new Error(`Implausible animation count: ${animCount}`);
+
+  const FRAME_FLOATS = 9;
+  const animations = [];
+  for (let a = 0; a < animCount; a++) {
+    const id = Number(buf.readBigUInt64LE(offset)); offset += 8;
+    const name = readCString(buf, offset); offset = name.next;
+    const mode = readCString(buf, offset); offset = mode.next;
+    const fps = buf.readFloatLE(offset);
+    const numFrames = buf.readInt32LE(offset + 4);
+    const flags = buf.readInt32LE(offset + 8);
+    const trackCount = buf.readInt32LE(offset + 12);
+    offset += 16;
+    if (!(fps > 0) || !(numFrames > 0) || trackCount !== boneCount) break;
+    const frameCount = numFrames + 1;
+
+    // Lê u32 + u32 tamanho + dados, conferindo o tamanho como o WE confere.
+    const readTrack = (floatsPerFrame) => {
+      offset += 4;
+      const len = buf.readUInt32LE(offset); offset += 4;
+      if (len !== frameCount * floatsPerFrame * 4 || offset + len > buf.length) throw new Error('bad track');
+      const at = offset; offset += len;
+      return at;
+    };
+
+    try {
+      const tracks = new Array(trackCount);
+      for (let t = 0; t < trackCount; t++) {
+        const at = readTrack(FRAME_FLOATS);
+        const frames = new Float32Array(frameCount * FRAME_FLOATS);
+        for (let k = 0; k < frames.length; k++) frames[k] = buf.readFloatLE(at + k * 4);
+        tracks[t] = frames;
+      }
+      if (version > 1) {
+        for (let t = 0; t < extraCount; t++) readTrack(FRAME_FLOATS);
+        for (let t = 0; t < morphCount; t++) readTrack(1);
+      }
+      if (version > 2) {
+        const n = buf.readUInt32LE(offset); offset += 4;
+        for (let t = 0; t < n; t++) readTrack(1);
+        if (buf[offset++]) for (let t = 0; t < trackCount; t++) readTrack(1);
+      }
+      if (version >= 4 && buf[offset++]) throw new Error('per-mesh animation data not supported');
+      if (version > 4) offset += 24;
+      if (version > 5 && buf[offset++]) for (let t = 0; t < trackCount; t++) readTrack(1);
+      if (flags & 1) throw new Error('animation flag 1 struct not supported');
+      const eventCount = buf.readUInt32LE(offset); offset += 4;
+      for (let e = 0; e < eventCount; e++) { offset += 4; offset = readCString(buf, offset).next; }
+      animations.push({ id, name: name.str, mode: mode.str, fps, numFrames, tracks });
+    } catch {
+      break;
+    }
+  }
+  return animations;
+}
+
+// Bloco "MDLSxxxx" — esqueleto do puppet (hierarquia + pose de bind), logo
+// depois da malha. Formato (loader do WE via REA):
+//   "MDLSxxxx\0" + u32 tamanho do bloco + u32 quantidade de ossos
+//   por osso: string nome (vazia em todos os vistos) + u32 tipo +
+//     i32 índice do pai (-1 = raiz; sempre menor que o próprio índice) +
+//     u32 tamanho da matriz (64) + 4x4 f32 row-major LOCAL de bind
+//     (relativa ao pai; translação nos floats 12/13/14) +
+//     string JSON de metadados (pode ser vazia)
+//   v>=2: u16 quantidade de "extras" + por extra: string + f32 + f32 + 64 bytes
+function decodePuppetSkeleton(buf, offset) {
+  const head = readMagicVersion(buf, offset, 'MDLS');
+  offset = head.next + 4; // tamanho do bloco
+  const boneCount = buf.readUInt32LE(offset); offset += 4;
   if (!(boneCount > 0 && boneCount < 512)) throw new Error(`Implausible bone count: ${boneCount}`);
 
   const bones = new Array(boneCount);
   for (let i = 0; i < boneCount; i++) {
-    offset += 1; // flag byte
-    offset += 4; // tag u32 (sempre 1)
+    const name = readCString(buf, offset); offset = name.next;
+    offset += 4; // tipo
     const parentIndex = buf.readInt32LE(offset); offset += 4;
-    offset += 4; // tag byte (0x40) + 3 bytes de padding
-
+    const matrixSize = buf.readUInt32LE(offset); offset += 4;
+    if (matrixSize !== 64 || parentIndex >= i || parentIndex < -1) throw new Error(`Bad bone record ${i}`);
     const localMatrix = new Array(16);
     for (let m = 0; m < 16; m++) { localMatrix[m] = buf.readFloatLE(offset); offset += 4; }
-
-    const { str: meta, next } = readCString(buf, offset);
-    offset = next;
-
-    bones[i] = { parentIndex, localMatrix, meta };
+    const meta = readCString(buf, offset); offset = meta.next;
+    bones[i] = { name: name.str, parentIndex, localMatrix, meta: meta.str };
   }
 
-  return { bones };
+  const extras = [];
+  if (head.version >= 2) {
+    const n = buf.readUInt16LE(offset); offset += 2;
+    for (let e = 0; e < n; e++) {
+      const name = readCString(buf, offset); offset = name.next + 8 + 64;
+      extras.push({ name: name.str });
+    }
+  }
+  return { bones, extras, end: offset };
 }
 
 function readCString(buf, offset) {
@@ -493,4 +777,4 @@ function readCString(buf, offset) {
   return { str: buf.toString('utf-8', offset, end), next: end + 1 };
 }
 
-module.exports = { unpackPkg, decodeTexToPng, decodePuppetMdl, decodePuppetSkeleton };
+module.exports = { parseTexSpriteFrames, extractTexVideo, unpackPkg, isSceneCacheCurrent, markSceneCacheCurrent, isDxtTex, decodeTexToPng, decodePuppetMdl, decodePuppetSkeleton, decodePuppetAnimations };

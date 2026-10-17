@@ -287,7 +287,196 @@ function coerceUniformValue(raw, glslType, fallbackDefault) {
 // "não suportado" hoje (pula, mantém imagem estática). Pode lançar exceção
 // (ex: #include sem instalação real disponível) — quem chama já envolve
 // isso em try/catch, igual a todo outro _apply* existente.
-function compileGenericEffectSource(sceneDir, weAssetsRoot, effectFile, realCombos) {
+// Identificador usado em `#if`/`#elif` que nunca recebeu `#define` (nem no
+// prelúdio, nem como combo anotado, nem pelo scene.json) vira 0 — é o que o
+// pré-processador do próprio WE faz (igual C), mas o do ANGLE/WebGL dá ERRO.
+// Caso real (2026-10-13, bloom 2822917890 da cena 3766552298): o
+// blur_gaussian usa `#if VERTICAL` sem anotação; só o passe vertical traz
+// combos.VERTICAL=1 no scene.json, o horizontal ficava sem definição e não
+// compilava. Não mexe em `#ifdef`/`defined(X)` (definir mudaria o sentido).
+function defineMissingIfIdents(fullSrc) {
+  const defined = new Set();
+  for (const m of fullSrc.matchAll(/^[ \t]*#define[ \t]+([A-Za-z_]\w*)/gm)) defined.add(m[1]);
+  const missing = new Set();
+  for (const m of fullSrc.matchAll(/^[ \t]*#(?:if|elif)\b([^\n]*)/gm)) {
+    const expr = m[1].replace(/defined\s*\(\s*\w+\s*\)|defined\s+\w+/g, ' ');
+    for (const id of expr.matchAll(/\b([A-Za-z_]\w*)\b/g)) {
+      if (!defined.has(id[1])) missing.add(id[1]);
+    }
+  }
+  let out = '';
+  for (const id of missing) out += `#define ${id} 0\n`;
+  return out;
+}
+
+// Prelúdio + combos + (#if órfãos = 0) + corpo já com #includes resolvidos.
+function assembleShader(defines, body) {
+  // common_fragment.h do WE define FORMAT_* por conta própria — redefinir
+  // dá "macro redefined" no ANGLE (lightshafts quebrava assim, 2026-10-13).
+  let prelude = MACRO_PRELUDE;
+  if (/^[ \t]*#define[ \t]+FORMAT_RGBA8888\b/m.test(body)) prelude = prelude.replace(/^#define FORMAT_\w+ \d+\n/gm, '');
+  const head = prelude + defines;
+  return head + defineMissingIfIdents(head + body) + body;
+}
+
+// Combos de TEXTURA: um sampler anotado com "combo":"X" (ex: g_Texture1
+// "combo":"MASK"/"OPACITY"/"EMITTERMASK") liga X=1 quando a cena fornece a
+// textura daquele slot — o WE faz isso sozinho, sem escrever X em "combos".
+// Confirmado comparando com o WE original (2026-10-13): waterripple só
+// ondulava a imagem inteira porque o MASK nunca ligava.
+function textureDrivenCombos(source, textures) {
+  const out = {};
+  if (!Array.isArray(textures)) return out;
+  for (const def of parseUniformDefs(source)) {
+    if (def.glslType !== 'sampler2D' || !def.annotation.combo) continue;
+    const m = /^g_Texture(\d+)$/.exec(def.name);
+    if (m && textures[Number(m[1])]) out[def.annotation.combo] = 1;
+  }
+  return out;
+}
+
+// Os shaders do WE são escritos pra GLSL de desktop/HLSL: laços com início
+// variável, sufixo "0.0f", int onde se espera float... O GLSL ES 1.00 do
+// WebGL1 recusa tudo isso (pulse/shimmer/blur/shine reais não compilavam,
+// 2026-10-16). Os efeitos genéricos rodam em WebGL2 (GLSL ES 3.00), que
+// aceita laços dinâmicos e o sufixo f; aqui a fonte é convertida.
+// Dentro dos argumentos de chamadas a `names(...)`, troca literal inteiro
+// solto (não parte de identificador/número decimal/índice) por float.
+function floatLiteralsInCalls(src, names) {
+  const re = new RegExp(`\\b(${names.join('|')})\\s*\\(`, 'g');
+  let out = '';
+  let last = 0;
+  let m;
+  while ((m = re.exec(src))) {
+    const open = m.index + m[0].length - 1;
+    let depth = 0, end = -1;
+    for (let i = open; i < src.length; i++) {
+      if (src[i] === '(') depth++;
+      else if (src[i] === ')') { depth--; if (depth === 0) { end = i; break; } }
+    }
+    if (end < 0) break;
+    const args = src.slice(open + 1, end).replace(/(^|[^\w.\[])(\d+)(?![\w.\]])/g, '$1$2.0');
+    out += src.slice(last, open + 1) + args;
+    last = end;
+    re.lastIndex = end;
+  }
+  return out + src.slice(last);
+}
+
+// HLSL trunca vetor na atribuição (vec2 uv = v_TexCoord, com v_TexCoord
+// vec4); GLSL dá "dimension mismatch". Com os tipos declarados no próprio
+// shader, acrescenta o swizzle nas atribuições diretas "a = b;".
+function truncateVectorAssignments(src) {
+  const dims = new Map();
+  const declRe = /\b(?:uniform\s+|varying\s+|in\s+|out\s+|attribute\s+|const\s+)*(?:highp\s+|mediump\s+|lowp\s+)?(float|vec2|vec3|vec4)\s+(\w+)/g;
+  let m;
+  while ((m = declRe.exec(src))) {
+    const d = m[1] === 'float' ? 1 : Number(m[1][3]);
+    if (!dims.has(m[2])) dims.set(m[2], d);
+  }
+  const sw = ['', 'x', 'xy', 'xyz'];
+  return src.replace(/\b(?:(float|vec2|vec3|vec4)\s+)?(\w+)(\s*=\s*)(\w+)\s*;/g, (all, type, lhs, eq, rhs) => {
+    const ld = type ? (type === 'float' ? 1 : Number(type[3])) : dims.get(lhs);
+    const rd = dims.get(rhs);
+    if (!ld || !rd || rd <= ld) return all;
+    return `${type ? type + ' ' : ''}${lhs}${eq}${rhs}.${sw[ld]};`;
+  });
+}
+
+// Varying com tipo diferente no vertex e no fragment (HLSL aceita; o link do
+// GLSL não — color_grading: vec4 no vert, vec2 no frag). O fragment passa a
+// declarar o tipo do vertex e lê só os componentes que usava.
+function fixVaryingMismatch(vert, frag) {
+  const decl = (src, kw) => {
+    const out = new Map();
+    const re = new RegExp(`\\b${kw}\\s+(?:highp\\s+|mediump\\s+|lowp\\s+)?(float|vec2|vec3|vec4)\\s+(\\w+)\\s*;`, 'g');
+    let m;
+    while ((m = re.exec(src))) out.set(m[2], m[1]);
+    return out;
+  };
+  const vOut = decl(vert, 'out');
+  const fIn = decl(frag, 'in');
+  const dim = (t) => (t === 'float' ? 1 : Number(t[3]));
+  const sw = ['', 'x', 'xy', 'xyz'];
+  for (const [name, ft] of fIn) {
+    const vt = vOut.get(name);
+    if (!vt) {
+      // Fragment lê um varying que o vertex nem escreve (HLSL entrega zero;
+      // o link do GLSL falha — chromatic_aberration do 3068181608).
+      const declRe = new RegExp(`\\bin\\s+(?:highp\\s+|mediump\\s+|lowp\\s+)?${ft}\\s+${name}\\s*;`);
+      frag = frag.replace(declRe, `${ft} ${name} = ${ft}(0.0);`);
+      continue;
+    }
+    if (!vt || vt === ft || dim(vt) < dim(ft)) continue;
+    const declRe = new RegExp(`\\bin\\s+(?:highp\\s+|mediump\\s+|lowp\\s+)?${ft}\\s+${name}\\s*;`);
+    frag = frag.replace(declRe, `in ${vt} we_vary_${name};\n#define ${name} (we_vary_${name}.${sw[dim(ft)]})`);
+    vert = vert.replace(new RegExp(`\\b${name}\\b`, 'g'), `we_vary_${name}`);
+  }
+  return [vert, frag];
+}
+
+function toGLSL300(src, isFragment) {
+  let s = src.replace(/^[ \t]*#version[^\n]*\n/m, '');
+  // inverse(mat3) já é nativo no ES 3.00 — o polyfill viraria redefinição.
+  s = s.replace(/mat3 inverse\(mat3 m\) \{[\s\S]*?\n\}\n/, '');
+  // Nomes reservados no ES 3.00 que shaders do WE usam como variável.
+  s = s.replace(/\b(sample|input|output|filter|smooth|flat|layout|centroid|active|common|partition)\b(?!\s*\()/g, 'we_$1');
+  s = s.replace(/\battribute\b/g, 'in');
+  s = s.replace(/\bvarying\b/g, isFragment ? 'in' : 'out');
+  s = s.replace(/\btexture2DLod\b/g, 'textureLod').replace(/\btexture2D\b/g, 'texture');
+  // HLSL converte int→float sozinho; GLSL ES não. Declaração float cujo
+  // lado direito não tem literal float (ex.: shine_cast "const float
+  // sampleDrop = sampleCount - 1;") vira float(...).
+  s = s.replace(/\bfloat(\s+\w+\s*=\s*)([^;{}=]+);/g, (m, mid, rhs) => (/\d\.|\.\d|float\s*\(/.test(rhs) ? m : `float${mid}float(${rhs.trim()});`));
+  // Literais int em funções que só existem pra float (blur_combine:
+  // "mix(blurred.a, 1, step(blurred.a, 0))").
+  s = floatLiteralsInCalls(s, ['mix', 'step', 'smoothstep', 'pow', 'lerp']);
+  // lerp/fmod são HLSL.
+  if (!/\b\w+\s+lerp\s*\(\s*(float|vec)/.test(s)) s = s.replace(/\blerp\s*\(/g, 'mix(');
+  if (!/\b\w+\s+fmod\s*\(\s*(float|vec)/.test(s)) s = s.replace(/^(precision highp float;\n)/, '$1#define fmod(x, y) ((x) - (y) * trunc((x) / (y)))\n');
+  // Vertex que escreve no próprio atributo (HLSL deixa): usa uma cópia
+  // local, inicializada no começo do main(); o nome do atributo continua o
+  // mesmo pro getAttribLocation.
+  // Entrada (atributo/varying "in") ou uniform que o shader ESCREVE (HLSL
+  // deixa; GLSL não): usa uma cópia local inicializada no começo do main();
+  // o nome original continua declarado pro link/getAttribLocation.
+  {
+    const declRe = /^[ \t]*(in|uniform)\s+(?:highp\s+|mediump\s+|lowp\s+)?(float|int|vec2|vec3|vec4|mat3|mat4)\s+(\w+)\s*;/gm;
+    let am;
+    const copies = [];
+    while ((am = declRe.exec(s))) {
+      const name = am[3];
+      const writes = new RegExp(`\\b${name}(\\.\\w+)?\\s*[-+*/]?=(?!=)`).test(s)
+        || new RegExp(`(\\+\\+|--)\\s*${name}\\b|\\b${name}\\s*(\\+\\+|--)`).test(s);
+      if (writes) copies.push({ kw: am[1], type: am[2], name });
+    }
+    for (const c of copies) {
+      const local = `we_m_${c.name}`;
+      s = s.replace(new RegExp(`\\b${c.name}\\b`, 'g'), local);
+      s = s.replace(new RegExp(`^([ \\t]*${c.kw}\\s+(?:highp\\s+|mediump\\s+|lowp\\s+)?${c.type}\\s+)${local}(\\s*;)`, 'm'), `$1${c.name}$2\n${c.type} ${local};`);
+      s = s.replace(/\bvoid\s+main\s*\(\s*\)\s*\{/, (mm) => `${mm}\n\t${local} = ${c.name};`);
+    }
+  }
+  // atan2 é HLSL; em GLSL é atan(y, x).
+  if (!/\b\w+\s+atan2\s*\(\s*(float|vec)/.test(s)) s = s.replace(/\batan2\s*\(/g, 'atan(');
+  // Shader que define o próprio mod(): GLSL ES 3 proíbe redefinir builtin.
+  if (/\b(float|vec[234])\s+mod\s*\(\s*(float|vec)/.test(s)) s = s.replace(/\bmod\s*\(/g, 'we_mod(');
+  // int recebendo float (HLSL trunca sozinho).
+  s = s.replace(/\bint(\s+\w+\s*=\s*)([^;{}=]+);/g, (m, mid, rhs) => (/^\s*-?\d+\s*$|^\s*int\s*\(/.test(rhs) ? m : `int${mid}int(${rhs.trim()});`));
+  s = truncateVectorAssignments(s);
+  // rotateVec2 recebendo vec3/vec4 (HLSL trunca; shimmer passa v_TexCoord vec4).
+  if (/\bvec2\s+rotateVec2\s*\(\s*vec2\b/.test(s)) {
+    s = s.replace(/(\bvec2\s+rotateVec2\s*\(\s*vec2\b)/, 'vec2 rotateVec2(vec2 v, float r);\nvec2 rotateVec2(vec3 v, float r) { return rotateVec2(v.xy, r); }\nvec2 rotateVec2(vec4 v, float r) { return rotateVec2(v.xy, r); }\n$1');
+  }
+  if (isFragment) {
+    s = s.replace(/\bgl_FragColor\b/g, 'we_FragColor');
+    if (/^precision highp float;\n/.test(s)) s = s.replace(/^(precision highp float;\n)/, '$1out vec4 we_FragColor;\n');
+    else s = 'out vec4 we_FragColor;\n' + s;
+  }
+  return '#version 300 es\n' + s;
+}
+
+function compileGenericEffectSource(sceneDir, weAssetsRoot, effectFile, realCombos, textures) {
   const effectDir = path.posix.dirname(effectFile.replace(/\\/g, '/'));
   const shaderName = resolveShaderName(sceneDir, weAssetsRoot, effectFile);
   if (!shaderName) return null;
@@ -297,21 +486,81 @@ function compileGenericEffectSource(sceneDir, weAssetsRoot, effectFile, realComb
   if (!vertRaw || !fragRaw) return null;
 
   const comboDefaults = { ...parseComboDefaults(vertRaw), ...parseComboDefaults(fragRaw) };
-  const defines = buildComboDefines(comboDefaults, realCombos);
+  const defines = buildComboDefines(comboDefaults, { ...textureDrivenCombos(fragRaw + '\n' + vertRaw, textures), ...(realCombos || {}) });
 
   const vertIncluded = resolveIncludes(vertRaw, weAssetsRoot, new Set());
   const fragIncluded = resolveIncludes(fragRaw, weAssetsRoot, new Set());
 
+  const [vertSrc, fragSrc] = fixVaryingMismatch(toGLSL300(assembleShader(defines, vertIncluded), false), toGLSL300(assembleShader(defines, fragIncluded), true));
   return {
     shaderName,
-    vertSrc: MACRO_PRELUDE + defines + vertIncluded,
-    fragSrc: MACRO_PRELUDE + defines + fragIncluded,
+    vertSrc,
+    fragSrc,
     uniformDefs: parseUniformDefs(fragRaw + '\n' + vertRaw),
   };
 }
 
+// Efeito com VÁRIOS passes (bloom, glow, blur em várias escalas…). Achado
+// comparando com o WE original (2026-10-13, cena 3766552298 "Ahri"): o
+// caminho de passe único só rodava passes[0] — num bloom de 16 passes isso
+// é o "mapa de luz", quase todo preto, que virava a imagem final (tela
+// preta). O effect.json real descreve o grafo inteiro:
+//   fbos[]   {name, scale (divisor do tamanho da imagem), format}
+//   passes[] {material, bind:[{index, name}], target?}
+//     bind.name = "previous" (entrada do efeito) ou o nome de um fbo;
+//     sem target = desenha na saída final.
+// E o scene.json traz, por instância, passes[i] alinhado por índice com
+// {constantshadervalues, combos, textures} (ex: o blur vertical é o mesmo
+// shader com combos.VERTICAL=1). Retorna null se algum passe não tiver
+// material/shader resolvível (ex: passes de "command" copy/swap) — quem
+// chama mantém o estágio anterior em vez de desenhar algo errado.
+function compileGenericEffectPasses(sceneDir, weAssetsRoot, effectFile, scenePasses) {
+  const effectDir = path.posix.dirname(effectFile.replace(/\\/g, '/'));
+  const effectDef = readJsonMultiBase(sceneDir, weAssetsRoot, null, effectFile);
+  if (!effectDef || !Array.isArray(effectDef.passes) || effectDef.passes.length === 0) return null;
+  const passes = [];
+  for (let i = 0; i < effectDef.passes.length; i++) {
+    const ep = effectDef.passes[i];
+    if (!ep || !ep.material) return null;
+    const materialDef = readJsonMultiBase(sceneDir, weAssetsRoot, effectDir, ep.material);
+    const mp = materialDef && materialDef.passes && materialDef.passes[0];
+    if (!mp || !mp.shader) return null;
+    const vertRaw = readTextMultiBase(sceneDir, weAssetsRoot, effectDir, `shaders/${mp.shader}.vert`);
+    const fragRaw = readTextMultiBase(sceneDir, weAssetsRoot, effectDir, `shaders/${mp.shader}.frag`);
+    if (!vertRaw || !fragRaw) return null;
+    const sp = (Array.isArray(scenePasses) && scenePasses[i]) || {};
+    // Texturas: as da instância (scene.json) por cima das do material.
+    const textures = [];
+    const matTex = Array.isArray(mp.textures) ? mp.textures : [];
+    const sceneTex = Array.isArray(sp.textures) ? sp.textures : [];
+    for (let t = 0; t < Math.max(matTex.length, sceneTex.length); t++) textures[t] = sceneTex[t] || matTex[t] || null;
+    const source = fragRaw + '\n' + vertRaw;
+    const comboDefaults = { ...parseComboDefaults(vertRaw), ...parseComboDefaults(fragRaw) };
+    const combos = { ...textureDrivenCombos(source, textures), ...(mp.combos || {}), ...(sp.combos || {}) };
+    const defines = buildComboDefines(comboDefaults, combos);
+    const [passVert, passFrag] = fixVaryingMismatch(
+      toGLSL300(assembleShader(defines, resolveIncludes(vertRaw, weAssetsRoot, new Set())), false),
+      toGLSL300(assembleShader(defines, resolveIncludes(fragRaw, weAssetsRoot, new Set())), true));
+    passes.push({
+      shaderName: mp.shader,
+      vertSrc: passVert,
+      fragSrc: passFrag,
+      uniformDefs: parseUniformDefs(source),
+      binds: Array.isArray(ep.bind) ? ep.bind : [],
+      target: ep.target || null,
+      textures,
+      constantShaderValues: sp.constantshadervalues || {},
+    });
+  }
+  return { fbos: Array.isArray(effectDef.fbos) ? effectDef.fbos : [], passes };
+}
+
 module.exports = {
+  toGLSL300,
   compileGenericEffectSource,
+  compileGenericEffectPasses,
+  textureDrivenCombos,
+  defineMissingIfIdents,
   coerceUniformValue,
   // exportados à parte pra teste/validação standalone
   resolveShaderName,

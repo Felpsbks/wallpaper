@@ -6,8 +6,8 @@
 const fs   = require('fs');
 const path = require('path');
 const { ipcRenderer } = require('electron');
-const { decodeTexToPng, decodePuppetMdl } = require('../src/we-scene.js');
-const { compileGenericEffectSource, coerceUniformValue } = require('./we-shader-compiler.js');
+const { parseTexSpriteFrames, extractTexVideo, decodeTexToPng, decodePuppetMdl, isSceneCacheCurrent, markSceneCacheCurrent, isDxtTex } = require('../src/we-scene.js');
+const { compileGenericEffectSource, compileGenericEffectPasses, coerceUniformValue } = require('./we-shader-compiler.js');
 
 // Formatos/recursos que a cena usa mas ainda não sabemos desenhar direito
 // hoje falham em silêncio (nada no console de uma janela de wallpaper é
@@ -103,8 +103,13 @@ function detectSpriteGrid(width, height) {
 function loadParticleTexture(sceneDir, materialRelPath) {
   return new Promise((resolve) => {
     try {
-      const materialPath = path.join(sceneDir, materialRelPath);
-      if (!fs.existsSync(materialPath)) return resolve(null);
+      // Material do preset pode existir só na instalação do WE.
+      let materialPath = path.join(sceneDir, materialRelPath);
+      if (!fs.existsSync(materialPath)) {
+        const root = getWEAssetsRoot();
+        materialPath = root ? path.join(root, materialRelPath) : '';
+        if (!materialPath || !fs.existsSync(materialPath)) return resolve(null);
+      }
       const material = JSON.parse(fs.readFileSync(materialPath, 'utf8'));
       const pass = material.passes && material.passes[0];
       const texRel = pass && pass.textures && pass.textures[0];
@@ -119,10 +124,14 @@ function loadParticleTexture(sceneDir, materialRelPath) {
 
       for (const texPath of candidates) {
         if (!fs.existsSync(texPath)) continue;
-        const png = decodeTexToPng(fs.readFileSync(texPath));
+        const texBuf = fs.readFileSync(texPath);
+        const png = decodeTexToPng(texBuf);
         if (!png) continue;
+        const frames = parseTexSpriteFrames(texBuf);
         const img = new Image();
-        img.onload = () => resolve({ img, additive, grid: detectSpriteGrid(img.naturalWidth, img.naturalHeight) });
+        // Quadros reais do TEXS quando existem; a grade por heurística só
+        // cobre texturas antigas sem esse bloco.
+        img.onload = () => resolve({ img, additive, frames: frames && frames.length > 1 ? frames : null, grid: frames ? null : detectSpriteGrid(img.naturalWidth, img.naturalHeight) });
         img.onerror = () => resolve(null);
         img.src = 'data:image/png;base64,' + png.toString('base64');
         return;
@@ -227,17 +236,109 @@ void main() {
 }
 `;
 
-// Shader mínimo pra malha de puppet: só posiciona e amostra a textura, sem
-// nenhum efeito — o objetivo aqui é validar a geometria/UV, não estilizar.
-const PUPPET_VERT = `
+// Shader da malha de puppet com skinning na GPU — mesma fórmula do shader
+// real do WE (assets/shaders/generic3.vert, combo SKINNING): posição =
+// soma ponderada de 4 matrizes de osso. Aqui as matrizes são afins 2D
+// (puppet é plano: só z de rotação varia), mandadas como 2 linhas vec3 por
+// osso em vez de mat4x3 — cabe ~60 ossos nos 128 vetores de uniform que
+// todo WebGL1 garante. Sem animação, as matrizes são identidade e isso
+// desenha exatamente a pose de bind, igual ao shader antigo.
+// a_Position está no espaço do vértice do arquivo (pixels da textura,
+// origem no centro); u_BBox mapeia a caixa animada inteira pro canvas.
+function buildPuppetVertSource(boneCount) {
+  return `
 attribute vec2 a_Position;
 attribute vec2 a_TexCoord;
+attribute vec4 a_BoneIndices;
+attribute vec4 a_BoneWeights;
+uniform vec3 u_BoneX[${boneCount}];
+uniform vec3 u_BoneY[${boneCount}];
+uniform vec4 u_BBox; // centro.xy, meia-extensão.xy
 varying vec2 v_TexCoord;
+vec2 skin(float i, vec3 p) {
+  int b = int(i + 0.5);
+  return vec2(dot(u_BoneX[b], p), dot(u_BoneY[b], p));
+}
 void main() {
+  vec3 p = vec3(a_Position, 1.0);
+  vec2 pos = skin(a_BoneIndices.x, p) * a_BoneWeights.x
+           + skin(a_BoneIndices.y, p) * a_BoneWeights.y
+           + skin(a_BoneIndices.z, p) * a_BoneWeights.z
+           + skin(a_BoneIndices.w, p) * a_BoneWeights.w;
   v_TexCoord = a_TexCoord;
-  gl_Position = vec4(a_Position, 0.0, 1.0);
+  gl_Position = vec4((pos - u_BBox.xy) / u_BBox.zw, 0.0, 1.0);
 }
 `;
+}
+// Matemática de osso do puppet, em afim 2D [a,b,c,d,tx,ty]:
+//   x' = a·x + c·y + tx   ;   y' = b·x + d·y + ty
+// Funções puras (sem DOM/WebGL) pra poder validar no Node contra os
+// arquivos reais — foi assim que a fórmula foi confirmada em 2026-10-13
+// (render offline da Miku: pose de bind = partes espalhadas, quadro 0 com
+// skinning = personagem montado). Fórmula padrão de skinning:
+//   skin[osso] = mundoAnimado[osso] × inversa(mundoBind[osso])
+// onde "mundo" encadeia a transformação LOCAL de cada osso com a do pai
+// (o pai sempre tem índice menor — ver decodePuppetSkeleton).
+// Opções de TODO canvas WebGL desta cena (efeitos e puppets). Os shaders
+// portados devolvem cor NÃO pré-multiplicada (amostram a textura e escrevem
+// direto), e as texturas sobem sem UNPACK_PREMULTIPLY_ALPHA. Com o padrão do
+// canvas (premultipliedAlpha: true) o compositor tratava essa cor como
+// pré-multiplicada: pixel escuro quase transparente virava halo claro/branco
+// (visto ao vivo 2026-10-13 nas bordas esfumaçadas do fundo da cena
+// 2998757800). Imagem opaca não muda nada.
+// preserveDrawingBuffer: o canvas de uma etapa vira ENTRADA da próxima
+// (cadeia de efeitos). Sem isso o navegador limpa o canvas WebGL depois de
+// exibi-lo, e uma etapa que copia a anterior depois de um await recebia uma
+// imagem vazia — achado 2026-10-13: bloom multi-passe (desenha uma vez só)
+// seguido de foliagesway deixava a cena 3766552298 inteira preta.
+const WEBGL_CTX_OPTS = { premultipliedAlpha: false, preserveDrawingBuffer: true };
+
+// Texto do WE: pointsize é ponto tipográfico a 300 DPI (ver _buildTextObject).
+const WE_TEXT_PX_PER_POINT = 300 / 72;
+
+function affMul(P, C) {
+  return [P[0] * C[0] + P[2] * C[1], P[1] * C[0] + P[3] * C[1],
+          P[0] * C[2] + P[2] * C[3], P[1] * C[2] + P[3] * C[3],
+          P[0] * C[4] + P[2] * C[5] + P[4], P[1] * C[4] + P[3] * C[5] + P[5]];
+}
+function affInv(M) {
+  const det = M[0] * M[3] - M[1] * M[2];
+  const a = M[3] / det, b = -M[1] / det, c = -M[2] / det, d = M[0] / det;
+  return [a, b, c, d, -(a * M[4] + c * M[5]), -(b * M[4] + d * M[5])];
+}
+// Matriz de bind local (4x4 row-major, convenção vetor-linha do WE:
+// translação na linha 3) reduzida ao plano XY.
+function puppetBindLocal(m) { return [m[0], m[1], m[4], m[5], m[12], m[13]]; }
+// Quadro de animação = posição xyz, rotação xyz (radianos), escala xyz.
+function puppetFrameLocal(px, py, rz, sx, sy) {
+  const c = Math.cos(rz), s = Math.sin(rz);
+  return [c * sx, s * sx, -s * sy, c * sy, px, py];
+}
+function puppetInverseBind(bones) {
+  const world = [];
+  return bones.map((b, i) => {
+    const L = puppetBindLocal(b.localMatrix);
+    world[i] = b.parentIndex >= 0 ? affMul(world[b.parentIndex], L) : L;
+    return affInv(world[i]);
+  });
+}
+// Matrizes de skin num instante `framePos` (em quadros, fracionário —
+// interpola linearmente entre o quadro inteiro e o seguinte; o quadro
+// extra no fim de cada trilha fecha o loop).
+function puppetSkinMatrices(bones, invBind, anim, framePos) {
+  const f0 = Math.floor(framePos), t = framePos - f0;
+  const f1 = Math.min(f0 + 1, anim.numFrames);
+  const world = [];
+  return bones.map((b, i) => {
+    const tr = anim.tracks[i];
+    const o0 = f0 * 9, o1 = f1 * 9;
+    const lerp = (k) => tr[o0 + k] + (tr[o1 + k] - tr[o0 + k]) * t;
+    const L = puppetFrameLocal(lerp(0), lerp(1), lerp(5), lerp(6), lerp(7));
+    world[i] = b.parentIndex >= 0 ? affMul(world[b.parentIndex], L) : L;
+    return affMul(world[i], invBind[i]);
+  });
+}
+
 const PUPPET_FRAG = `
 precision mediump float;
 varying vec2 v_TexCoord;
@@ -426,9 +527,12 @@ void main() {
 }
 `;
 
+// highp (não mediump): g_Time é declarado nos dois shaders, e o vertex usa
+// highp por padrão — precisões diferentes no mesmo uniform não linkam
+// ("Precisions of uniform 'g_Time' differ", VHS nunca rodava; 2026-10-13).
 function buildVHSFragSource({ greyscale: useGreyscale, invertArtifacts }) {
   return `
-precision mediump float;
+precision highp float;
 varying vec4 v_TexCoord;
 varying vec2 v_TexCoordGlitchBase;
 varying vec4 v_TexCoordGlitch;
@@ -819,6 +923,17 @@ void main() {
 // arquivo já guarda (o valor congelado que a WE mostraria no editor), do
 // mesmo jeito que AUDIOPROCESSING já cai pro comportamento estático quando
 // ligado — nunca finge rodar o script.
+// colorBlendMode da camada → mix-blend-mode do CSS. Números do
+// common_blending.h real (ApplyBlending). Só entram os que o CSS faz igual
+// (ou quase: 12 SoftLight usa a fórmula W3C, 5/10 min/max = darken/lighten
+// por canal, 31 A+B = plus-lighter). Os sem equivalente ficam fora (Normal).
+const WE_LAYER_BLEND_CSS = {
+  0: 'normal', 1: 'darken', 2: 'multiply', 3: 'color-burn', 5: 'darken', 6: 'lighten',
+  7: 'screen', 8: 'color-dodge', 9: 'plus-lighter', 10: 'lighten', 11: 'overlay',
+  12: 'soft-light', 13: 'hard-light', 18: 'difference', 19: 'exclusion', 26: 'hue',
+  27: 'saturation', 28: 'color', 29: 'luminosity', 31: 'plus-lighter',
+};
+
 function csvNum(raw, fallback) {
   if (raw == null) return fallback;
   if (typeof raw === 'object') {
@@ -1120,7 +1235,26 @@ class MediaPropertiesEvent {}
 // de cada função, depois devolve as funções conhecidas (init/update/eventos
 // de mídia) por referência. Nunca finge suportar uma função que o script
 // não define.
-function compileWEScript(source) {
+// `realProps`: scene.json "scriptproperties" da instância (ex: relógio com
+// use24hFormat=false) — sobrescrevem os padrões do createScriptProperties()
+// do próprio script, igual o WE faz. Valor pode vir cru ou como {value}.
+function makeScriptPropertiesFactory(realProps) {
+  if (!realProps || typeof realProps !== 'object') return createScriptProperties;
+  return () => {
+    const base = createScriptProperties();
+    const finish = base.finish;
+    base.finish = () => {
+      const obj = finish();
+      for (const [k, v] of Object.entries(realProps)) {
+        obj[k] = v && typeof v === 'object' && 'value' in v ? v.value : v;
+      }
+      return obj;
+    };
+    return base;
+  };
+}
+
+function compileWEScript(source, realProps) {
   // Mesma técnica já comprovada em compileWeTextScript (scripts de objetos
   // de texto, sessão anterior): tirar "export " de qualquer início de linha
   // cobre function/var/let/const/class de uma vez, sem precisar de um caso
@@ -1158,9 +1292,10 @@ function compileWEScript(source) {
   // NOOP_PROXY absorve qualquer chamada/propriedade nessas referências sem
   // quebrar nada — silenciosamente não faz nada (sem som, sem acesso real a
   // outros objetos da cena), deixando o resto do script continuar.
+  const scriptPropsFactory = makeScriptPropertiesFactory(realProps);
   return (layerHandle) => factory(
     Vec2, Vec3, Vec4, WEColor, WEMath, WEVector,
-    MediaPlaybackEvent, MediaThumbnailEvent, MediaPropertiesEvent, createScriptProperties,
+    MediaPlaybackEvent, MediaThumbnailEvent, MediaPropertiesEvent, scriptPropsFactory,
     ENGINE_CLOCK, layerHandle, NOOP_PROXY, NOOP_PROXY, NOOP_PROXY, NOOP_PROXY, WE_INPUT, WE_LOCAL_STORAGE,
   );
 }
@@ -1367,6 +1502,20 @@ const ENGINE_CLOCK = {
   // alimentado de verdade só quando algum script pede — ver WeAudioEngine.
   registerAudioBuffers(resolution) { return WeAudioEngine.registerBuffers(resolution); },
 };
+
+// Avança o relógio compartilhado UMA vez por frame. Antes cada loop com
+// script fazia `runtime += frametime` por conta própria — com N objetos
+// animados por script o engine.runtime andava N× mais rápido (animações
+// aceleradas conforme a cena tinha mais objetos). Chamadas no mesmo frame
+// (< 4ms da anterior) são ignoradas. Achado 2026-10-13.
+let ENGINE_CLOCK_LAST = performance.now();
+function advanceEngineClock() {
+  const now = performance.now();
+  if (now - ENGINE_CLOCK_LAST < 4) return;
+  ENGINE_CLOCK.frametime = Math.min(0.1, (now - ENGINE_CLOCK_LAST) / 1000);
+  ENGINE_CLOCK.runtime += ENGINE_CLOCK.frametime;
+  ENGINE_CLOCK_LAST = now;
+}
 
 // Representa um campo de constantshadervalues (ou obj.color) que PODE ser
 // script-driven — se for, roda o script de verdade a cada frame (chamado
@@ -3951,12 +4100,20 @@ function extractWaterFlowConfig(effects) {
 // pulamos se ausente, mesmo padrão do refraction/waterflow). Só suporta
 // PERSPECTIVE==0 (default real). SPECULAR suportado por inteiro (não
 // depende de textura extra).
-function buildWaterRippleFragSource({ specular }) {
+// MASK (2026-10-13, comparando com o WE original na cena 2998757800): o
+// shader real (shaders/effects/waterripple.frag empacotado na cena) declara
+// g_Texture1 com "combo":"MASK" — combo de TEXTURA, que o WE liga sozinho
+// quando a cena fornece essa textura (scene.json passes[].textures[1]), sem
+// escrever MASK em "combos". Sem isso o ripple distorcia a imagem INTEIRA
+// em vez de só o piso molhado. Fórmula real: texCoord += normal.xy ×
+// strength² × mask (canal .r da máscara).
+function buildWaterRippleFragSource({ specular, mask }) {
   return `
 precision mediump float;
 varying vec2 v_TexCoord;
 varying vec4 v_TexCoordRipple;
 uniform sampler2D g_Texture0;
+${mask ? 'uniform sampler2D g_Texture1;' : ''}
 uniform sampler2D g_Texture2;
 uniform float g_Strength;
 ${specular ? `
@@ -3969,7 +4126,8 @@ void main() {
   vec3 n1 = texture2D(g_Texture2, v_TexCoordRipple.xy).xyz * 2.0 - 1.0;
   vec3 n2 = texture2D(g_Texture2, v_TexCoordRipple.zw).xyz * 2.0 - 1.0;
   vec3 normal = normalize(vec3(n1.xy + n2.xy, n1.z));
-  texCoord += normal.xy * g_Strength * g_Strength;
+  float mask = ${mask ? 'texture2D(g_Texture1, v_TexCoord).r' : '1.0'};
+  texCoord += normal.xy * g_Strength * g_Strength * mask;
   gl_FragColor = texture2D(g_Texture0, texCoord);
 ${specular ? `
   vec2 direction = normalize(vec2(0.5, 0.0) - v_TexCoord);
@@ -4018,13 +4176,14 @@ function extractWaterRippleConfig(effects) {
     const pass = (eff.passes || [])[0];
     if (!pass) continue;
     const combos = pass.combos || {};
-    if (combos.MASK) return { unsupported: 'MASK (textura de opacidade não suportada)' };
     if (combos.PERSPECTIVE) return { unsupported: 'PERSPECTIVE (distorção 4-pontos não suportada)' };
     const normalTexId = pass.textures && pass.textures[2];
     if (!normalTexId) return null; // sem normal map de água real, nada a distorcer
+    const maskTexId = (pass.textures && pass.textures[1]) || null; // combo MASK liga com a textura (ver buildWaterRippleFragSource)
     const csv = pass.constantshadervalues || {};
     return {
       normalTexId,
+      maskTexId,
       specular: !!combos.SPECULAR,
       strength: csvNum(csv.ripplestrength, 0.1),
       specularPower: csvNum(csv.ripplespecularpower, 1),
@@ -5339,7 +5498,154 @@ void main() {
 `;
 }
 
+// Reparo guiado pelo compilador pros shaders reais do WE (GLSL ES 3.00):
+// eles contam com as conversões implícitas do HLSL (int↔float, truncar
+// vetor maior). Lê a linha e os tipos do erro do ANGLE e corrige SÓ aquela
+// linha; devolve a fonte nova ou null se não souber consertar.
+function repairWEShaderLine(source, log) {
+  const m = /ERROR:\s*0:(\d+):\s*'([^']*)'\s*:\s*([^\n]*)/.exec(log || '');
+  if (!m) return null;
+  const lineNo = Number(m[1]);
+  const token = m[2];
+  const msg = m[3];
+  const lines = source.split('\n');
+  const line = lines[lineNo - 1];
+  if (line == null) return null;
+
+  // Uniform usado antes de declarado (o WE aceita; ex.: shine_gaussian usa
+  // g_Texture0 numa função acima da declaração): sobe a declaração.
+  if (/undeclared identifier/.test(msg) && token) {
+    const declRe = new RegExp(`^[ \\t]*uniform\\s+[^;]*\\b${token}\\b[^;]*;.*$`, 'm');
+    const dm = declRe.exec(source);
+    if (dm && dm.index > source.indexOf(line)) {
+      const without = source.slice(0, dm.index) + source.slice(dm.index + dm[0].length);
+      const at = without.indexOf('\n', without.indexOf('precision highp float;')) + 1;
+      return without.slice(0, at) + dm[0].trim() + '\n' + without.slice(at);
+    }
+    return null;
+  }
+
+  // Tipos declarados. Um nome pode ser declarado com tipos diferentes em
+  // ramos #if/#else — guarda todos.
+  const types = new Map();
+  const declRe = /\b(int|float|vec2|vec3|vec4|ivec2|ivec3|ivec4)\s+(\w+)\s*(?=[=;,)\[])/g;
+  let d;
+  while ((d = declRe.exec(source))) {
+    if (!types.has(d[2])) types.set(d[2], new Set());
+    types.get(d[2]).add(d[1]);
+  }
+  const isInt = (n) => types.has(n) && types.get(n).has('int');
+  const vecDim = (n) => {
+    if (!types.has(n)) return 0;
+    let best = 0;
+    for (const t of types.get(n)) if (/^vec/.test(t)) best = Math.max(best, Number(t[3]));
+    return best;
+  };
+  const isDecl = (txt, idx) => /\b(int|float|vec[234]|ivec[234]|uniform|in|out|const)\s+$/.test(txt.slice(0, idx));
+  const outsideIndex = (txt, idx) => {
+    const before = txt.slice(0, idx);
+    return (before.split('[').length - 1) <= (before.split(']').length - 1);
+  };
+  const intToFloat = (txt) => {
+    let t = txt.replace(/(^|[^\w.\[])(\d+)(?![\w.\]])/g, (all, pre, num, off) => (outsideIndex(txt, off + pre.length) && !/\bint\s+\w*\s*=?\s*$/.test(txt.slice(0, off + pre.length)) ? `${pre}${num}.0` : all));
+    t = t.replace(/\b([A-Za-z_]\w*)\b(?!\s*\()/g, (all, name, off, str) => {
+      if (!isInt(name) || isDecl(str, off) || !outsideIndex(str, off)) return all;
+      const after = str.slice(off + name.length);
+      const before = str.slice(0, off);
+      // não mexe em i++ / --i / atribuições a ela
+      if (/^\s*(\+\+|--|[-+*/%]?=(?!=))/.test(after) || /(\+\+|--)\s*$/.test(before)) return all;
+      return `float(${name})`;
+    });
+    return t;
+  };
+  const truncateTo = (txt, keepDim) => {
+    const sw = ['', 'x', 'xy', 'xyz'];
+    return txt.replace(/\b([A-Za-z_]\w*)\b(?![\w.(])/g, (all, name, off) => {
+      const dim = vecDim(name);
+      if (!dim || dim <= keepDim || isDecl(txt, off)) return all;
+      return `${name}.${sw[keepDim]}`;
+    });
+  };
+  const comps = [...msg.matchAll(/(\d)-component/g)].map((x) => Number(x[1]));
+  let fixed = line;
+
+  if (token === 'texture' && /no matching overloaded function/.test(msg)) {
+    // texture(sampler2D, vec3/vec4) — HLSL usa só .xy
+    fixed = line.replace(/\b(texture|texSample2D)\s*\(\s*(\w+)\s*,\s*([A-Za-z_]\w*)\s*\)/g, (all, fn, smp, uv) => (vecDim(uv) > 2 ? `${fn}(${smp}, ${uv}.xy)` : all));
+    if (fixed === line) fixed = intToFloat(line);
+  } else if (/no matching overloaded function/.test(msg) && /^(max|min)$/.test(token)) {
+    // max(escalar, vetor) não existe em GLSL; max(vetor, escalar) sim.
+    fixed = line.replace(new RegExp(`\\b${token}\\s*\\(\\s*(-?\\d+(?:\\.\\d*)?)\\s*,\\s*`, 'g'), (all, lit) => `${token}(__SWAP__${lit}__, `);
+    if (fixed !== line) {
+      fixed = fixed.replace(/__SWAP__([^_]+)__, ([^()]*(?:\([^()]*(?:\([^()]*\))*[^()]*\))*[^()]*)\)/g, (all, lit, rest) => `${rest}, ${lit.includes('.') ? lit : lit + '.0'})`);
+      if (/__SWAP__/.test(fixed)) fixed = line;
+    }
+    if (fixed === line) fixed = intToFloat(line);
+  } else if (/boolean expression expected/.test(msg)) {
+    // condição numérica (macro 0/1 ou float) — o HLSL trata ≠0 como true
+    fixed = line
+      .replace(/(=|\()\s*([A-Za-z_]\w*)\s*\?/g, (all, pre, name) => `${pre} (float(${name}) != 0.0) ?`)
+      .replace(/\bif\s*\(\s*([A-Za-z_]\w*)\s*\)/g, (all, name) => `if (float(${name}) != 0.0)`);
+  } else if (/\bint\b/.test(msg) && /float/.test(msg)) {
+    fixed = intToFloat(line);
+  } else if (/wrong operand types/.test(msg) && comps.length >= 2) {
+    fixed = truncateTo(line, Math.min(...comps));
+  } else if (/wrong operand types/.test(msg) && comps.length === 1 && /float/.test(msg)) {
+    fixed = intToFloat(line);
+  } else if (/no matching overloaded function/.test(msg)) {
+    fixed = intToFloat(line);
+  } else if (/dimension mismatch/.test(msg) || /field selection requires/.test(msg)) {
+    // atribuição com tamanho diferente: o construtor do tipo do lado
+    // esquerdo resolve os dois casos (escalar→vetor e vetor maior→menor).
+    const a = /^(\s*)(?:(float|vec2|vec3|vec4)\s+)?(\w+)(\s*[-+*/]?=\s*)(.+);\s*$/.exec(line);
+    if (a) {
+      let rhs = a[5].replace(/^\((.*)\)\.(x|xy|xyz|xyzw)$/, '$1');
+      const lt = a[2] || [...(types.get(a[3]) || [])].find((t) => /^(float|vec)/.test(t));
+      if (lt) fixed = `${a[1]}${a[2] ? a[2] + ' ' : ''}${a[3]}${a[4]}${lt}(${rhs});`;
+    }
+  }
+  if (fixed === line) return null;
+  lines[lineNo - 1] = fixed;
+  return lines.join('\n');
+}
+
 function compileShader(gl, type, source) {
+  // Shaders reais do WE convertidos pra GLSL ES 3.00: tenta, conserta a
+  // linha que o compilador apontou e tenta de novo (até 12 vezes).
+  if (/^#version 300 es/.test(source) && typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext) {
+    let src = source;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const sh = gl.createShader(type);
+      gl.shaderSource(sh, src);
+      gl.compileShader(sh);
+      if (gl.getShaderParameter(sh, gl.COMPILE_STATUS)) return sh;
+      const log = gl.getShaderInfoLog(sh);
+      gl.deleteShader(sh);
+      const next = repairWEShaderLine(src, log);
+      if (!next) {
+        // Depuração: com %TEMP%\we-shader-dump presente, guarda a fonte final.
+        try {
+          const dumpDir = path.join(require('os').tmpdir(), 'we-shader-dump');
+          if (fs.existsSync(dumpDir)) fs.writeFileSync(path.join(dumpDir, `${Date.now()}_${Math.random().toString(36).slice(2, 6)}.glsl`), `// ${log}
+${src}`);
+        } catch { /* sem dump */ }
+        throw new Error(`falha ao compilar shader: ${log}`);
+      }
+      src = next;
+    }
+    throw new Error('falha ao compilar shader: reparo automático não convergiu');
+  }
+  return compileShaderPlain(gl, type, source);
+}
+
+function compileShaderPlain(gl, type, source) {
+  // Fragment shaders portados à mão declaram `precision mediump float`, mas
+  // uniforms com o mesmo nome no vertex são highp (padrão do vertex) — o
+  // WebGL recusa o link ("Precisions of uniform 'g_Time' differ"). Achado
+  // 2026-10-13 na bancada de efeitos: VHS, spin e swing nunca rodavam.
+  // highp em todo fragment resolve de uma vez (suportado em qualquer GPU
+  // de desktop) e ainda evita o tempo perder precisão depois de minutos.
+  if (type === gl.FRAGMENT_SHADER) source = source.replace(/precision\s+mediump\s+float\s*;/g, 'precision highp float;');
   const shader = gl.createShader(type);
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
@@ -5396,15 +5702,29 @@ class FoliageSwayEffect {
     gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
   }
 
+  // Restaura a textura que estava ligada na unidade ATIVA ao terminar.
+  // Bug real (achado ao vivo 2026-10-13, fundo da cena 2998757800 virou o
+  // mapa de normais roxo do waterripple): o padrão em ~18 efeitos é
+  // "_setupSimplePass liga a imagem na unidade 0 → uploadTexture(auxiliar)
+  // → activeTexture(N) → bind". Como o upload ligava a textura nova na
+  // unidade ativa (ainda a 0), a auxiliar SUBSTITUÍA a imagem em
+  // g_Texture0 — todo efeito com textura extra (waterripple, waterflow,
+  // clouds, refraction, depthparallax, blend...) desenhava a textura
+  // auxiliar no lugar da imagem. Todas as chamadas ligam explicitamente o
+  // resultado depois (verificado nas 46), então restaurar aqui é seguro.
   static uploadTexture(gl, source) {
+    const prev = gl.getParameter(gl.TEXTURE_BINDING_2D);
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    // Contextos de _setupSimplePass usam UV com v=0 no TOPO (convenção do
+    // WE) e sobem SEM flip — ver comentário em _setupSimplePass.
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, !gl.__weTopDownUV);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.bindTexture(gl.TEXTURE_2D, prev);
     return tex;
   }
 
@@ -5418,15 +5738,19 @@ class FoliageSwayEffect {
   static uploadTextureWrapped(gl, source, wantRepeat, w, h) {
     const isPOT = (n) => (n & (n - 1)) === 0 && n > 0;
     const canRepeat = !!wantRepeat && isPOT(w) && isPOT(h);
+    const prev = gl.getParameter(gl.TEXTURE_BINDING_2D); // ver uploadTexture
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    // Contextos de _setupSimplePass usam UV com v=0 no TOPO (convenção do
+    // WE) e sobem SEM flip — ver comentário em _setupSimplePass.
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, !gl.__weTopDownUV);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
     const wrap = canRepeat ? gl.REPEAT : gl.CLAMP_TO_EDGE;
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.bindTexture(gl.TEXTURE_2D, prev);
     return { tex, usedRepeat: canRepeat };
   }
 
@@ -5640,6 +5964,16 @@ class ParticleSystem {
       this._audioExponent = emitter.audioprocessingexponent != null ? emitter.audioprocessingexponent : 1;
       this._audioBounds = this._vec(emitter.audioprocessingbounds, [0, 1]);
     }
+
+    // "starttime" do sistema: o WE pré-simula N segundos antes do primeiro
+    // quadro, então neve/chuva/névoa já começam espalhadas pela tela (a neve
+    // do 3766640784 tem 15s). Sem isso a cena abria vazia e só ia se
+    // enchendo. Passos de 1/30s, limitado a 60s.
+    const warm = Math.min(60, Number(this.def.starttime) || 0);
+    if (warm > 0) {
+      const step = 1 / 30;
+      for (let t = 0; t < warm; t += step) this.update(step);
+    }
   }
 
   _audioRateMultiplier() {
@@ -5648,7 +5982,12 @@ class ParticleSystem {
     let sum = 0;
     for (let i = 0; i < bins; i++) sum += this._audioBuffers.average[i];
     let level = Math.pow(sum / bins, this._audioExponent);
-    return this._audioBounds[0] + level * (this._audioBounds[1] - this._audioBounds[0]);
+    // "bounds" é a faixa do nível de áudio remapeada pra 0..1 (com
+    // "0.8 1", só música alta emite; silêncio = nada) — no WE as notas do
+    // "Music Cat" não aparecem sem som. Antes o piso 0.8 emitia sempre.
+    const [b0, b1] = this._audioBounds;
+    const span = b1 - b0;
+    return span > 0 ? Math.max(0, Math.min(1, (level - b0) / span)) : (level >= b0 ? 1 : 0);
   }
 
   _initializer(name) {
@@ -5681,14 +6020,16 @@ class ParticleSystem {
   _spawn() {
     const emitter = (this.def.emitter || [])[0];
     let x = this.originX, y = this.originY;
+    let spawnZ = 0;
     if (emitter && emitter.name === 'boxrandom') {
       // Confirmado real (rain_screen_4k.json): "distancemax" é a caixa
       // inteira (largura/altura), centrada no "origin" do emissor — sem
       // "distancemin" nesses arquivos reais, então assume caixa cheia.
       const box = this._vec(emitter.distancemax, [400, 400, 0]);
       const off = this._vec(emitter.origin, [0, 0, 0]);
+      // y do WE é pra cima; o da tela, pra baixo (origem do emissor subtrai).
       x += off[0] + (Math.random() - 0.5) * box[0];
-      y += off[1] + (Math.random() - 0.5) * box[1];
+      y -= off[1] + (Math.random() - 0.5) * box[1];
     } else if (emitter && emitter.name === 'sphererandom') {
       const dmin = emitter.distancemin || 0;
       const dmax = emitter.distancemax != null ? emitter.distancemax : dmin + 100;
@@ -5699,8 +6040,20 @@ class ParticleSystem {
       // horizontal (neve caindo de uma faixa, não de uma esfera cheia).
       const dir = this._vec(emitter.directions, [1, 1, 1]);
       const off = this._vec(emitter.origin, [0, 0, 0]);
-      x += off[0] + Math.cos(angle) * dir[0] * dist;
-      y += off[1] + Math.sin(angle) * dir[1] * dist;
+      // y do WE é pra cima: origem "0 1200 0" (chuva) fica ACIMA do objeto.
+      // Antes somava — chuva/neve nasciam abaixo da tela (3766687266/3766640784).
+      if (this.perspective) {
+        // flag 4 (perspectiva): esfera 3D de verdade, z incluso
+        let gx = 0, gy = 0, gz = 0;
+        do { gx = Math.random() * 2 - 1; gy = Math.random() * 2 - 1; gz = Math.random() * 2 - 1; } while (gx * gx + gy * gy + gz * gz > 1 || gx * gx + gy * gy + gz * gz < 1e-6);
+        const inv = 1 / Math.hypot(gx, gy, gz);
+        x += off[0] + gx * inv * dir[0] * dist;
+        y -= off[1] + gy * inv * dir[1] * dist;
+        spawnZ = (off[2] || 0) + gz * inv * (dir[2] ?? 1) * dist;
+      } else {
+        x += off[0] + Math.cos(angle) * dir[0] * dist;
+        y -= off[1] + Math.sin(angle) * dir[1] * dist;
+      }
     } else {
       // Emitter type we don't specifically model yet — spread particles
       // around the origin rather than stacking them all on one point.
@@ -5720,7 +6073,14 @@ class ParticleSystem {
     const lifeVal  = life  ? this._randRange(life.min, life.max)  : 3;
     const sizeVal  = size  ? this._randRange(size.min, size.max)  : 32;
     const velVal   = vel   ? this._randRange(vel.min, vel.max)    : [0, 0, 0];
-    const colorVal = this.colorOverride || (color ? this._randRange(color.min, color.max) : [255, 255, 255]);
+    // instanceoverride.colorn/brightness MULTIPLICAM a cor do arquivo (tabela
+    // de override do WE, FUN_14024d940 via REA: alpha/size/count/speed/
+    // lifetime/brightness/rate/colorn são todos fatores). Antes colorn
+    // substituía a cor: feixes de luz escuros (110-170) viravam brancos.
+    const baseColor = color ? this._randRange(color.min, color.max) : [255, 255, 255];
+    const mulC = this.colorOverride ? this.colorOverride.map((c) => c / 255) : [1, 1, 1];
+    const bright = this._ov('brightness');
+    const colorVal = baseColor.map((c, i) => Math.max(0, Math.min(255, c * (mulC[i] ?? 1) * bright)));
     const alphaVal = alpha ? this._randRange(alpha.min, alpha.max) : 1;
     const rotVal   = rot   ? this._randRange(rot.min, rot.max) : 0;
     const angVelVal = angVel ? this._randRange(angVel.min, angVel.max) : 0;
@@ -5732,12 +6092,12 @@ class ParticleSystem {
     }
 
     this.particles.push({
-      x, y,
+      x, y, z: spawnZ, vz: this.perspective ? (velVal[2] || 0) * this._ov('speed') : 0,
       // WE's coordinate space has Y increasing upward (see WeScene's own
       // note on _screenTop) — flip vertical velocity for screen space.
-      vx: velVal[0], vy: -velVal[1],
-      size: sizeVal, baseSize: sizeVal, life: lifeVal, age: 0,
-      color: colorVal, baseColor: colorVal, baseAlpha: Math.max(0, Math.min(1, alphaVal)),
+      vx: velVal[0] * this._ov('speed'), vy: -velVal[1] * this._ov('speed'),
+      size: sizeVal * this._ov('size'), baseSize: sizeVal * this._ov('size'), life: lifeVal * this._ov('lifetime'), age: 0,
+      color: colorVal, baseColor: colorVal, baseAlpha: Math.max(0, Math.min(1, alphaVal * this._ov('alpha'))),
       alpha: 1,
       rotation: (rotVal * Math.PI) / 180,
       angularVelocity: (angVelVal * Math.PI) / 180,
@@ -5769,10 +6129,25 @@ class ParticleSystem {
     return result;
   }
 
+  // "instanceoverride" do objeto na cena (multiplicadores por instância
+  // sobre o arquivo de partícula compartilhado): alpha, size, speed,
+  // lifetime, count (máximo de partículas), rate.
+  _ov(name) {
+    const o = this.override;
+    const v = o ? Number(o[name]) : NaN;
+    return Number.isFinite(v) ? v : 1;
+  }
+
   update(dt) {
     const emitter = (this.def.emitter || [])[0];
-    const rate = (emitter && emitter.rate ? emitter.rate : 5) * this._audioRateMultiplier();
-    const maxCount = this.def.maxcount || 20;
+    const rate = (emitter && emitter.rate ? emitter.rate : 5) * this._audioRateMultiplier() * this._ov('rate');
+    const maxCount = Math.max(1, Math.round((this.def.maxcount || 20) * this._ov('count')));
+    // Ponto de controle 0 com flag 1 = segue o cursor (ex.: "Mouse
+    // Following Hearts" do 3768451417) — o emissor nasce onde o mouse está.
+    if (this.followMouse && WE_INPUT.cursorWorldPosition) {
+      const c = WE_INPUT.cursorWorldPosition;
+      if (Number.isFinite(c.x) && Number.isFinite(c.y)) { this.originX = c.x; this.originY = c.y; }
+    }
 
     this.spawnAccum += rate * dt;
     while (this.spawnAccum >= 1 && this.particles.length < maxCount) {
@@ -5791,6 +6166,9 @@ class ParticleSystem {
     const oscSize  = this._operators('oscillatesize')[0];
     const turbulence = this._operators('turbulence')[0];
     const capVel = this._operators('capvelocity')[0];
+    const moveOp = this._operators('movement')[0];
+    const gravity = moveOp ? this._vec(moveOp.gravity, [0, 0, 0]) : [0, 0, 0];
+    const drag = moveOp ? (Number(moveOp.drag) || 0) : 0;
 
     this._time = (this._time || 0) + dt;
 
@@ -5814,7 +6192,15 @@ class ParticleSystem {
         p.vy += Math.cos(p.turbulencePhase * 1.3) * speed * scale * mask[1] * dt;
       }
 
+      // Operador "movement": gravidade (aceleração, Y do WE pra cima) e
+      // arrasto. Não era aplicado — chuva/folhas sem gravidade.
+      if (moveOp) {
+        p.vx += gravity[0] * dt;
+        p.vy -= gravity[1] * dt;
+        if (drag) { const k = Math.max(0, 1 - drag * dt); p.vx *= k; p.vy *= k; }
+      }
       p.x += p.vx * dt;
+      if (this.perspective) { p.vz += (moveOp ? gravity[2] : 0) * dt; p.z += p.vz * dt; }
       p.y += p.vy * dt;
       p.rotation += p.angularVelocity * dt;
 
@@ -5901,10 +6287,16 @@ class ParticleSystem {
     c.width = img.naturalWidth || img.width;
     c.height = img.naturalHeight || img.height;
     const cctx = c.getContext('2d');
+    // genericparticle real: cor final = textura × cor da partícula. Antes era
+    // 'source-atop' (pinta todo pixel opaco com a cor): texturas com fundo
+    // preto OPACO e mistura aditiva (particle/chromaticdot da neve do
+    // 3766640784) viravam quadrados coloridos em vez de pontos.
     cctx.drawImage(img, 0, 0);
-    cctx.globalCompositeOperation = 'source-atop';
+    cctx.globalCompositeOperation = 'multiply';
     cctx.fillStyle = `rgb(${key})`;
     cctx.fillRect(0, 0, c.width, c.height);
+    cctx.globalCompositeOperation = 'destination-in'; // devolve o alfa original
+    cctx.drawImage(img, 0, 0);
     if (this._tintCache.size >= MAX_TINT_CACHE) {
       this._tintCache.delete(this._tintCache.keys().next().value); // FIFO: descarta o mais antigo
     }
@@ -5921,7 +6313,17 @@ class ParticleSystem {
     for (const p of this.particles) {
       const sprite = this._getTintedSprite(p.color);
       ctx.globalAlpha = p.alpha;
-      const px = p.x + (p.oscX || 0), py = p.y + (p.oscY || 0);
+      let px = p.x + (p.oscX || 0), py = p.y + (p.oscY || 0);
+      // Perspectiva (flag 4): projeta pela câmera da cena (distância do
+      // fov), em torno do centro da tela — longe fica menor e mais junto.
+      let pscale = 1;
+      if (this.perspective && this.camDist > 0) {
+        const z = Math.min(this.camDist * 0.95, p.z || 0);
+        pscale = this.camDist / (this.camDist - z);
+        px = this.camCx + (px - this.camCx) * pscale;
+        py = this.camCy + (py - this.camCy) * pscale;
+      }
+      const psize = p.size * pscale;
 
       // Sprites que são grades de animação (fogo, faísca, fumaça...)
       // escolhem 1 quadro com base em quanto da vida da partícula já
@@ -5929,7 +6331,14 @@ class ParticleSystem {
       // floor(progress * numFrames), ver detectSpriteGrid), só sem o
       // blend entre 2 quadros consecutivos que o shader real faz.
       let sx = 0, sy = 0, sw = sprite.width, sh = sprite.height;
-      if (grid) {
+      const frames = this.texture.frames;
+      if (frames) {
+        // ComputeSpriteFrame real: quadro = floor(frac(vida × multiplicador) × N).
+        const mult = Number(this.def.sequencemultiplier) || 1;
+        const prog = ((p.age / p.life) * mult) % 1;
+        const f = frames[Math.min(frames.length - 1, Math.floor(prog * frames.length))];
+        sx = f.x; sy = f.y; sw = f.w; sh = f.h;
+      } else if (grid) {
         const progress = Math.min(0.999, p.age / p.life);
         const frameIdx = Math.min(grid.totalFrames - 1, Math.floor(progress * grid.totalFrames));
         sw = sprite.width / grid.cols;
@@ -5938,6 +6347,10 @@ class ParticleSystem {
         sy = Math.floor(frameIdx / grid.cols) * sh;
       }
 
+      // Quad real (common_particles.h ComputeParticlePosition): largura =
+      // size, altura = size × (altura/largura da textura ou do quadro).
+      // Antes era sempre quadrado — texturas retangulares saíam esticadas.
+      const ph = psize * (sw > 0 ? sh / sw : 1);
       if (isTrail) {
         // Alonga o sprite na direção do movimento — aproximação comum pra
         // chuva/faísca (o renderer real usa um comprimento de rastro
@@ -5949,16 +6362,16 @@ class ParticleSystem {
         ctx.save();
         ctx.translate(px, py);
         ctx.rotate(angle);
-        ctx.drawImage(sprite, sx, sy, sw, sh, -p.size / 2, -(p.size * stretch) / 2, p.size, p.size * stretch);
+        ctx.drawImage(sprite, sx, sy, sw, sh, -psize / 2, -(ph * stretch) / 2, psize, ph * stretch);
         ctx.restore();
       } else if (p.rotation) {
         ctx.save();
         ctx.translate(px, py);
         ctx.rotate(p.rotation);
-        ctx.drawImage(sprite, sx, sy, sw, sh, -p.size / 2, -p.size / 2, p.size, p.size);
+        ctx.drawImage(sprite, sx, sy, sw, sh, -psize / 2, -ph / 2, psize, ph);
         ctx.restore();
       } else {
-        ctx.drawImage(sprite, sx, sy, sw, sh, px - p.size / 2, py - p.size / 2, p.size, p.size);
+        ctx.drawImage(sprite, sx, sy, sw, sh, px - psize / 2, py - ph / 2, psize, ph);
       }
     }
     ctx.globalAlpha = 1;
@@ -5971,6 +6384,13 @@ class WeScene {
     this.container = container;
     this.sceneDir = sceneDir;
     this.label = label || path.basename(sceneDir);
+    // Cache de cena desempacotado por um decodificador de .tex antigo (ver
+    // TEX_DECODER_VERSION em src/we-scene.js): os .tex.png de DXT estão
+    // errados. Os usados são refeitos na hora (_resolveMaterialTexturePng);
+    // o resto é refeito em segundo plano e o marcador gravado no fim.
+    this._texCacheStale = /[\\/]we-scene-cache[\\/]/.test(sceneDir) && !isSceneCacheCurrent(sceneDir);
+    this._texRefreshed = new Set();
+    this._texRefreshTimer = this._texCacheStale ? setTimeout(() => this._refreshStaleTexCache(), 20000) : null;
     this.overrides = overrides || {};     // user-adjusted { [objName]: { origin, fontSize } }
     this.propValues = propValues || {};   // effective General Properties values (options over defaults)
     this.timer = null;
@@ -6087,7 +6507,7 @@ class WeScene {
     for (const field of fields) {
       const raw = obj[field];
       if (!(raw && typeof raw === 'object' && typeof raw.script === 'string')) continue;
-      if (!sharedLayer) sharedLayer = new LayerHandle({ visible: this._isVisible(obj) });
+      if (!sharedLayer) sharedLayer = (this._liveLayers && this._liveLayers.get(obj.id)) || new LayerHandle({ visible: this._ownVisible(obj) });
       try {
         const exports = compileWEScript(raw.script)(sharedLayer);
         const isInteractive = exports.cursorDown || exports.cursorUp || exports.cursorClick
@@ -6100,7 +6520,9 @@ class WeScene {
     }
     if (!exportsList.length) return;
 
-    const applyLayerToDom = () => { el.style.display = sharedLayer.visible ? '' : 'none'; };
+    // A visibilidade é reavaliada na cena inteira (herança pai→filho).
+    if (this._liveLayers && obj.id != null) this._liveLayers.set(obj.id, sharedLayer);
+    const applyLayerToDom = () => this._refreshVisibility();
     applyLayerToDom();
     this._clickTargets.push({
       left, top, w, h, applyLayerToDom,
@@ -6139,6 +6561,9 @@ class WeScene {
     const scenePath = path.join(this.sceneDir, 'scene.json');
     const scene = JSON.parse(fs.readFileSync(scenePath, 'utf8'));
 
+    this._applyUserProperties(scene);
+    this._evaluateScriptedEffectValues(scene);
+
     const proj = (scene.general && scene.general.orthogonalprojection) || {};
     this.designWidth  = proj.width  || 1920;
     this.designHeight = proj.height || 1080;
@@ -6154,7 +6579,21 @@ class WeScene {
     }
 
     this.stage = document.createElement('div');
-    this.stage.style.cssText = `position:absolute; top:0; left:0; width:${this.designWidth}px; height:${this.designHeight}px; transform-origin: 0 0; overflow:hidden; background:#000;`;
+    // Cor de limpeza da cena (general.clearcolor, quando clearenabled): é o
+    // fundo do WE por trás de tudo, inclusive fora da área da projeção. Era
+    // preto fixo — na "Music Cat" (2149068390) o WE mostra a tela inteira
+    // lilás→rosa (clearcolor + tint da camada "Color") e a gente só o
+    // retângulo da textura do gato sobre preto.
+    const gen = scene.general || {};
+    // clearcolor também pode ser script (Music Visualizer 3280146735:
+    // update() devolve preto até chegar a capa da mídia; o value salvo é 0.7).
+    let clear = gen.clearenabled === false ? [0, 0, 0] : csvVec(gen.clearcolor, [0, 0, 0]);
+    if (gen.clearenabled !== false && gen.clearcolor && typeof gen.clearcolor === 'object' && typeof gen.clearcolor.script === 'string') {
+      clear = this._evalScriptedVec(gen.clearcolor, clear);
+    }
+    const clearCss = `rgb(${clear.map((c) => Math.round(Math.max(0, Math.min(1, c)) * 255)).join(',')})`;
+    this.stage.style.cssText = `position:absolute; top:0; left:0; width:${this.designWidth}px; height:${this.designHeight}px; transform-origin: 0 0; overflow:hidden; background:${clearCss};`;
+    this.container.style.background = clearCss;
     this.container.innerHTML = '';
     this.container.appendChild(this.stage);
 
@@ -6166,21 +6605,86 @@ class WeScene {
     // fundo, não elementos soltos posicionados por conta própria.
     const imageObjects = (scene.objects || []).filter(o => o.image);
     const backgroundObj = imageObjects[0] || null;
+
+    // "_rt_imageLayerComposite_<id>_<x>" = saída já renderizada (com efeitos)
+    // da camada <id>, usada como textura por efeitos de OUTRAS camadas — ex.:
+    // a Terra do 3521337568 é um composelayer que mistura 4 camadas
+    // "(hide)" via blend. Camadas invisíveis referenciadas assim continuam
+    // sendo renderizadas, só que fora da tela (container escondido).
+    this._layerOutputs = new Map();
+    this._compositeRefs = new Set();
+    for (const o of scene.objects || []) {
+      for (const eff of o.effects || []) {
+        for (const ps of eff.passes || []) {
+          for (const t of ps.textures || []) {
+            const m = typeof t === 'string' && /^_rt_imageLayerComposite_(\d+)_/.exec(t);
+            if (m) this._compositeRefs.add(Number(m[1]));
+          }
+        }
+      }
+    }
+    this._offscreenStage = document.createElement('div');
+    this._offscreenStage.style.cssText = 'position:absolute; left:0; top:0; width:0; height:0; overflow:hidden; visibility:hidden; pointer-events:none;';
+    this.container.appendChild(this._offscreenStage);
     // true a menos que o fundo exista, esteja visível agora e falhe ao renderizar
     let backgroundRendered = true;
+    // Visibilidade no WE é HERDADA: pai oculto esconde todos os filhos.
+    // Antes só a do próprio objeto contava — o grupo "Debug" (oculto) da
+    // Music Visualizer deixava aparecer o texto "angle/x/y" e os quadrados de
+    // cor dos filhos, e o player (filho de um grupo com visible por script
+    // começando em false) aparecia sempre.
+    this._liveLayers = new Map();   // id -> LayerHandle vivo (scripts de visibilidade)
+    this._visEntries = [];          // { obj, el } — reavaliados em _refreshVisibility
+    this._wrapEntries = [];         // { obj, el } — containers (visibilidade/animação)
+    this._prepareVisibilityScripts(scene);
     for (const obj of scene.objects || []) {
       const isBackground = obj === backgroundObj;
       // Visibilidade script-driven (thisLayer.visible mudado por
       // cursorDown/mediaPlaybackChanged real — ver _wireObjectInteractivity)
-      // não pode ser decidida uma vez só aqui: o objeto precisa existir no
-      // DOM pra poder aparecer/sumir depois de um clique real.
-      const visibleIsScripted = obj.visible && typeof obj.visible === 'object' && typeof obj.visible.script === 'string';
-      if (!visibleIsScripted && !this._isVisible(obj)) {
+      // em QUALQUER nível da hierarquia não pode ser decidida uma vez só
+      // aqui: o objeto precisa existir no DOM pra poder aparecer/sumir
+      // depois de um clique real.
+      const chainScripted = this._visibilityChainScripted(obj);
+      if (!chainScripted && !this._effectiveVisible(obj)) {
+        if (obj.image && this._compositeRefs.has(obj.id)) {
+          // Escondida mas usada como textura por outra camada: renderiza
+          // fora da tela só pra publicar a saída (ver _publishLayerOutput).
+          const realStage = this.stage;
+          this.stage = this._offscreenStage;
+          try { this._buildImageObject(obj); }
+          catch (err) { this._reportIssue(`camada oculta "${obj.name}" (fonte de composição) falhou: ${err.message}`); }
+          finally { this.stage = realStage; }
+        }
         continue; // escondido de propósito (ex: alternância dia/noite) — não conta como falha
       }
+      const visBefore = this.stage.childElementCount;
       try {
         if (obj.image) {
+          const before = this.stage.childElementCount;
           const rendered = this._buildImageObject(obj);
+          // "alpha" do objeto multiplica a imagem inteira (genericimage4:
+          // g_UserAlpha). Era ignorado — objetos com alpha 0, que o WE usa
+          // como área de clique invisível pros scripts (cena 3762437755:
+          // "단색 플레이스홀더", mm1, rr1...), viravam retângulos brancos.
+          // Continuam no DOM com opacidade 0, então o clique segue valendo.
+          // Alpha por script fica de fora: o valor congelado não é o que o
+          // script entrega depois.
+          const alphaIsScripted = obj.alpha && typeof obj.alpha === 'object' && typeof obj.alpha.script === 'string';
+          const objAlpha = alphaIsScripted ? 1 : Math.max(0, Math.min(1, csvNum(obj.alpha, 1)));
+          if (objAlpha < 1) {
+            for (let i = before; i < this.stage.childElementCount; i++) this.stage.children[i].style.opacity = String(objAlpha);
+          }
+          // "colorBlendMode": como a camada inteira se mistura com o que está
+          // atrás (numeração do common_blending.h real). Era ignorado — o
+          // "atmosphere overlay" do 3521337568 (modo 7, Screen) é um quadrado
+          // preto opaco com um arco: em Screen o preto some, em Normal virava
+          // um losango preto por cima da cena.
+          const blendCss = WE_LAYER_BLEND_CSS[csvNum(obj.colorBlendMode, 0)];
+          if (blendCss && blendCss !== 'normal') {
+            for (let i = before; i < this.stage.childElementCount; i++) this.stage.children[i].style.mixBlendMode = blendCss;
+          } else if (blendCss === undefined) {
+            this._reportIssue(`camada "${obj.name}": colorBlendMode ${csvNum(obj.colorBlendMode, 0)} sem equivalente, desenhada em Normal`);
+          }
           if (isBackground) backgroundRendered = rendered;
           else if (!rendered) this._reportIssue(`camada "${obj.name}" não pôde ser desenhada (textura não resolvida)`);
         } else if (obj.text) this._buildTextObject(obj);
@@ -6189,6 +6693,45 @@ class WeScene {
         if (isBackground) backgroundRendered = false;
         this._reportIssue(`objeto "${obj.name}" pulado: ${err.message}`);
       }
+      // Marca de origem (depuração/inspeção): qual objeto gerou cada elemento.
+      for (let i = visBefore; i < this.stage.childElementCount; i++) this.stage.children[i].dataset.weObj = `${obj.id}:${obj.name}`;
+      const chainAnimated = this._chainAnimated(obj);
+      if ((chainScripted || chainAnimated) && this.stage.childElementCount > visBefore) {
+        // Embrulha os elementos do objeto num container sem caixa própria:
+        // efeitos trocam <img> por <canvas> via replaceChild, então quem
+        // liga/desliga a visibilidade (e recebe a animação) precisa ser o
+        // pai estável. Mistura/opacidade sobem pro container — num filho de
+        // um container transformado elas misturariam só com o vazio dele.
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'position:absolute; left:0; top:0; width:0; height:0; overflow:visible; transform-origin:0 0;';
+        const els = Array.from(this.stage.children).slice(visBefore);
+        this.stage.insertBefore(wrap, els[0]);
+        for (const el of els) {
+          if (el.style.mixBlendMode && el.style.mixBlendMode !== 'normal') { wrap.style.mixBlendMode = el.style.mixBlendMode; el.style.mixBlendMode = ''; }
+          if (chainAnimated && obj.alpha && obj.alpha.animation && el.style.opacity) el.style.opacity = '';
+          wrap.appendChild(el);
+        }
+        this._wrapEntries.push({ obj, el: wrap });
+        if (chainScripted) this._visEntries.push({ obj, el: wrap });
+      }
+    }
+    this._refreshVisibility();
+    this._startKeyframeAnimations();
+    // DEPURAÇÃO: com <cena>/.debug-dump, lista os elementos visíveis.
+    if (fs.existsSync(path.join(this.sceneDir, '.debug-dump'))) {
+      setTimeout(() => {
+        const rows = [];
+        const walk = (el, depth) => {
+          for (const c of el.children) {
+            const cs = getComputedStyle(c);
+            const r = c.getBoundingClientRect();
+            rows.push(`${'  '.repeat(depth)}${c.tagName} ${c.dataset.weObj || ''} disp=${cs.display} op=${cs.opacity} bg=${cs.backgroundColor} blend=${cs.mixBlendMode} rect=${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}`);
+            if (c.children.length && depth < 3) walk(c, depth + 1);
+          }
+        };
+        walk(this.stage, 0);
+        try { fs.writeFileSync(path.join(this.sceneDir, '.debug-dump', 'dom.txt'), rows.join(String.fromCharCode(10))); } catch { /* sem dump */ }
+      }, 6000);
     }
 
     // Nem sempre um .tex embute um formato de imagem que já sabemos decodificar
@@ -6201,17 +6744,26 @@ class WeScene {
     }
 
     this._setupParticles(scene);
+    this._setupSounds(scene);
 
     this._applyScale();
     this._resizeHandler = () => this._applyScale();
     window.addEventListener('resize', this._resizeHandler);
 
+    // Textos com script atualizam a cada frame, como no WE (contador de FPS,
+    // relógio com segundos…) — e esse loop também mantém o engine.frametime
+    // vivo em cenas sem nenhum efeito animado. Sem script nenhum, nada roda.
     this._tick();
-    this.timer = setInterval(() => this._tick(), 1000);
+    if (this.textEntries.some((e) => e.updateFn)) {
+      const holder = { id: null };
+      this._foliageRafHolders.push(holder);
+      const loop = () => { advanceEngineClock(); this._tick(); holder.id = requestAnimationFrame(loop); };
+      holder.id = requestAnimationFrame(loop);
+    }
   }
 
   _setupParticles(scene) {
-    const particleObjs = (scene.objects || []).filter(o => o.particle && this._isVisible(o));
+    const particleObjs = (scene.objects || []).filter(o => o.particle && this._effectiveVisible(o));
     if (!particleObjs.length) return;
 
     this.particleCanvas = document.createElement('canvas');
@@ -6220,23 +6772,50 @@ class WeScene {
     this.particleCanvas.style.cssText = `position:absolute; top:0; left:0; width:${this.designWidth}px; height:${this.designHeight}px; pointer-events:none;`;
     this.stage.appendChild(this.particleCanvas);
     this.particleCtx = this.particleCanvas.getContext('2d');
+    // Partículas com blending "additive" vão num canvas à parte com
+    // mix-blend-mode plus-lighter: somam sobre a cena de verdade. No mesmo
+    // canvas transparente, somar preto dava preto OPACO e tampava a cena
+    // (texturas de neve/luz com fundo preto viravam quadrados escuros).
+    this.particleCanvasAdd = document.createElement('canvas');
+    this.particleCanvasAdd.width = this.designWidth;
+    this.particleCanvasAdd.height = this.designHeight;
+    this.particleCanvasAdd.style.cssText = `position:absolute; top:0; left:0; width:${this.designWidth}px; height:${this.designHeight}px; pointer-events:none; mix-blend-mode:plus-lighter;`;
+    this.stage.appendChild(this.particleCanvasAdd);
+    this.particleCtxAdd = this.particleCanvasAdd.getContext('2d');
 
     for (const obj of particleObjs) {
-      const [ox, oy] = this._resolveOrigin(obj);
+      const xf = this._resolveTransform(obj);
+      const [ox, oy] = [xf.x, xf.y];
       // Partículas usam o mesmo espaço de coordenadas dos outros objetos —
       // mesma inversão de eixo Y (ver _screenTop).
       const screenX = ox;
       const screenY = this.designHeight - oy;
       try {
-        const particlePath = path.join(this.sceneDir, obj.particle);
-        if (!fs.existsSync(particlePath)) continue;
-        const def = JSON.parse(fs.readFileSync(particlePath, 'utf8'));
+        // Presets (particles/presets/*.json) muitas vezes só existem na
+        // instalação do WE, não no pacote da cena — antes eram pulados em
+        // silêncio.
+        const def = this._readSceneOrStockJson(obj.particle);
+        if (!def) { this._reportIssue(`partículas "${obj.name}": ${obj.particle} não encontrado`); continue; }
         // scene.json pode reusar o mesmo arquivo de partícula em vários
         // objetos e sobrescrever a cor por instância (0-1 normalizado, ao
         // contrário do 0-255 usado dentro do próprio arquivo de partícula).
         const overrideColorn = obj.instanceoverride && obj.instanceoverride.colorn;
         const colorOverride = overrideColorn ? overrideColorn.split(' ').map(v => Number(v) * 255) : null;
         const system = new ParticleSystem(this.sceneDir, def, screenX, screenY, (msg) => this._reportIssue(`partículas "${obj.name}": ${msg}`), colorOverride);
+        // O sistema simula no espaço do objeto: escala/rotação do objeto (e
+        // dos pais) valem pra posição, velocidade e tamanho das partículas
+        // (ex.: orbe do Cell 3766519444 com escala -0.098 é minúsculo no WE).
+        system.objScaleX = xf.sx; system.objScaleY = xf.sy; system.objRot = xf.rot;
+        system.override = obj.instanceoverride || null;
+        // flag 4 = partículas em perspectiva (3D). Distância da câmera pela
+        // altura da projeção e o fov da cena (padrão 50°).
+        system.perspective = !!(Number(def.flags) & 4);
+        const fovDeg = Number((scene.general && scene.general.fov) || 50) || 50;
+        system.camDist = (this.designHeight / 2) / Math.tan((fovDeg * Math.PI / 180) / 2);
+        system.camCx = this.designWidth / 2;
+        system.camCy = this.designHeight / 2;
+        const cp0 = (def.controlpoint || []).find((c) => Number(c.id) === 0);
+        system.followMouse = !!(cp0 && (Number(cp0.flags) & 1));
         system.load(); // async, fire-and-forget — starts rendering once the sprite is ready
         this.particleSystems.push(system);
       } catch (err) {
@@ -6250,9 +6829,24 @@ class WeScene {
         const dt = Math.min(0.1, (now - this._lastFrameTime) / 1000);
         this._lastFrameTime = now;
         this.particleCtx.clearRect(0, 0, this.designWidth, this.designHeight);
+        this.particleCtxAdd.clearRect(0, 0, this.designWidth, this.designHeight);
         for (const system of this.particleSystems) {
           system.update(dt);
-          system.render(this.particleCtx);
+          const ctx = system.texture && system.texture.additive ? this.particleCtxAdd : this.particleCtx;
+          const sx = system.objScaleX == null ? 1 : system.objScaleX;
+          const sy = system.objScaleY == null ? 1 : system.objScaleY;
+          const rot = system.objRot || 0;
+          if (sx !== 1 || sy !== 1 || rot) {
+            ctx.save();
+            ctx.translate(system.originX, system.originY);
+            if (rot) ctx.rotate(-rot);
+            ctx.scale(sx, sy);
+            ctx.translate(-system.originX, -system.originY);
+            system.render(ctx);
+            ctx.restore();
+          } else {
+            system.render(ctx);
+          }
         }
         this._particleRafId = requestAnimationFrame(loop);
       };
@@ -6269,6 +6863,227 @@ class WeScene {
   // seen obfuscated on at least one real object) can't be safely evaluated
   // generically yet, so those objects default to visible rather than risk
   // hiding something needed.
+  // Scripts de visibilidade rodam como no WE: init() na carga (ex.: o grupo
+  // "Mover" do Monster 3768684297 faz thisLayer.visible = false até tocar
+  // mídia — sem isso o quadro do álbum vazio aparecia como quadrado branco),
+  // update() a cada frame e eventos de mídia/cursor. Vale também pra grupos
+  // sem elemento próprio (só escondem/mostram os filhos).
+  _prepareVisibilityScripts(scene) {
+    const updaters = [];
+    for (const obj of scene.objects || []) {
+      const v = obj.visible;
+      if (!(v && typeof v === 'object' && typeof v.script === 'string') || obj.id == null) continue;
+      const layer = new LayerHandle({ visible: v.value !== false, name: obj.name || '' });
+      let ex;
+      try { ex = compileWEScript(v.script, v.scriptproperties)(layer); }
+      catch { continue; }
+      try {
+        if (typeof ex.init === 'function') {
+          const r = ex.init(layer.visible);
+          if (typeof r === 'boolean') layer.visible = r;
+        }
+      } catch { /* init quebrado: fica o valor salvo */ }
+      this._liveLayers.set(obj.id, layer);
+      if (typeof ex.update === 'function') updaters.push({ layer, ex });
+      const handlesEvents = ['mediaPlaybackChanged', 'mediaPropertiesChanged', 'mediaThumbnailChanged',
+        'cursorDown', 'cursorUp', 'cursorClick'].some((k) => typeof ex[k] === 'function');
+      if (handlesEvents) {
+        // Sem caixa de clique própria aqui (grupos não têm tamanho); objetos
+        // com imagem também se registram em _wireObjectInteractivity.
+        this._clickTargets.push({
+          left: -1e9, top: -1e9, w: 0, h: 0,
+          applyLayerToDom: () => this._refreshVisibility(),
+          scripts: [{ dispatchCursorEvent: (name, ev) => {
+            if (typeof ex[name] !== 'function') return;
+            try { ex[name](ev); } catch { /* handler quebrado */ }
+          } }],
+        });
+      }
+    }
+    if (updaters.length) {
+      const holder = { id: null };
+      this._foliageRafHolders.push(holder);
+      const tick = () => {
+        let changed = false;
+        for (const u of updaters) {
+          const before = u.layer.visible;
+          try {
+            const r = u.ex.update(before);
+            if (typeof r === 'boolean') u.layer.visible = r;
+          } catch { /* ignora este frame */ }
+          if (u.layer.visible !== before) changed = true;
+        }
+        if (changed) this._refreshVisibility();
+        holder.id = requestAnimationFrame(tick);
+      };
+      holder.id = requestAnimationFrame(tick);
+    }
+  }
+
+  // ---- Animação por keyframes (origin/scale/angles/alpha) ----
+  // Formato lido do parser do WE (wallpaper64.exe FUN_1401a8ce0, via REA):
+  // cada keyframe = {frame, value, back:{enabled,x,y}, front:{enabled,x,y},
+  // step}. Entre dois keyframes: Bézier cúbica com as alças em unidades de
+  // (quadro, valor) — sem alça, linear; "step" segura o valor até o próximo.
+  // options: {fps, length, mode: loop|single, startpaused}.
+  static _animChannel(keys, frame) {
+    if (!Array.isArray(keys) || !keys.length) return null;
+    const ks = keys.slice().sort((a, b) => Number(a.frame) - Number(b.frame));
+    if (frame <= Number(ks[0].frame)) return Number(ks[0].value) || 0;
+    const last = ks[ks.length - 1];
+    if (frame >= Number(last.frame)) return Number(last.value) || 0;
+    let i = 0;
+    while (i < ks.length - 1 && Number(ks[i + 1].frame) < frame) i++;
+    const a = ks[i], b = ks[i + 1];
+    const f0 = Number(a.frame), f1 = Number(b.frame);
+    const v0 = Number(a.value) || 0, v1 = Number(b.value) || 0;
+    if (a.step) return v0;
+    if (f1 <= f0) return v1;
+    const fr = a.front && a.front.enabled !== false ? a.front : null;
+    const bk = b.back && b.back.enabled !== false ? b.back : null;
+    if (!fr && !bk) return v0 + (v1 - v0) * ((frame - f0) / (f1 - f0));
+    // Pontos de controle; alça ausente = 1/3 do segmento na reta.
+    const x1 = fr ? f0 + Number(fr.x || 0) : f0 + (f1 - f0) / 3;
+    const y1 = fr ? v0 + Number(fr.y || 0) : v0 + (v1 - v0) / 3;
+    const x2 = bk ? f1 + Number(bk.x || 0) : f1 - (f1 - f0) / 3;
+    const y2 = bk ? v1 + Number(bk.y || 0) : v1 - (v1 - v0) / 3;
+    const bez = (p0, p1, p2, p3, t) => { const u = 1 - t; return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3; };
+    // acha t com x(t) = frame (bisseção; x é monotônico na prática)
+    let lo = 0, hi = 1, t = (frame - f0) / (f1 - f0);
+    for (let it = 0; it < 30; it++) {
+      const x = bez(f0, x1, x2, f1, t);
+      if (Math.abs(x - frame) < 1e-4) break;
+      if (x < frame) lo = t; else hi = t;
+      t = (lo + hi) / 2;
+    }
+    return bez(v0, y1, y2, v1, t);
+  }
+
+  // Avalia o campo animado no tempo (s). Devolve [x,y,z] ou null.
+  _animValue(raw, timeSec) {
+    const anim = raw && typeof raw === 'object' ? raw.animation : null;
+    if (!anim) return null;
+    const opt = anim.options || {};
+    const fps = Number(opt.fps) > 0 ? Number(opt.fps) : 30;
+    const len = Number(opt.length) > 0 ? Number(opt.length) : 0;
+    let frame = timeSec * fps;
+    if (opt.startpaused) frame = 0;
+    else if (len > 0) frame = (opt.mode === 'single') ? Math.min(frame, len) : frame % len;
+    return ['c0', 'c1', 'c2'].map((c) => WeScene._animChannel(anim[c], frame));
+  }
+
+  _hasPlayingAnim(obj) {
+    for (const f of ['origin', 'scale', 'angles', 'alpha']) {
+      const r = obj[f];
+      if (r && typeof r === 'object' && r.animation && !(r.animation.options && r.animation.options.startpaused)) return true;
+    }
+    return false;
+  }
+
+  _chainAnimated(obj) {
+    let cur = obj;
+    for (let d = 0; cur && d < 64; d++) {
+      if (this._hasPlayingAnim(cur)) return true;
+      if (cur.parent == null) break;
+      cur = this.objectsById.get(cur.parent);
+    }
+    return false;
+  }
+
+  // Transformação CSS (coords do stage) do delta da animação de UM objeto
+  // em relação ao quadro 0, em torno do pivô estático dele.
+  _animDeltaCss(obj, t) {
+    if (!this._hasPlayingAnim(obj)) return '';
+    const xf = this._resolveTransform(obj);
+    const px = xf.x, py = this.designHeight - xf.y;
+    let css = '';
+    const o = this._animValue(obj.origin, t), o0 = this._animValue(obj.origin, 0);
+    if (o && o0) {
+      const parent = obj.parent != null ? this.objectsById.get(obj.parent) : null;
+      const P = parent ? this._resolveTransform(parent) : { sx: 1, sy: 1, rot: 0 };
+      const lx = ((o[0] ?? 0) - (o0[0] ?? 0)) * P.sx, ly = ((o[1] ?? 0) - (o0[1] ?? 0)) * P.sy;
+      const c = Math.cos(P.rot), s = Math.sin(P.rot);
+      const dx = c * lx - s * ly, dy = s * lx + c * ly;
+      if (dx || dy) css += ` translate(${dx}px, ${-dy}px)`;
+    }
+    const a = this._animValue(obj.angles, t), a0 = this._animValue(obj.angles, 0);
+    const sc = this._animValue(obj.scale, t), sc0 = this._animValue(obj.scale, 0);
+    const dr = a && a0 ? (a[2] ?? 0) - (a0[2] ?? 0) : 0;
+    let rx = 1, ry = 1;
+    if (sc && sc0) {
+      const rel = obj.scale.animation.relative === true;
+      const base = rel ? csvVec(obj.scale.value, [1, 1, 1]) : [0, 0, 0];
+      const cx = base[0] + (sc[0] ?? 0), cy = base[1] + (sc[1] ?? 0);
+      const bx = base[0] + (sc0[0] ?? 0), by = base[1] + (sc0[1] ?? 0);
+      rx = bx ? cx / bx : 1; ry = by ? cy / by : 1;
+    }
+    if (dr || rx !== 1 || ry !== 1) {
+      css += ` translate(${px}px, ${py}px)${dr ? ` rotate(${-dr}rad)` : ''}${rx !== 1 || ry !== 1 ? ` scale(${rx}, ${ry})` : ''} translate(${-px}px, ${-py}px)`;
+    }
+    return css;
+  }
+
+  _startKeyframeAnimations() {
+    const entries = (this._wrapEntries || []).filter((e) => this._chainAnimated(e.obj));
+    if (!entries.length) return;
+    const holder = { id: null };
+    this._foliageRafHolders.push(holder);
+    const start = performance.now();
+    const tick = () => {
+      const t = (performance.now() - start) / 1000;
+      for (const e of entries) {
+        // pai antes do filho: D_raiz … D_pai D_objeto
+        const chain = [];
+        let cur = e.obj;
+        for (let d = 0; cur && d < 64; d++) { chain.unshift(cur); if (cur.parent == null) break; cur = this.objectsById.get(cur.parent); }
+        let css = '';
+        for (const o of chain) css += this._animDeltaCss(o, t);
+        e.el.style.transform = css.trim() || 'none';
+        const al = this._animValue(e.obj.alpha, t);
+        if (al) e.el.style.opacity = String(Math.max(0, Math.min(1, al[0] ?? 1)));
+      }
+      holder.id = requestAnimationFrame(tick);
+    };
+    holder.id = requestAnimationFrame(tick);
+  }
+
+  // Visibilidade do PRÓPRIO objeto: estado vivo do script se ele já rodou
+  // (_wireObjectInteractivity), senão o valor inicial salvo (antes, todo
+  // visible por script contava como visível, mesmo começando em false).
+  _ownVisible(obj) {
+    const live = this._liveLayers && this._liveLayers.get(obj.id);
+    if (live) return live.visible !== false;
+    const v = obj.visible;
+    if (v && typeof v === 'object' && typeof v.script === 'string') return v.value !== false;
+    return this._isVisible(obj);
+  }
+
+  // Visível de fato = ele e todos os ancestrais visíveis (igual ao WE).
+  _effectiveVisible(obj) {
+    let cur = obj;
+    for (let d = 0; cur && d < 64; d++) {
+      if (!this._ownVisible(cur)) return false;
+      if (cur.parent == null) break;
+      cur = this.objectsById.get(cur.parent);
+    }
+    return true;
+  }
+
+  _visibilityChainScripted(obj) {
+    let cur = obj;
+    for (let d = 0; cur && d < 64; d++) {
+      const v = cur.visible;
+      if (v && typeof v === 'object' && typeof v.script === 'string') return true;
+      if (cur.parent == null) break;
+      cur = this.objectsById.get(cur.parent);
+    }
+    return false;
+  }
+
+  _refreshVisibility() {
+    for (const e of this._visEntries || []) e.el.style.display = this._effectiveVisible(e.obj) ? '' : 'none';
+  }
+
   _isVisible(obj) {
     const v = obj.visible;
     if (v === undefined || v === true) return true;
@@ -6298,12 +7113,78 @@ class WeScene {
     return true;
   }
 
+  // Campos ligados a uma propriedade do usuário (General Properties do
+  // project.json) vêm como {user, value} — "value" é só o valor salvo no
+  // editor. O WE usa o valor EFETIVO da propriedade; aqui reescreve o value
+  // de todos esses campos (objetos, efeitos, passes, scriptproperties) uma
+  // vez, antes de montar a cena, então csvNum/csvVec/visibilidade já
+  // enxergam o valor certo. {user:{name, condition}} vira booleano
+  // (propriedade == condição), igual ao combo do WE.
+  _applyUserProperties(scene) {
+    const props = this.propValues || {};
+    const toValue = (v) => {
+      if (Array.isArray(v)) return v.join(' ');
+      return v;
+    };
+    const walk = (node, depth) => {
+      if (!node || typeof node !== 'object' || depth > 40) return;
+      if (Array.isArray(node)) { for (const n of node) walk(n, depth + 1); return; }
+      if ('user' in node && 'value' in node) {
+        const u = node.user;
+        if (typeof u === 'string' && u in props) node.value = toValue(props[u]);
+        else if (u && typeof u === 'object' && typeof u.name === 'string' && u.name in props && 'condition' in u) {
+          node.value = String(props[u.name]) === String(u.condition);
+        }
+      }
+      for (const k of Object.keys(node)) walk(node[k], depth + 1);
+    };
+    walk(scene.objects, 0);
+  }
+
+  // Parâmetros de efeito com script ({script, value}): o WE usa o que o
+  // script devolve (Music Visualizer: colorstart das nuvens é preto até a
+  // capa da mídia chegar; o value salvo é branco). Roda init()+update() uma
+  // vez e grava no value — os ports/compilador leem value.
+  _evaluateScriptedEffectValues(scene) {
+    for (const obj of scene.objects || []) {
+      for (const eff of obj.effects || []) {
+        for (const ps of eff.passes || []) {
+          const csv = ps.constantshadervalues;
+          if (!csv) continue;
+          for (const k of Object.keys(csv)) {
+            const raw = csv[k];
+            if (!raw || typeof raw !== 'object' || typeof raw.script !== 'string') continue;
+            try {
+              if (typeof raw.value === 'number' || (typeof raw.value === 'string' && !/\s/.test(raw.value.trim()))) {
+                const layer = new LayerHandle();
+                const ex = compileWEScript(raw.script, raw.scriptproperties)(layer);
+                let v = Number(raw.value);
+                if (typeof ex.init === 'function') { const r = ex.init(v); if (typeof r === 'number') v = r; }
+                if (typeof ex.update === 'function') { const r = ex.update(v); if (typeof r === 'number') v = r; }
+                if (Number.isFinite(v)) raw.value = v;
+              } else {
+                const base = csvVec(raw.value, [0, 0, 0]);
+                const out = this._evalScriptedVec(raw, base);
+                raw.value = out.slice(0, base.length || 3).join(' ');
+              }
+            } catch { /* script quebrado: fica o value salvo */ }
+          }
+        }
+      }
+    }
+  }
+
   _applyScale() {
     const scale = Math.max(window.innerWidth / this.designWidth, window.innerHeight / this.designHeight);
     this._currentScale = scale;
     const offsetX = (window.innerWidth  - this.designWidth  * scale) / 2;
     const offsetY = (window.innerHeight - this.designHeight * scale) / 2;
     this.stage.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+    const key = `${window.innerWidth}x${window.innerHeight}`;
+    if (key !== this._lastScaleKey) {
+      this._lastScaleKey = key;
+      this._reportIssue(`enquadramento: janela ${key} (tela ${screen.width}x${screen.height}), cena ${this.designWidth}x${this.designHeight}, escala ${scale.toFixed(4)}, deslocamento (${offsetX.toFixed(1)}, ${offsetY.toFixed(1)})`);
+    }
   }
 
   // object.image -> "models/<id>.json" -> .material -> "materials/<id>.json"
@@ -6367,9 +7248,44 @@ class WeScene {
       return { flat: true };
     }
 
+    // Textura de vídeo (MP4 embutido no .tex, ver extractTexVideo).
+    const localMp4Path = path.join(this.sceneDir, 'materials', texId + '.tex.mp4');
+    if (fs.existsSync(localMp4Path)) return { video: 'file:///' + localMp4Path.replace(/\\/g, '/'), texId };
+    const localTexForVideo = path.join(this.sceneDir, 'materials', texId + '.tex');
+    if (fs.existsSync(localTexForVideo) && /[\\/]we-scene-cache[\\/]/.test(this.sceneDir)) {
+      try {
+        const mp4 = extractTexVideo(fs.readFileSync(localTexForVideo));
+        if (mp4) {
+          fs.writeFileSync(localMp4Path, mp4);
+          return { video: 'file:///' + localMp4Path.replace(/\\/g, '/'), texId };
+        }
+      } catch { /* segue como imagem */ }
+    }
+
     const localPngPath = path.join(this.sceneDir, 'materials', texId + '.tex.png');
+    if (this._texCacheStale) this._refreshTexPng(path.join(this.sceneDir, 'materials', texId + '.tex'));
     if (fs.existsSync(localPngPath)) {
-      return { src: 'file:///' + localPngPath.replace(/\\/g, '/'), spritesheet };
+      return { src: 'file:///' + localPngPath.replace(/\\/g, '/'), spritesheet, texId };
+    }
+    // .tex local sem o .png irmão: cache desempacotado por uma versão antiga
+    // do decodificador que ainda não entendia aquele formato (visto ao vivo
+    // na cena 3762437755: 67 texturas TEXB0004 só com .tex, personagem
+    // inteira virava bloco branco). Decodifica agora e grava pro próximo uso.
+    const localTexPath = path.join(this.sceneDir, 'materials', texId + '.tex');
+    if (fs.existsSync(localTexPath)) {
+      try {
+        const png = decodeTexToPng(fs.readFileSync(localTexPath));
+        if (png) {
+          // Só grava dentro do nosso cache — cena solta (scene.json direto na
+          // pasta da Workshop) não tem a pasta da Steam modificada.
+          if (/[\\/]we-scene-cache[\\/]/.test(this.sceneDir)) {
+            try { fs.writeFileSync(localPngPath, png); } catch { /* só-leitura: usa em memória */ }
+          }
+          return fs.existsSync(localPngPath)
+            ? { src: 'file:///' + localPngPath.replace(/\\/g, '/'), spritesheet, texId }
+            : { src: 'data:image/png;base64,' + png.toString('base64'), spritesheet, texId };
+        }
+      } catch { /* formato ainda desconhecido — segue pros fallbacks */ }
     }
 
     // Descoberta real (2026-07-18, "Music Visualizer"): nem todo texId
@@ -6491,8 +7407,7 @@ class WeScene {
       let lastTime = performance.now();
       const loop = () => {
         const now = performance.now();
-        ENGINE_CLOCK.frametime = Math.min(0.1, (now - lastTime) / 1000);
-        ENGINE_CLOCK.runtime += ENGINE_CLOCK.frametime;
+        advanceEngineClock();
         lastTime = now;
         alphaLive.tick();
         colorLive.tick();
@@ -6521,25 +7436,102 @@ class WeScene {
   // as position (0,0), which silently discarded the parent's real position
   // entirely for every real Clock/Day/Date case found.
   _resolveOrigin(obj) {
-    let x = 0, y = 0;
-    let current = obj;
-    const seen = new Set();
-    while (current) {
-      const raw = current.origin;
-      let str = null;
-      if (typeof raw === 'string') str = raw;
-      else if (raw && typeof raw.value === 'string') str = raw.value;
-      if (str) {
-        const [ox, oy] = str.split(' ').map(Number);
-        x += ox || 0; y += oy || 0;
-      } else if (raw != null) {
-        this._reportIssue(`objeto "${current.name}" tem origin num formato não reconhecido — tratado como parado na posição (0,0)`);
-      }
-      if (current.parent == null || seen.has(current.parent)) break;
-      seen.add(current.parent);
-      current = this.objectsById.get(current.parent);
+    const t = this._resolveTransform(obj);
+    return [t.x, t.y];
+  }
+
+  // Valor vetorial de um campo de transformação (origin/scale/angles):
+  // string "x y z", {value} de script/propriedade, ou animação por
+  // keyframes. Sem tocar a animação, usa o quadro 0 — onde o WE começa:
+  // "animation.relative" soma o quadro 0 ao value; a absoluta fica no value
+  // (não confirmado como o WE trata parada). Visto na cena 3762437755: o QR
+  // "2cpz5" começa 1087px acima (fora da tela) e só desce quando um script
+  // toca a animação.
+  _transformField(raw, fallback, objName, field) {
+    let str = null;
+    if (typeof raw === 'string') str = raw;
+    else if (raw && typeof raw.value === 'string') str = raw.value;
+    if (str == null) {
+      if (raw != null && field === 'origin') this._reportIssue(`objeto "${objName}" tem origin num formato não reconhecido — tratado como (0,0)`);
+      return fallback.slice();
     }
-    return [x, y];
+    const v = str.split(' ').map(Number);
+    let out = fallback.map((d, i) => (Number.isFinite(v[i]) ? v[i] : d));
+    // Campo com script (ex.: 3014738359: update() põe origin.y = 1690 e
+    // angles.z = 50 a partir de propriedades do usuário): o WE usa o que o
+    // script devolve, não o value salvo. Roda init()+update() uma vez.
+    if (raw && typeof raw === 'object' && typeof raw.script === 'string') {
+      // Na API de script do WE os ângulos são em GRAUS (o scene.json guarda
+      // radianos): converte na ida e na volta.
+      if (field === 'angles') {
+        const deg = this._evalScriptedVec(raw, out.map((r) => (r * 180) / Math.PI), 'angles');
+        out = deg.map((dg) => (dg * Math.PI) / 180);
+      } else out = this._evalScriptedVec(raw, out, field);
+    }
+    const anim = raw && typeof raw === 'object' ? raw.animation : null;
+    if (anim) {
+      // Com animação o WE dirige a propriedade pela curva: relativa soma o
+      // quadro 0 ao value; absoluta USA o quadro 0 (ex.: painel "프사" do
+      // 3762437755 começa em x=2756, fora da tela, e só entra por script).
+      const relative = anim.relative === true;
+      ['c0', 'c1', 'c2'].forEach((ch, i) => {
+        const keys = anim[ch];
+        if (!Array.isArray(keys) || !keys.length || i >= out.length) return;
+        const k = keys.reduce((m, n) => (Number(n.frame) < Number(m.frame) ? n : m));
+        const kv = Number(k.value) || 0;
+        out[i] = relative ? out[i] + kv : kv;
+      });
+    }
+    return out;
+  }
+
+  _evalScriptedVec(raw, base, field) {
+    if (!this._scriptVecCache) this._scriptVecCache = new WeakMap();
+    const hit = this._scriptVecCache.get(raw);
+    if (hit) return hit.slice();
+    let out = base.slice();
+    try {
+      const layer = new LayerHandle();
+      // thisLayer começa com o valor real do campo (ex.: init() de arrastar
+      // devolve "localStorage || thisLayer.origin" — com (0,0,0) o relógio
+      // do 3763428294 ia pro canto).
+      if (field === 'origin' || field === 'scale' || field === 'angles') layer[field] = new Vec3(base[0] || 0, base[1] || 0, base[2] || 0);
+      const ex = compileWEScript(raw.script, raw.scriptproperties)(layer);
+      let v = new Vec3(base[0] || 0, base[1] || 0, base[2] || 0);
+      if (typeof ex.init === 'function') { const r = ex.init(v); if (r != null) v = r; }
+      if (typeof ex.update === 'function') { const r = ex.update(v); if (r != null) v = r; }
+      const arr = typeof v === 'number' ? [v, v, v] : [v.x, v.y, v.z];
+      out = base.map((d, i) => (Number.isFinite(arr[i]) ? arr[i] : d));
+    } catch { /* script quebrado: fica o value salvo */ }
+    this._scriptVecCache.set(raw, out);
+    return out.slice();
+  }
+
+  // Transformação de mundo do objeto, acumulando a hierarquia como a matriz
+  // do WE (mundo = pai × T(origin) × R(angles.z) × S(scale)): a origem do
+  // filho é girada e escalada pelo pai, e a escala/rotação se multiplicam.
+  // Antes só as origens eram somadas — filhos de um grupo com escala
+  // (Terra do 3521337568: pai 556 com scale 2.5) saíam no lugar e tamanho
+  // errados. Rotação em radianos, sentido anti-horário (eixo Y pra cima).
+  _resolveTransform(obj, depth = 0) {
+    const [ox, oy] = this._transformField(obj.origin, [0, 0, 0], obj.name, 'origin');
+    const [sx, sy] = this._transformField(obj.scale, [1, 1, 1], obj.name, 'scale');
+    const rot = this._transformField(obj.angles, [0, 0, 0], obj.name, 'angles')[2] || 0;
+    const parent = obj.parent != null && depth < 64 ? this.objectsById.get(obj.parent) : null;
+    if (!parent || parent === obj) return { x: ox, y: oy, sx, sy, rot };
+    const P = this._resolveTransform(parent, depth + 1);
+    const lx = ox * P.sx, ly = oy * P.sy;
+    const c = Math.cos(P.rot), sn = Math.sin(P.rot);
+    return { x: P.x + c * lx - sn * ly, y: P.y + sn * lx + c * ly, sx: P.sx * sx, sy: P.sy * sy, rot: P.rot + rot };
+  }
+
+  // CSS de escala+rotação centrado no objeto (R × S, igual ao WE). CSS gira
+  // no sentido horário (Y pra baixo), por isso o sinal invertido.
+  _transformCss(t) {
+    const parts = [];
+    if (t.rot) parts.push(`rotate(${-t.rot}rad)`);
+    if (t.sx !== 1 || t.sy !== 1) parts.push(`scale(${t.sx},${t.sy})`);
+    return parts.length ? ` transform:${parts.join(' ')}; transform-origin:50% 50%;` : '';
   }
 
   // Lê um .json relativo à cena, caindo pra instalação global da WE quando
@@ -6579,7 +7571,10 @@ class WeScene {
 
     const texResult = this._resolveMaterialTexturePng(model);
     if (!texResult) return false;
-    if (texResult.fullFrameBuffer) return this._buildFullFrameBufferObject(obj, visibleEffects);
+    if (texResult.fullFrameBuffer) {
+      if (model.material === 'materials/util/composelayer.json') return this._buildComposeLayer(obj, visibleEffects);
+      return this._buildFullFrameBufferObject(obj, visibleEffects);
+    }
 
     const [w, h]   = (obj.size   || `${this.designWidth} ${this.designHeight}`).split(' ').map(Number);
     const [ox, oy] = this._resolveOrigin(obj);
@@ -6606,6 +7601,17 @@ class WeScene {
     const left = ox - w / 2;
     const top = this._screenTop(oy, h);
 
+    // Escala do próprio objeto (scene.json "scale"). Achado comparando com
+    // o Wallpaper Engine original lado a lado (2026-10-13, cena 2998757800):
+    // a personagem tem size 1415×2047 mas scale 0.605 — desenhada sem a
+    // escala ficava 1.65× maior, com a cabeça fora da tela (e o fundo, com
+    // scale 1.25, menor que no WE). Via transform CSS centrado no objeto,
+    // em vez de mudar w/h: w/h também definem a grade do spritesheet e a
+    // resolução dos efeitos, e os efeitos copiam o cssText pro canvas
+    // deles, então a escala segue pela cadeia sem tocar em nenhum.
+    // Escala e rotação vêm da transformação de mundo (inclui o pai).
+    const scaleCss = this._transformCss(this._resolveTransform(obj));
+
     // Roda um loop de frame que só atualiza a cor de fundo do elemento —
     // usado tanto pelo caso "flat" (sem textura) quanto pelo overlay de
     // tingimento abaixo, sempre que colorLive tiver um script de verdade
@@ -6617,8 +7623,7 @@ class WeScene {
       let lastTime = performance.now();
       const loop = () => {
         const now = performance.now();
-        ENGINE_CLOCK.frametime = Math.min(0.1, (now - lastTime) / 1000);
-        ENGINE_CLOCK.runtime += ENGINE_CLOCK.frametime;
+        advanceEngineClock();
         lastTime = now;
         colorLive.tick();
         el.style.background = toRgbCss(colorLive.current);
@@ -6635,15 +7640,26 @@ class WeScene {
       // transparência automática) — desenha opaco, sem efeitos de imagem
       // (não há <img> pra anexar WebGL nenhum aqui).
       const div = document.createElement('div');
-      div.style.cssText = `position:absolute; left:${left}px; top:${top}px; width:${w}px; height:${h}px; background:${toRgbCss([tr, tg, tb])};`;
+      div.style.cssText = `position:absolute; left:${left}px; top:${top}px; width:${w}px; height:${h}px; background:${toRgbCss([tr, tg, tb])};${scaleCss}`;
       this.stage.appendChild(div);
       startColorLoop(div);
       this._wireObjectInteractivity(obj, div, w, h, left, top);
       return true;
     }
 
-    const img = document.createElement('img');
-    img.src = texResult.src;
+    let img;
+    if (texResult.video) {
+      // Vídeo como textura da camada: mudo e em loop (o áudio da cena vem
+      // dos objetos de som). "loadeddata" faz o papel do onload da <img>.
+      img = document.createElement('video');
+      img.muted = true; img.loop = true; img.autoplay = true; img.playsInline = true;
+      img.src = texResult.video;
+      img.addEventListener('loadeddata', () => { if (typeof img.onload === 'function') img.onload(); }, { once: true });
+      img.play().catch(() => {});
+    } else {
+      img = document.createElement('img');
+      img.src = texResult.src;
+    }
 
     let tintWrap = null;
     if (texResult.spritesheet) {
@@ -6656,7 +7672,7 @@ class WeScene {
       // "overflow:hidden" sempre precisa de um wrapper (mesmo sem
       // tingimento), por isso não reaproveita o branch `else` de baixo.
       tintWrap = document.createElement('div');
-      tintWrap.style.cssText = `position:absolute; left:${left}px; top:${top}px; width:${w}px; height:${h}px; overflow:hidden; isolation:isolate;`;
+      tintWrap.style.cssText = `position:absolute; left:${left}px; top:${top}px; width:${w}px; height:${h}px; overflow:hidden; isolation:isolate;${scaleCss}`;
       img.style.cssText = `position:absolute; left:0; top:0;`;
       tintWrap.appendChild(img);
       if (isTinted) {
@@ -6674,7 +7690,7 @@ class WeScene {
       // empilhamento só pra esse par img+overlay, então o multiply só
       // enxerga a própria imagem, não o resto da cena.
       tintWrap = document.createElement('div');
-      tintWrap.style.cssText = `position:absolute; left:${left}px; top:${top}px; width:${w}px; height:${h}px; isolation:isolate;`;
+      tintWrap.style.cssText = `position:absolute; left:${left}px; top:${top}px; width:${w}px; height:${h}px; isolation:isolate;${scaleCss}`;
       img.style.cssText = `position:absolute; left:0; top:0; width:100%; height:100%; object-fit:cover;`;
       const tintOverlay = document.createElement('div');
       tintOverlay.style.cssText = `position:absolute; left:0; top:0; width:100%; height:100%; background:${toRgbCss([tr, tg, tb])}; mix-blend-mode:multiply; pointer-events:none;`;
@@ -6683,7 +7699,7 @@ class WeScene {
       this.stage.appendChild(tintWrap);
       startColorLoop(tintOverlay);
     } else {
-      img.style.cssText = `position:absolute; left:${left}px; top:${top}px; width:${w}px; height:${h}px; object-fit:cover;`;
+      img.style.cssText = `position:absolute; left:${left}px; top:${top}px; width:${w}px; height:${h}px; object-fit:cover;${scaleCss}`;
       this.stage.appendChild(img);
     }
     this._wireObjectInteractivity(obj, tintWrap || img, w, h, left, top);
@@ -6718,147 +7734,516 @@ class WeScene {
     // animação de um objeto errado) — prefere manter alguns loops extras
     // rodando (custo pequeno, e limitado ao número de efeitos empilhados,
     // não cresce sem limite) a arriscar um bug cruzado entre objetos.
-    const effectStages = [];
-    const addStage = (label, config, methodName) => {
-      if (config.unsupported) { this._reportIssue(`objeto "${obj.name}" usa ${label} em modo não suportado: ${config.unsupported}`); return; }
-      const sortIndex = visibleEffects.findIndex((eff) => eff.file && eff.file.endsWith(`${label}/effect.json`));
-      effectStages.push({ label, config, methodName, sortIndex: sortIndex === -1 ? Infinity : sortIndex });
+    const stages = this._buildEffectStages(obj, visibleEffects);
+    const publishes = this._compositeRefs && this._compositeRefs.has(obj.id);
+    if (!stages.length && !publishes) return true;
+    const run = () => {
+      this._runEffectChain(obj, img, stages, w, h)
+        .then((out) => this._publishLayerOutput(obj, out))
+        .catch((err) => this._reportIssue(`cadeia de efeitos de "${obj.name}" falhou: ${err.message}`));
     };
+    if (!stages.length) img.addEventListener('load', run, { once: true });
+    else img.onload = run;
+    return true;
+  }
 
-    const foliagePasses = extractFoliageSwayPasses(visibleEffects);
-    if (foliagePasses.length) {
-      const sortIndex = visibleEffects.findIndex((eff) => eff.file && eff.file.endsWith('foliagesway/effect.json'));
-      effectStages.push({ label: 'foliagesway', config: foliagePasses, methodName: '_applyFoliageSway', sortIndex: sortIndex === -1 ? Infinity : sortIndex });
-    }
-    const chromaticConfig = extractChromaticAberrationConfig(visibleEffects);
-    if (chromaticConfig) addStage('chromaticaberration', chromaticConfig, '_applyChromaticAberration');
-    const vhsConfig = extractVHSConfig(visibleEffects);
-    if (vhsConfig) addStage('vhs', vhsConfig, '_applyVHS');
-    const motionBlurConfig = extractMotionBlurConfig(visibleEffects);
-    if (motionBlurConfig) addStage('motionblur', motionBlurConfig, '_applyMotionBlur');
-    const filmGrainConfig = extractFilmGrainConfig(visibleEffects);
-    if (filmGrainConfig) addStage('filmgrain', filmGrainConfig, '_applyFilmGrain');
-    const edgeDetectionConfig = extractEdgeDetectionConfig(visibleEffects);
-    if (edgeDetectionConfig) addStage('edgedetection', edgeDetectionConfig, '_applyEdgeDetection');
-
-    // Leva de efeitos simples (estáticos: aplicam uma vez / animados: têm seu
-    // próprio RAF loop dentro do método _apply*) — todos seguem o mesmo
-    // padrão extract->unsupported?->apply já usado acima.
-    const STATIC_EFFECTS = [
-      ['opacity', extractOpacityConfig, '_applyOpacity'],
-      ['skew', extractSkewConfig, '_applySkew'],
-      ['transform', extractTransformConfig, '_applyTransform'],
-      ['fisheye', extractFisheyeConfig, '_applyFisheye'],
-      ['perspective', extractPerspectiveConfig, '_applyPerspective'],
-      ['tint', extractTintConfig, '_applyTint'],
-      ['colorkey', extractColorKeyConfig, '_applyColorKey'],
-      ['localcontrast', extractLocalContrastConfig, '_applyLocalContrast'],
-      ['reflection', extractReflectionConfig, '_applyReflection'],
-      ['blur', extractBlurConfig, '_applyBlur'],
-      ['blurprecise', extractBlurPreciseConfig, '_applyBlurPrecise'],
-      ['blurradial', extractBlurRadialConfig, '_applyBlurRadial'],
-    ];
-    // ANIMATED_EFFECTS: nem todos aqui têm RAF loop de verdade — blend/
-    // blendgradient são assíncronos só porque carregam textura extra do
-    // disco (1 render só, sem tempo), mas precisam do mesmo tratamento de
-    // Promise+.catch() em vez do try/catch síncrono do loop STATIC_EFFECTS.
-    const ANIMATED_EFFECTS = [
-      ['scroll', extractScrollConfig, '_applyScroll'],
-      ['spin', extractSpinConfig, '_applySpin'],
-      ['swing', extractSwingConfig, '_applySwing'],
-      ['shake', extractShakeConfig, '_applyShake'],
-      ['pulse', extractPulseConfig, '_applyPulse'],
-      ['twirl', extractTwirlConfig, '_applyTwirl'],
-      ['blend', extractBlendConfig, '_applyBlend'],
-      ['blendgradient', extractBlendGradientConfig, '_applyBlendGradient'],
-      ['shine', extractShineConfig, '_applyShine'],
-      ['shimmer', extractShimmerConfig, '_applyShimmer'],
-      ['refraction', extractRefractionConfig, '_applyRefraction'],
-      ['nitro', extractNitroConfig, '_applyNitro'],
-      ['iris', extractIrisConfig, '_applyIris'],
-      ['glitter', extractGlitterConfig, '_applyGlitter'],
-      ['godrays', extractGodraysConfig, '_applyGodrays'],
-      ['watercaustics', extractCausticsConfig, '_applyCaustics'],
-      ['waterflow', extractWaterFlowConfig, '_applyWaterFlow'],
-      ['waterripple', extractWaterRippleConfig, '_applyWaterRipple'],
-      ['waterwaves', extractWaterWavesConfig, '_applyWaterWaves'],
-      ['clouds', extractCloudsConfig, '_applyClouds'],
-      ['cloudmotion', extractCloudMotionConfig, '_applyCloudMotion'],
-      ['fire', extractFireConfig, '_applyFire'],
-      ['depthparallax', extractDepthParallaxConfig, '_applyDepthParallax'],
-      ['xray', extractXrayConfig, '_applyXray'],
-      ['cursorripple', extractCursorRippleConfig, '_applyCursorRipple'],
-      ['fluidsimulation', extractFluidSimulationConfig, '_applyFluidSimulation'],
-    ];
-    for (const [label, extractFn, methodName] of STATIC_EFFECTS) {
-      if (!methodName) continue;
-      const config = extractFn(visibleEffects);
-      if (!config) continue;
-      addStage(label, config, methodName);
-    }
-    for (const [label, extractFn, methodName] of ANIMATED_EFFECTS) {
-      const config = extractFn(visibleEffects);
-      if (!config) continue;
-      addStage(label, config, methodName);
-    }
-
-    // Fallback genérico: qualquer efeito que não bateu com nenhuma das
-    // checagens acima (os efeitos oficiais já portados à mão) é
-    // provavelmente um shader PRÓPRIO de um item da Workshop — tenta
-    // compilar o .frag/.vert real dele na hora (ver we-shader-compiler.js)
-    // em vez de simplesmente ignorar. Nunca substitui o caminho hardcoded
-    // acima, só cobre o que sobrou (zero risco de regressão nos ~48 já
-    // validados).
-    const KNOWN_EFFECT_NAMES = [
-      'foliagesway', 'chromaticaberration', 'vhs', 'motionblur', 'filmgrain', 'edgedetection',
-      ...STATIC_EFFECTS.map(([label]) => label),
-      ...ANIMATED_EFFECTS.map(([label]) => label),
-    ];
-    const weAssetsRootForGeneric = getWEAssetsRoot();
+  // Monta a lista de estágios da cadeia: UM por efeito visível, na ordem do
+  // scene.json. Antes era um por TIPO (cada extract* pegava só o primeiro
+  // efeito daquele tipo) — 4 "blend" empilhados viravam 1 (Terra do
+  // 3521337568). Efeito portado à mão em modo que ele não suporta, ou que
+  // lê um render target (_rt_*), vai pro compilador genérico com o shader
+  // REAL do WE em vez de ser pulado.
+  _buildEffectStages(obj, visibleEffects) {
+    const TABLE = new Map([
+      ['foliagesway', [extractFoliageSwayPasses, '_applyFoliageSway']],
+      ['chromaticaberration', [extractChromaticAberrationConfig, '_applyChromaticAberration']],
+      ['vhs', [extractVHSConfig, '_applyVHS']],
+      ['motionblur', [extractMotionBlurConfig, '_applyMotionBlur']],
+      ['filmgrain', [extractFilmGrainConfig, '_applyFilmGrain']],
+      ['edgedetection', [extractEdgeDetectionConfig, '_applyEdgeDetection']],
+      ['opacity', [extractOpacityConfig, '_applyOpacity']],
+      ['skew', [extractSkewConfig, '_applySkew']],
+      ['transform', [extractTransformConfig, '_applyTransform']],
+      ['fisheye', [extractFisheyeConfig, '_applyFisheye']],
+      ['perspective', [extractPerspectiveConfig, '_applyPerspective']],
+      ['tint', [extractTintConfig, '_applyTint']],
+      ['colorkey', [extractColorKeyConfig, '_applyColorKey']],
+      ['localcontrast', [extractLocalContrastConfig, '_applyLocalContrast']],
+      ['reflection', [extractReflectionConfig, '_applyReflection']],
+      ['blur', [extractBlurConfig, '_applyBlur']],
+      ['blurprecise', [extractBlurPreciseConfig, '_applyBlurPrecise']],
+      ['blurradial', [extractBlurRadialConfig, '_applyBlurRadial']],
+      ['scroll', [extractScrollConfig, '_applyScroll']],
+      ['spin', [extractSpinConfig, '_applySpin']],
+      ['swing', [extractSwingConfig, '_applySwing']],
+      ['shake', [extractShakeConfig, '_applyShake']],
+      ['pulse', [extractPulseConfig, '_applyPulse']],
+      ['twirl', [extractTwirlConfig, '_applyTwirl']],
+      ['blend', [extractBlendConfig, '_applyBlend']],
+      ['blendgradient', [extractBlendGradientConfig, '_applyBlendGradient']],
+      ['shine', [extractShineConfig, '_applyShine']],
+      ['shimmer', [extractShimmerConfig, '_applyShimmer']],
+      ['refraction', [extractRefractionConfig, '_applyRefraction']],
+      ['nitro', [extractNitroConfig, '_applyNitro']],
+      ['iris', [extractIrisConfig, '_applyIris']],
+      ['glitter', [extractGlitterConfig, '_applyGlitter']],
+      ['godrays', [extractGodraysConfig, '_applyGodrays']],
+      ['watercaustics', [extractCausticsConfig, '_applyCaustics']],
+      ['waterflow', [extractWaterFlowConfig, '_applyWaterFlow']],
+      ['waterripple', [extractWaterRippleConfig, '_applyWaterRipple']],
+      ['waterwaves', [extractWaterWavesConfig, '_applyWaterWaves']],
+      ['clouds', [extractCloudsConfig, '_applyClouds']],
+      ['cloudmotion', [extractCloudMotionConfig, '_applyCloudMotion']],
+      ['fire', [extractFireConfig, '_applyFire']],
+      ['depthparallax', [extractDepthParallaxConfig, '_applyDepthParallax']],
+      ['xray', [extractXrayConfig, '_applyXray']],
+      ['cursorripple', [extractCursorRippleConfig, '_applyCursorRipple']],
+      ['fluidsimulation', [extractFluidSimulationConfig, '_applyFluidSimulation']],
+    ]);
+    // Índices de textura (além do 0) que cada port manual realmente lê. No
+    // WE a máscara de opacidade liga sozinha quando a textura existe (combo
+    // dirigido por textura); o pulse/waterwaves/shake manuais ignoravam a
+    // máscara e aplicavam na imagem inteira (Miku 3766827414 ficava todo
+    // verde/azul pulsando). Textura que o port não lê → shader real.
+    const CONSUMED_TEX = {
+      blend: [1], blendgradient: [1, 2], shimmer: [3], refraction: [1], waterflow: [1, 2],
+      waterripple: [1, 2], depthparallax: [1], xray: [1, 2], foliagesway: [1, 2],
+    };
+    const stages = [];
     for (const eff of visibleEffects) {
       if (!eff.file) continue;
-      if (KNOWN_EFFECT_NAMES.some((name) => eff.file.endsWith(`${name}/effect.json`))) continue;
+      const parts = eff.file.split('/');
+      const label = parts.length >= 2 ? parts[parts.length - 2] : '';
       const pass = (eff.passes || [])[0];
+      const readsRenderTarget = (eff.passes || []).some((ps) => (ps.textures || []).some((t) => typeof t === 'string' && t.startsWith('_rt_')));
+      const consumed = CONSUMED_TEX[label] || [];
+      const hasUnreadTexture = (eff.passes || []).some((ps) => (ps.textures || []).some((t, i) => i >= 1 && t && !consumed.includes(i)));
+      const entry = TABLE.get(label);
+      let fallback = null;
+      if (entry && !readsRenderTarget) {
+        const config = entry[0]([eff]);
+        const empty = !config || (Array.isArray(config) && !config.length);
+        const usable = !empty && !config.unsupported;
+        if (!hasUnreadTexture) {
+          if (empty) continue; // configuração padrão = efeito sem mudança visível
+          if (usable) { stages.push({ label, config, methodName: entry[1] }); continue; }
+          // modo não portado à mão → tenta o shader real abaixo
+        } else if (usable) {
+          // Shader real primeiro (respeita a máscara); se ele não compilar
+          // no WebGL, o port manual (sem máscara) é melhor que nada.
+          fallback = { label, config, methodName: entry[1] };
+        }
+      }
       if (!pass) continue;
-      effectStages.push({
-        label: `custom:${eff.file}`,
-        config: { eff, pass },
-        methodName: '__generic__',
-        sortIndex: visibleEffects.indexOf(eff),
-      });
+      stages.push({ label: `custom:${eff.file}`, config: { eff, pass }, methodName: '__generic__', fallback });
     }
+    return stages;
+  }
 
-    if (!effectStages.length) return true;
-    effectStages.sort((a, b) => a.sortIndex - b.sortIndex);
-
-    // Um único onload roda a cadeia inteira, na ordem montada acima —
-    // substitui os antigos N blocos independentes de `img.onload = ...`
-    // que se atropelavam (ver comentário grande logo acima).
-    img.onload = async () => {
-      let current = img;
-      for (const stage of effectStages) {
-        try {
-          let result;
-          if (stage.methodName === '__generic__') {
-            const { eff, pass } = stage.config;
-            const source = compileGenericEffectSource(this.sceneDir, weAssetsRootForGeneric, eff.file, pass.combos || {});
-            if (!source) continue; // sem shader em lugar nenhum (nem cache da cena, nem instalação real) — mantém o estágio anterior
+  // Executa os estágios em cadeia (a saída de um é a entrada do próximo) e
+  // resolve com { el, live }: o elemento final e se ele muda a cada frame.
+  async _runEffectChain(obj, img, stages, w, h) {
+    const ANIMATED_LABELS = new Set(['foliagesway', 'scroll', 'spin', 'swing', 'shake', 'pulse', 'twirl', 'blend',
+      'blendgradient', 'shine', 'shimmer', 'refraction', 'nitro', 'iris', 'glitter', 'godrays', 'watercaustics',
+      'waterflow', 'waterripple', 'waterwaves', 'clouds', 'cloudmotion', 'fire', 'depthparallax', 'xray',
+      'cursorripple', 'fluidsimulation']);
+    const weAssetsRootForGeneric = getWEAssetsRoot();
+    let current = img;
+    // `current` muda a cada frame? (saída de etapa animada, ou vídeo)
+    let currentIsLive = typeof HTMLVideoElement !== 'undefined' && img instanceof HTMLVideoElement;
+    for (let stage of stages) {
+      const inputWasLive = currentIsLive;
+      const before = current;
+      try {
+        let result;
+        if (stage.methodName === '__generic__') {
+          const { eff, pass } = stage.config;
+          // Efeito com vários passes (bloom/glow/blur multi-escala…) roda o
+          // grafo inteiro do effect.json — ver _applyGenericMultiPass.
+          const multi = compileGenericEffectPasses(this.sceneDir, weAssetsRootForGeneric, eff.file, eff.passes);
+          if (multi && multi.passes.length > 1) {
+            result = await this._applyGenericMultiPass(current, multi, w, h, obj.name, eff.file);
+          } else {
+            const source = compileGenericEffectSource(this.sceneDir, weAssetsRootForGeneric, eff.file, pass.combos || {}, pass.textures || []);
+            if (!source) continue; // sem shader em lugar nenhum — mantém o estágio anterior
             result = await this._applyGenericShaderEffect(current, {
               ...source,
               textures: pass.textures || [],
               constantShaderValues: pass.constantshadervalues || {},
               objName: obj.name,
             }, w, h);
-          } else {
-            result = await Promise.resolve(this[stage.methodName](current, stage.config, w, h));
           }
-          if (result) current = result;
-        } catch (err) {
-          this._reportIssue(`efeito ${stage.label} em "${obj.name}" falhou, mantendo estágio anterior: ${err.message}`);
+        } else {
+          result = await Promise.resolve(this[stage.methodName](current, stage.config, w, h));
+        }
+        if (result) current = result;
+      } catch (err) {
+        this._reportIssue(`efeito ${stage.label} em "${obj.name}" falhou${stage.fallback ? ', usando o port manual' : ', mantendo estágio anterior'}: ${err.message}`);
+        if (stage.fallback) {
+          try {
+            const r = await Promise.resolve(this[stage.fallback.methodName](current, stage.fallback.config, w, h));
+            if (r) { current = r; stage = { ...stage, label: stage.fallback.label }; }
+          } catch (err2) {
+            this._reportIssue(`port manual ${stage.fallback.label} em "${obj.name}" também falhou: ${err2.message}`);
+          }
         }
       }
-    };
+      if (current === before) continue; // etapa não produziu nada — mantém o estado anterior
+      const stageAnimated = ANIMATED_LABELS.has(stage.label) || !!current.__weLive;
+      // Entrada viva: recopia a cada frame (ver __weRefreshInput em
+      // _setupSimplePass). Etapa animada redesenha sozinha no próprio loop;
+      // etapa estática precisa do __weRedraw.
+      if (inputWasLive && current.__weRefreshInput) {
+        const out = current;
+        const pump = { id: null };
+        this._foliageRafHolders.push(pump);
+        const tick = () => {
+          out.__weRefreshInput();
+          if (!stageAnimated && out.__weRedraw) out.__weRedraw();
+          pump.id = requestAnimationFrame(tick);
+        };
+        pump.id = requestAnimationFrame(tick);
+        currentIsLive = true;
+      } else {
+        currentIsLive = stageAnimated;
+      }
+    }
+    return { el: current, live: currentIsLive };
+  }
+
+  // Registra a saída final de uma camada pra quem a usa como
+  // _rt_imageLayerComposite_<id>_* (ver _getLayerComposite).
+  _publishLayerOutput(obj, out) {
+    if (!this._layerOutputs || obj.id == null) return;
+    // DEPURAÇÃO TEMPORÁRIA: com <cena>/.debug-dump presente, salva a saída de
+    // cada camada publicada em PNG (5s depois, pra animação já ter rodado).
+    const dumpDir = path.join(this.sceneDir, '.debug-dump');
+    if (out && out.el && fs.existsSync(dumpDir)) {
+      setTimeout(() => {
+        try {
+          const c = document.createElement('canvas');
+          c.width = out.el.naturalWidth || out.el.width; c.height = out.el.naturalHeight || out.el.height;
+          c.getContext('2d').drawImage(out.el, 0, 0);
+          const b64 = c.toDataURL('image/png').split(',')[1];
+          fs.writeFileSync(path.join(dumpDir, `layer_${obj.id}.png`), Buffer.from(b64, 'base64'));
+        } catch (err) { this._reportIssue(`dump ${obj.id} falhou: ${err.message}`); }
+      }, 5000);
+    }
+    const slot = this._layerSlot(obj.id);
+    slot.resolve(out);
+  }
+
+  _layerSlot(id) {
+    let slot = this._layerOutputs.get(id);
+    if (!slot) {
+      let resolve;
+      const promise = new Promise((r) => { resolve = r; });
+      slot = { promise, resolve };
+      this._layerOutputs.set(id, slot);
+    }
+    return slot;
+  }
+
+  // Espera a saída da camada <id>; null se ela não publicar em 15s (camada
+  // que falhou ou que não é imagem) — o chamador cai pra transparente.
+  _getLayerComposite(id) {
+    if (!this._layerOutputs) return Promise.resolve(null);
+    const slot = this._layerSlot(id);
+    return Promise.race([slot.promise, new Promise((r) => setTimeout(() => r(null), 15000))]);
+  }
+
+  // Resolve uma textura extra de efeito (g_TextureN) igual ao WE:
+  // - "_rt_imageLayerComposite_<id>_*": saída viva de outra camada
+  // - outro "_rt_*": sem equivalente no renderer DOM → transparente
+  // - id de textura da cena / padrão da instalação
+  // Devolve { source, w, h, res:[texW,texH,imgW,imgH], live } ou null. `res`
+  // é o g_TextureNResolution real: tamanho da textura alocada (com padding
+  // até potência de 2) e da imagem útil — o blend real usa zw/xy pra achar o
+  // UV, então sem isso a textura extra saía em escala errada.
+  async _resolveEffectTexture(texId, defaultId) {
+    if (typeof texId === 'string' && texId.startsWith('_rt_')) {
+      const m = /^_rt_imageLayerComposite_(\d+)_/.exec(texId);
+      const out = m ? await this._getLayerComposite(Number(m[1])) : null;
+      if (!out || !out.el) {
+        this._reportIssue(`render target "${texId}" sem fonte — transparente`);
+        return { source: null, w: 1, h: 1, res: [1, 1, 1, 1], live: false };
+      }
+      const el = out.el;
+      const ew = el.naturalWidth || el.videoWidth || el.width || 1, eh = el.naturalHeight || el.videoHeight || el.height || 1;
+      this._reportIssue(`render target "${texId}" -> ${el.tagName} ${ew}x${eh}${out.live ? ' (vivo)' : ''}`);
+      return { source: el, w: ew, h: eh, res: [ew, eh, ew, eh], live: !!out.live || el instanceof HTMLCanvasElement || el instanceof HTMLVideoElement };
+    }
+    let im = null;
+    if (texId) im = await this._loadSceneTexAsImage(texId);
+    else if (typeof defaultId === 'string') im = await this._loadStockTexAsImage(defaultId);
+    if (!im) return null;
+    const res = this._texResolution(texId || null, defaultId) || [im.naturalWidth, im.naturalHeight, im.naturalWidth, im.naturalHeight];
+    return { source: im, w: im.naturalWidth, h: im.naturalHeight, res, live: false, repeat: !this._texClamps(texId || null, defaultId) };
+  }
+
+  // Flag "clampuvs" (bit 2 do u32 de flags no cabeçalho TEXV, offset 22).
+  // Sem ela o WE REPETE a textura nas bordas — o ruído do lightshafts
+  // (util/noise) com CLAMP virava listras no 3376170815.
+  _texClamps(texId, defaultId) {
+    const p = texId
+      ? path.join(this.sceneDir, 'materials', texId + '.tex')
+      : (defaultId && getWEAssetsRoot() ? path.join(getWEAssetsRoot(), 'materials', defaultId + '.tex') : null);
+    if (!p) return true;
+    try {
+      const fd = fs.openSync(p, 'r');
+      const b = Buffer.alloc(26);
+      fs.readSync(fd, b, 0, 26, 0);
+      fs.closeSync(fd);
+      if (b.toString('latin1', 0, 4) !== 'TEXV') return true;
+      return (b.readUInt32LE(22) & 2) !== 0;
+    } catch { return true; }
+  }
+
+  // Tamanhos crus do cabeçalho TEXV de uma textura da cena: (texW, texH,
+  // imgW, imgH) — alocado vs. útil.
+  _texPaddedSize(texId) {
+    try {
+      const fd = fs.openSync(path.join(this.sceneDir, 'materials', texId + '.tex'), 'r');
+      const b = Buffer.alloc(42);
+      fs.readSync(fd, b, 0, 42, 0);
+      fs.closeSync(fd);
+      if (b.toString('latin1', 0, 4) !== 'TEXV') return null;
+      const r = [b.readUInt32LE(26), b.readUInt32LE(30), b.readUInt32LE(34), b.readUInt32LE(38)];
+      return r.every((v) => v > 0 && v < 65536) ? r : null;
+    } catch { return null; }
+  }
+
+  // (imgW, imgH, imgW, imgH) — g_TextureNResolution do PNG já recortado.
+  _texResolution(texId, defaultId) {
+    const candidates = texId
+      ? [path.join(this.sceneDir, 'materials', texId + '.tex')]
+      : (defaultId && getWEAssetsRoot() ? [path.join(getWEAssetsRoot(), 'materials', defaultId + '.tex')] : []);
+    for (const p of candidates) {
+      try {
+        const fd = fs.openSync(p, 'r');
+        const b = Buffer.alloc(42);
+        fs.readSync(fd, b, 0, 42, 0);
+        fs.closeSync(fd);
+        if (b.toString('latin1', 0, 4) !== 'TEXV') continue;
+        // O PNG decodificado já vem recortado na imagem útil (ver
+        // encodeTexRgba), então textura = imagem: (imgW, imgH, imgW, imgH).
+        const r = [b.readUInt32LE(34), b.readUInt32LE(38), b.readUInt32LE(34), b.readUInt32LE(38)];
+        if (r.every((v) => v > 0 && v < 65536)) return r;
+      } catch { /* sem cabeçalho legível */ }
+    }
+    return null;
+  }
+
+  // Camada de composição (models/util/composelayer.json): um quad do tamanho
+  // do objeto cujo conteúdo inicial é o que já está desenhado atrás dele
+  // (_rt_FullFrameBuffer, se "copybackground") e que passa pela cadeia de
+  // efeitos do próprio objeto. O renderer é DOM e não captura a tela, então
+  // a base começa transparente — exato quando copybackground é false (caso
+  // da Terra do 3521337568: tint BLENDMODE 0 deixa a base preta opaca e os
+  // blends pintam as camadas ocultas por cima).
+  _buildComposeLayer(obj, visibleEffects) {
+    const [w, h] = (obj.size || `${this.designWidth} ${this.designHeight}`).split(' ').map(Number);
+    const [ox, oy] = this._resolveOrigin(obj);
+    const scaleCss = this._transformCss(this._resolveTransform(obj));
+    const base = document.createElement('canvas');
+    base.width = Math.max(1, Math.round(w));
+    base.height = Math.max(1, Math.round(h));
+    base.style.cssText = `position:absolute; left:${ox - w / 2}px; top:${this._screenTop(oy, h)}px; width:${w}px; height:${h}px;${scaleCss}`;
+    this.stage.appendChild(base);
+    if (obj.copybackground !== false) {
+      this._reportIssue(`composelayer "${obj.name}": copybackground não reproduzível no renderer DOM — começa transparente`);
+    }
+    const stages = this._buildEffectStages(obj, visibleEffects);
+    this._runEffectChain(obj, base, stages, base.width, base.height)
+      .then((out) => this._publishLayerOutput(obj, out))
+      .catch((err) => this._reportIssue(`composelayer "${obj.name}" falhou: ${err.message}`));
     return true;
+  }
+
+  // Efeito custom com VÁRIOS passes (ver compileGenericEffectPasses em
+  // we-shader-compiler.js): executa o grafo do effect.json real — fbos com
+  // nome e escala, cada passe lendo "previous" (a entrada) e/ou fbos por
+  // índice de textura (bind) e escrevendo num fbo (target) ou na saída final.
+  //
+  // Orientação: UV com v=0 no TOPO (convenção do WE, igual _setupSimplePass).
+  // Num framebuffer a linha 0 fica EMBAIXO, então passes que escrevem em fbo
+  // usam um quad com Y invertido — senão cada salto entre fbos viraria a
+  // imagem de cabeça pra baixo.
+  async _applyGenericMultiPass(img, effect, w, h, objName, effectLabel) {
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    canvas.style.cssText = img.style.cssText;
+    const gl = canvas.getContext(effect.passes.some((p) => /^#version 300 es/.test(p.vertSrc)) ? 'webgl2' : 'webgl', WEBGL_CTX_OPTS);
+    if (!gl) throw new Error('WebGL indisponível nesta janela');
+    gl.__weTopDownUV = true;
+
+    const makeQuad = (data) => {
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
+      return buf;
+    };
+    const screenQuad = makeQuad([-1, 1, 0, 0, 1, 1, 1, 0, -1, -1, 0, 1, 1, -1, 1, 1]);
+    const fboQuad = makeQuad([-1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, 1, 1, 1, 1]);
+
+    const input = { tex: FoliageSwayEffect.uploadTextureWrapped(gl, img, false, w, h).tex, w, h };
+
+    const fbos = new Map();
+    for (const f of effect.fbos) {
+      const scale = Number(f.scale) > 0 ? Number(f.scale) : 1;
+      const fw = Math.max(1, Math.round(w / scale)), fh = Math.max(1, Math.round(h / scale));
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, fw, fh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      const fb = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      fbos.set(f.name, { tex, fb, w: fw, h: fh });
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+    const passes = [];
+    for (const p of effect.passes) {
+      const program = gl.createProgram();
+      gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, p.vertSrc));
+      gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, p.fragSrc));
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw new Error(`falha ao linkar passe "${p.shaderName}": ${gl.getProgramInfoLog(program)}`);
+      }
+      // Entradas por bind (previous / fbo nomeado), com localizações já resolvidas.
+      const binds = p.binds.map((b) => ({
+        unit: Number(b.index),
+        name: b.name,
+        samplerLoc: gl.getUniformLocation(program, `g_Texture${Number(b.index)}`),
+        resLoc: gl.getUniformLocation(program, `g_Texture${Number(b.index)}Resolution`),
+      }));
+      // Samplers que não são bind: textura da cena/material, ou o default
+      // anotado (ex: "util/white"), ou branco sólido.
+      const extra = [];
+      for (const def of p.uniformDefs) {
+        if (def.glslType !== 'sampler2D') continue;
+        const m = /^g_Texture(\d+)$/.exec(def.name);
+        if (!m) continue;
+        const unit = Number(m[1]);
+        if (binds.some((b) => b.unit === unit)) continue;
+        let resolved = null;
+        try {
+          resolved = await this._resolveEffectTexture(p.textures[unit], def.annotation.default);
+        } catch (err) {
+          this._reportIssue(`efeito custom "${effectLabel}" passe "${p.shaderName}": textura ${def.name} não carregou (${err.message}), usando branco`);
+        }
+        let tex;
+        if (resolved && resolved.source) tex = FoliageSwayEffect.uploadTexture(gl, resolved.source);
+        else if (resolved) tex = this._createTransparentTexture(gl);
+        else tex = this._createSolidWhiteTexture(gl);
+        if (resolved && resolved.repeat && typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext) {
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+        }
+        extra.push({
+          unit, tex,
+          loc: gl.getUniformLocation(program, def.name),
+          resLoc: gl.getUniformLocation(program, `g_Texture${unit}Resolution`),
+          res: resolved ? resolved.res : [1, 1, 1, 1],
+          liveSource: resolved && resolved.live ? resolved.source : null,
+        });
+      }
+      const uniforms = [];
+      for (const def of p.uniformDefs) {
+        if (def.glslType === 'sampler2D' || !def.annotation.material) continue;
+        const value = coerceUniformValue(p.constantShaderValues[def.annotation.material], def.glslType, def.annotation.default);
+        if (value == null) continue;
+        const loc = gl.getUniformLocation(program, def.name);
+        if (loc) uniforms.push({ type: def.glslType, loc, value });
+      }
+      passes.push({
+        ...p, program, binds, extra, uniforms,
+        posLoc: gl.getAttribLocation(program, 'a_Position'),
+        uvLoc: gl.getAttribLocation(program, 'a_TexCoord'),
+        timeLoc: gl.getUniformLocation(program, 'g_Time'),
+        mvpLoc: gl.getUniformLocation(program, 'g_ModelViewProjectionMatrix'),
+      });
+    }
+
+    const draw = (time) => {
+      for (const p of passes) {
+        const target = p.target ? fbos.get(p.target) : null;
+        if (p.target && !target) continue;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fb : null);
+        gl.viewport(0, 0, target ? target.w : w, target ? target.h : h);
+        gl.useProgram(p.program);
+        gl.bindBuffer(gl.ARRAY_BUFFER, target ? fboQuad : screenQuad);
+        if (p.posLoc >= 0) { gl.enableVertexAttribArray(p.posLoc); gl.vertexAttribPointer(p.posLoc, 2, gl.FLOAT, false, 16, 0); }
+        if (p.uvLoc >= 0) { gl.enableVertexAttribArray(p.uvLoc); gl.vertexAttribPointer(p.uvLoc, 2, gl.FLOAT, false, 16, 8); }
+        for (const b of p.binds) {
+          const src = b.name === 'previous' ? input : fbos.get(b.name);
+          if (!src || src === target) continue; // ler e escrever o mesmo fbo é proibido no WebGL
+          gl.activeTexture(gl.TEXTURE0 + b.unit);
+          gl.bindTexture(gl.TEXTURE_2D, src.tex);
+          if (b.samplerLoc) gl.uniform1i(b.samplerLoc, b.unit);
+          // Convenção do WE: g_TextureNResolution = (largura, altura, largura, altura)
+          if (b.resLoc) gl.uniform4f(b.resLoc, src.w, src.h, src.w, src.h);
+        }
+        for (const e of p.extra) {
+          gl.activeTexture(gl.TEXTURE0 + e.unit);
+          gl.bindTexture(gl.TEXTURE_2D, e.tex);
+          if (e.liveSource) {
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, !gl.__weTopDownUV);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, e.liveSource);
+          }
+          if (e.loc) gl.uniform1i(e.loc, e.unit);
+          if (e.resLoc) gl.uniform4f(e.resLoc, e.res[0], e.res[1], e.res[2], e.res[3]);
+        }
+        for (const u of p.uniforms) {
+          if (u.type === 'float') gl.uniform1f(u.loc, u.value);
+          else if (u.type === 'int' || u.type === 'bool') gl.uniform1i(u.loc, u.value);
+          else if (u.type === 'vec2') gl.uniform2fv(u.loc, u.value);
+          else if (u.type === 'vec3') gl.uniform3fv(u.loc, u.value);
+          else if (u.type === 'vec4') gl.uniform4fv(u.loc, u.value);
+        }
+        if (p.timeLoc) gl.uniform1f(p.timeLoc, time);
+        if (p.mvpLoc) gl.uniformMatrix4fv(p.mvpLoc, false, IDENTITY);
+        gl.disable(gl.BLEND);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
+    };
+
+    if (img.parentNode) img.parentNode.replaceChild(canvas, img);
+    const startTime = performance.now();
+    const now = () => (performance.now() - startTime) / 1000;
+    // Entrada viva (etapa anterior animada): o executor da cadeia recopia e
+    // redesenha a cada frame — mesmo contrato do _setupSimplePass.
+    if ((typeof HTMLCanvasElement !== 'undefined' && img instanceof HTMLCanvasElement) || (typeof HTMLVideoElement !== 'undefined' && img instanceof HTMLVideoElement)) {
+      canvas.__weRefreshInput = () => {
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, input.tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+      };
+      canvas.__weRedraw = () => draw(now());
+    }
+    // Só fica em loop se algum passe usar g_Time; senão desenha uma vez
+    // (bloom estático de 16 passes em 4K custaria caro à toa todo frame).
+    if (passes.some((p) => p.timeLoc || p.extra.some((e) => e.liveSource))) {
+      canvas.__weLive = true;
+      const rafHolder = { id: null };
+      this._foliageRafHolders.push(rafHolder);
+      const loop = () => { draw(now()); rafHolder.id = requestAnimationFrame(loop); };
+      loop();
+    } else {
+      draw(0);
+    }
+    this._reportIssue(`efeito custom "${effectLabel}" em "${objName}": ${passes.length} passes, ${fbos.size} framebuffers (compilador genérico multi-passe)`);
+    return canvas;
   }
 
   // Aplica um efeito custom compilado genericamente (ver
@@ -6868,7 +8253,8 @@ class WeScene {
   // o bind de uniforms/texturas extras, que aqui é genérico em vez de
   // hardcoded por efeito.
   async _applyGenericShaderEffect(img, config, w, h) {
-    const { canvas, gl, program } = this._setupSimplePass(img, config.vertSrc, config.fragSrc, w, h, false);
+    const { canvas, gl, program } = this._setupSimplePass(img, config.vertSrc, config.fragSrc, w, h, false, /^#version 300 es/.test(config.vertSrc));
+    const liveTextures = []; // texturas que são saídas vivas de outras camadas
 
     // Texturas extras (g_Texture1, g_Texture2...) — o índice vem do próprio
     // nome do uniform (convenção real da WE), não da ordem de declaração,
@@ -6880,17 +8266,31 @@ class WeScene {
       const texUnit = Number(m[1]);
       if (texUnit === 0) continue; // g_Texture0 já é a própria imagem do objeto, feito em _setupSimplePass
       const texId = config.textures[texUnit];
-      let texImg = null;
+      let resolved = null;
       try {
-        if (texId) texImg = await this._loadSceneTexAsImage(texId);
-        else if (typeof def.annotation.default === 'string') texImg = await this._loadStockTexAsImage(def.annotation.default);
+        resolved = await this._resolveEffectTexture(texId, def.annotation.default);
       } catch (err) {
         this._reportIssue(`efeito custom "${config.shaderName}": textura "${def.name}" não carregou (${err.message}), usando branco sólido`);
       }
+      gl.useProgram(program);
       gl.activeTexture(gl.TEXTURE0 + texUnit);
-      gl.bindTexture(gl.TEXTURE_2D, texImg ? FoliageSwayEffect.uploadTexture(gl, texImg) : this._createSolidWhiteTexture(gl));
+      let tex;
+      if (resolved && resolved.source) tex = FoliageSwayEffect.uploadTexture(gl, resolved.source);
+      else if (resolved) tex = this._createTransparentTexture(gl);
+      else tex = this._createSolidWhiteTexture(gl);
+      if (resolved && resolved.repeat && typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext) {
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      }
+      gl.activeTexture(gl.TEXTURE0 + texUnit);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
       const loc = gl.getUniformLocation(program, def.name);
       if (loc) gl.uniform1i(loc, texUnit);
+      const resLocN = gl.getUniformLocation(program, `g_Texture${texUnit}Resolution`);
+      const res = resolved ? resolved.res : [1, 1, 1, 1];
+      if (resLocN) gl.uniform4f(resLocN, res[0], res[1], res[2], res[3]);
+      if (resolved && resolved.live && resolved.source) liveTextures.push({ unit: texUnit, tex, source: resolved.source });
     }
 
     // Parâmetros numéricos/vetoriais reais (constantshadervalues do
@@ -6909,8 +8309,16 @@ class WeScene {
       else if (def.glslType === 'vec4') gl.uniform4fv(loc, value);
     }
 
+    // Convenção do WE: g_TextureNResolution = (largura, altura, largura,
+    // altura). Antes ia (1/w, 1/h, w, h) — shaders reais fazem
+    // `1.0 / g_Texture0Resolution.xy` pra achar o tamanho de 1 pixel, e com
+    // o valor invertido isso virava milhares de pixels (achado 2026-10-13).
     const resLoc = gl.getUniformLocation(program, 'g_Texture0Resolution');
-    if (resLoc) gl.uniform4f(resLoc, 1 / w, 1 / h, w, h);
+    if (resLoc) gl.uniform4f(resLoc, w, h, w, h);
+    // Nosso quad já está em clip space; shaders reais multiplicam por
+    // g_ModelViewProjectionMatrix — sem isso a matriz fica zerada e nada aparece.
+    const mvpLoc = gl.getUniformLocation(program, 'g_ModelViewProjectionMatrix');
+    if (mvpLoc) gl.uniformMatrix4fv(mvpLoc, false, new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]));
 
     if (img.parentNode) img.parentNode.replaceChild(canvas, img);
     const timeLoc = gl.getUniformLocation(program, 'g_Time');
@@ -6918,6 +8326,14 @@ class WeScene {
     this._foliageRafHolders.push(rafHolder);
     const startTime = performance.now();
     const loop = () => {
+      gl.useProgram(program);
+      for (const lt of liveTextures) {
+        gl.activeTexture(gl.TEXTURE0 + lt.unit);
+        gl.bindTexture(gl.TEXTURE_2D, lt.tex);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, !gl.__weTopDownUV);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, lt.source);
+      }
+      gl.activeTexture(gl.TEXTURE0);
       if (timeLoc) gl.uniform1f(timeLoc, (performance.now() - startTime) / 1000);
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
@@ -6925,6 +8341,7 @@ class WeScene {
       rafHolder.id = requestAnimationFrame(loop);
     };
     loop();
+    canvas.__weLive = true; // redesenha todo frame
     this._reportIssue(`efeito custom "${config.shaderName}" compilado e aplicado em "${config.objName}" (compilador genérico)`);
     return canvas;
   }
@@ -6939,8 +8356,9 @@ class WeScene {
     canvas.height = h;
     canvas.style.cssText = img.style.cssText;
 
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) throw new Error('WebGL indisponível nesta janela');
+    gl.__weTopDownUV = true; // v=0 no topo, igual ao WE (bancada de orientação, 2026-10-13)
 
     const vs = compileShader(gl, gl.VERTEX_SHADER, CHROMATIC_ABERRATION_VERT);
     const fs_ = compileShader(gl, gl.FRAGMENT_SHADER, buildChromaticAberrationFragSource(config));
@@ -6994,8 +8412,9 @@ class WeScene {
     canvas.width = w;
     canvas.height = h;
     canvas.style.cssText = img.style.cssText;
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) throw new Error('WebGL indisponível nesta janela');
+    gl.__weTopDownUV = true; // v=0 no topo, igual ao WE (bancada de orientação, 2026-10-13)
 
     const weAssets = getWEAssetsRoot();
     if (!weAssets) throw new Error('instalação da Wallpaper Engine não encontrada (necessária pro ruído padrão)');
@@ -7080,7 +8499,7 @@ class WeScene {
     canvas.width = w;
     canvas.height = h;
     canvas.style.cssText = img.style.cssText;
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) throw new Error('WebGL indisponível nesta janela');
 
     const accProgram = gl.createProgram();
@@ -7185,8 +8604,9 @@ class WeScene {
     canvas.width = w;
     canvas.height = h;
     canvas.style.cssText = img.style.cssText;
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) throw new Error('WebGL indisponível nesta janela');
+    gl.__weTopDownUV = true; // v=0 no topo, igual ao WE — sem isso saía de cabeça pra baixo (bancada de orientação, 2026-10-13)
 
     const weAssets = getWEAssetsRoot();
     if (!weAssets) throw new Error('instalação da Wallpaper Engine não encontrada (necessária pro ruído padrão)');
@@ -7265,7 +8685,7 @@ class WeScene {
     canvas.width = w;
     canvas.height = h;
     canvas.style.cssText = img.style.cssText;
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) throw new Error('WebGL indisponível nesta janela');
 
     const vs = compileShader(gl, gl.VERTEX_SHADER, EDGEDETECTION_VERT);
@@ -7316,13 +8736,24 @@ class WeScene {
   // Helper compartilhado pelos efeitos simples de passe único abaixo — monta
   // programa+quad+textura da própria imagem e devolve tudo pronto pra só
   // setar os uniforms específicos e desenhar.
-  _setupSimplePass(img, vertSrc, fragSrc, w, h, wantRepeat) {
+  _setupSimplePass(img, vertSrc, fragSrc, w, h, wantRepeat, webgl2 = false) {
     const canvas = document.createElement('canvas');
     canvas.width = w;
     canvas.height = h;
     canvas.style.cssText = img.style.cssText;
-    const gl = canvas.getContext('webgl');
+    // Shaders reais do WE (compilador genérico) vêm em GLSL ES 3.00 → WebGL2.
+    const gl = canvas.getContext(webgl2 ? 'webgl2' : 'webgl', WEBGL_CTX_OPTS);
     if (!gl) throw new Error('WebGL indisponível nesta janela');
+
+    // UV com v=0 no TOPO, igual ao WE (o quad abaixo põe v=0 no alto da
+    // tela). Antes as texturas subiam com UNPACK_FLIP_Y, que põe a linha de
+    // BAIXO da imagem em v=0 — todo efeito montado aqui (~40 dos 45)
+    // desenhava a imagem de cabeça pra baixo. Achado 2026-10-13 comparando
+    // com o WE original (waterripple da cena 2998757800 mostrava o piso no
+    // topo). Máscaras/normais deste contexto sobem igual, então continuam
+    // alinhadas com a imagem. foliagesway e puppets usam outros contextos e
+    // seguem com o flip de antes.
+    gl.__weTopDownUV = true;
 
     const program = gl.createProgram();
     gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, vertSrc));
@@ -7350,6 +8781,29 @@ class WeScene {
     gl.uniform1i(gl.getUniformLocation(program, 'g_Texture0'), 0);
 
     gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+
+    // Entrada vinda de OUTRO efeito (canvas da etapa anterior da cadeia, ver
+    // _buildImageObject): a cópia feita acima é um retrato de um instante só
+    // — e se a etapa anterior é animada, esse retrato pode até sair VAZIO
+    // (canvas WebGL sem preserveDrawingBuffer é limpo depois de exibido; o
+    // upload aqui roda depois de um await). Achado ao vivo 2026-10-13: fundo
+    // foliagesway→waterripple da cena 2998757800 ficava preto. Expõe ganchos
+    // pro executor da cadeia recopiar a entrada a cada frame (no mesmo tick,
+    // logo depois da etapa anterior desenhar) e, pra efeito estático de passe
+    // único, redesenhar.
+    if ((typeof HTMLCanvasElement !== 'undefined' && img instanceof HTMLCanvasElement) || (typeof HTMLVideoElement !== 'undefined' && img instanceof HTMLVideoElement)) {
+      canvas.__weRefreshInput = () => {
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+      };
+      canvas.__weRedraw = () => {
+        gl.useProgram(program);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      };
+    }
     return { canvas, gl, program, usedRepeat };
   }
 
@@ -7390,6 +8844,18 @@ class WeScene {
   // decodificador de .tex não entende o formato real desse arquivo
   // específico (ver comentário grande do blendgradient). Funcionalmente
   // idêntica em cor (branco sólido), só não carrega do disco.
+  // 1x1 transparente — render target que o renderer DOM não tem (_rt_*).
+  _createTransparentTexture(gl) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    return tex;
+  }
+
   _createSolidWhiteTexture(gl) {
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -7422,8 +8888,7 @@ class WeScene {
       let lastTime = performance.now();
       const loop = () => {
         const now = performance.now();
-        ENGINE_CLOCK.frametime = Math.min(0.1, (now - lastTime) / 1000);
-        ENGINE_CLOCK.runtime += ENGINE_CLOCK.frametime;
+        advanceEngineClock();
         lastTime = now;
         alphaLive.tick();
         draw();
@@ -7721,8 +9186,7 @@ class WeScene {
       let lastTime = performance.now();
       const loop = () => {
         const now = performance.now();
-        ENGINE_CLOCK.frametime = Math.min(0.1, (now - lastTime) / 1000);
-        ENGINE_CLOCK.runtime += ENGINE_CLOCK.frametime;
+        advanceEngineClock();
         lastTime = now;
         alphaLive.tick();
         colorLive.tick();
@@ -7818,7 +9282,7 @@ class WeScene {
     canvas.width = w;
     canvas.height = h;
     canvas.style.cssText = img.style.cssText;
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) throw new Error('WebGL indisponível nesta janela');
 
     const verts = new Float32Array([-1, 1, 0, 0, 1, 1, 1, 0, -1, -1, 0, 1, 1, -1, 1, 1]);
@@ -7914,7 +9378,7 @@ class WeScene {
     canvas.width = w;
     canvas.height = h;
     canvas.style.cssText = img.style.cssText;
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) throw new Error('WebGL indisponível nesta janela');
 
     const verts = new Float32Array([-1, 1, 0, 0, 1, 1, 1, 0, -1, -1, 0, 1, 1, -1, 1, 1]);
@@ -8165,8 +9629,9 @@ class WeScene {
     canvas.width = w;
     canvas.height = h;
     canvas.style.cssText = img.style.cssText;
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) throw new Error('WebGL indisponível nesta janela');
+    gl.__weTopDownUV = true; // v=0 no topo, igual ao WE — sem isso saía de cabeça pra baixo (bancada de orientação, 2026-10-13)
 
     const verts = new Float32Array([-1, 1, 0, 0, 1, 1, 1, 0, -1, -1, 0, 1, 1, -1, 1, 1]);
     const vbo = gl.createBuffer();
@@ -8259,7 +9724,7 @@ class WeScene {
     canvas.width = w;
     canvas.height = h;
     canvas.style.cssText = img.style.cssText;
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) throw new Error('WebGL indisponível nesta janela');
 
     const verts = new Float32Array([-1, 1, 0, 0, 1, 1, 1, 0, -1, -1, 0, 1, 1, -1, 1, 1]);
@@ -8347,7 +9812,7 @@ class WeScene {
     canvas.width = w;
     canvas.height = h;
     canvas.style.cssText = img.style.cssText;
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) throw new Error('WebGL indisponível nesta janela');
 
     const verts = new Float32Array([-1, 1, 0, 0, 1, 1, 1, 0, -1, -1, 0, 1, 1, -1, 1, 1]);
@@ -8418,8 +9883,9 @@ class WeScene {
     canvas.width = w;
     canvas.height = h;
     canvas.style.cssText = img.style.cssText;
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) throw new Error('WebGL indisponível nesta janela');
+    gl.__weTopDownUV = true; // v=0 no topo, igual ao WE — sem isso saía de cabeça pra baixo (bancada de orientação, 2026-10-13)
 
     const verts = new Float32Array([-1, 1, 0, 0, 1, 1, 1, 0, -1, -1, 0, 1, 1, -1, 1, 1]);
     const vbo = gl.createBuffer();
@@ -8629,11 +10095,27 @@ class WeScene {
 
   async _applyWaterRipple(img, config, w, h) {
     const normalImg = await this._loadSceneTexAsImage(config.normalTexId);
-    const { canvas, gl, program } = this._setupSimplePass(img, WATERRIPPLE_VERT, buildWaterRippleFragSource({ specular: config.specular }), w, h, false);
-    const normalTex = FoliageSwayEffect.uploadTexture(gl, normalImg);
+    let maskImg = null;
+    if (config.maskTexId) {
+      try { maskImg = await this._loadSceneTexAsImage(config.maskTexId); }
+      catch (err) { this._reportIssue(`waterripple: máscara "${config.maskTexId}" não carregou (${err.message}) — ondulando a imagem inteira`); }
+    }
+    const { canvas, gl, program } = this._setupSimplePass(img, WATERRIPPLE_VERT, buildWaterRippleFragSource({ specular: config.specular, mask: !!maskImg }), w, h, false);
+    // As coordenadas do ripple crescem com o tempo (g_Time × velocidade) e
+    // passam de 1 — o WE REPETE a normal (o tex-json real não pede
+    // clampuv). Com CLAMP_TO_EDGE, depois de alguns segundos a normal virava
+    // uma cor fixa da borda = a imagem inteira ficava deslocada parada.
+    // A normal real é 256×256 (potência de 2), então REPEAT vale no WebGL1.
+    const { tex: normalTex } = FoliageSwayEffect.uploadTextureWrapped(gl, normalImg, true, normalImg.naturalWidth, normalImg.naturalHeight);
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, normalTex);
     gl.uniform1i(gl.getUniformLocation(program, 'g_Texture2'), 2);
+    if (maskImg) {
+      const maskTex = FoliageSwayEffect.uploadTexture(gl, maskImg);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, maskTex);
+      gl.uniform1i(gl.getUniformLocation(program, 'g_Texture1'), 1);
+    }
     gl.uniform4f(gl.getUniformLocation(program, 'g_Texture0Resolution'), 1 / w, 1 / h, w, h);
     gl.uniform1f(gl.getUniformLocation(program, 'g_AnimationSpeed'), config.animationSpeed);
     gl.uniform1f(gl.getUniformLocation(program, 'g_Scale'), config.scale);
@@ -8870,7 +10352,7 @@ class WeScene {
     canvas.width = w;
     canvas.height = h;
     canvas.style.cssText = img.style.cssText;
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) throw new Error('WebGL indisponível nesta janela');
 
     const verts = new Float32Array([-1, 1, 0, 0, 1, 1, 1, 0, -1, -1, 0, 1, 1, -1, 1, 1]);
@@ -8990,7 +10472,7 @@ class WeScene {
     canvas.width = w;
     canvas.height = h;
     canvas.style.cssText = img.style.cssText;
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) throw new Error('WebGL indisponível nesta janela');
 
     // Diferente do cursorripple (rgba8888/8-bit), esse solver PRECISA de
@@ -9295,24 +10777,34 @@ class WeScene {
     const [w, h]   = (obj.size   || `${this.designWidth} ${this.designHeight}`).split(' ').map(Number);
     const [ox, oy] = this._resolveOrigin(obj);
 
+    // Criado já aqui (mesmo antes da textura carregar) pra manter a ordem
+    // de empilhamento das camadas; tamanho/posição reais vêm no onload,
+    // porque dependem da caixa da animação inteira (ver _drawPuppetMesh).
     const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    canvas.style.cssText = `position:absolute; left:${ox - w / 2}px; top:${this._screenTop(oy, h)}px; width:${w}px; height:${h}px;`;
+    canvas.style.cssText = 'position:absolute;';
     this.stage.appendChild(canvas);
 
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) {
       this._reportIssue(`puppet "${obj.name}": WebGL indisponível nesta janela, camada não desenhada`);
       return false;
     }
 
+    const anim = this._pickPuppetAnimation(obj, mesh);
+    const puppetXf = this._resolveTransform(obj);
+    const puppetScaleX = puppetXf.sx, puppetScaleY = puppetXf.sy;
+
     const img = new Image();
     img.onload = () => {
       try {
-        const { usedRealUV } = this._drawPuppetMesh(gl, img, mesh, w, h);
-        const boneInfo = mesh.skeleton ? `, esqueleto com ${mesh.skeleton.bones.length} ossos decodificado (ainda sem animação — MDLA0003 não decodificado)` : ', sem esqueleto reconhecido';
-        this._reportIssue(`puppet "${obj.name}" (${model.puppet}) desenhado na pose de bind (${usedRealUV ? 'UV real do atlas' : 'UV aproximado por posição'})${boneInfo} — ${mesh.vertices.length} vértices, ${Math.round(mesh.indices.length / 3)} triângulos`);
+        // UV real do .mdl vai de 0 a 1 na imagem ÚTIL (não na textura
+        // alocada com preenchimento — Miku: u máx 0.9987 com a imagem
+        // ocupando 2971 de 4096), que é exatamente o PNG recortado.
+        const { usedRealUV, animated, skippedReason } = this._drawPuppetMesh(gl, canvas, img, mesh, anim, { w, h, ox, oy, sx: puppetScaleX, sy: puppetScaleY });
+        const boneInfo = !mesh.skeleton ? ', sem esqueleto reconhecido'
+          : animated ? `, animado: "${anim.anim.name}" (id ${anim.anim.id}, ${anim.anim.fps}fps × rate ${anim.rate}, ${anim.anim.numFrames} quadros, ${mesh.skeleton.bones.length} ossos)`
+          : `, esqueleto com ${mesh.skeleton.bones.length} ossos, parado na pose de bind (${skippedReason})`;
+        this._reportIssue(`puppet "${obj.name}" (${model.puppet}) desenhado (${usedRealUV ? 'UV real do atlas' : 'UV aproximado por posição'})${boneInfo} — ${mesh.vertices.length} vértices, ${Math.round(mesh.indices.length / 3)} triângulos`);
       } catch (err) {
         this._reportIssue(`puppet "${obj.name}": falha ao desenhar malha: ${err.message}`);
       }
@@ -9322,8 +10814,32 @@ class WeScene {
     return true;
   }
 
-  _drawPuppetMesh(gl, img, mesh, boxW, boxH) {
-    const vs = compileShader(gl, gl.VERTEX_SHADER, PUPPET_VERT);
+  // Escolhe a animação que a cena pede: scene.json traz, por objeto,
+  // animationlayers[] = {animation: <id>, rate, visible, blend, additive};
+  // o id é o mesmo u64 gravado em cada animação do bloco MDLA (ex: Miku =
+  // 143). Só a primeira camada visível é tocada — mistura de várias camadas
+  // (blend/additive) ainda não é suportada. Sem camada declarada, toca a
+  // primeira animação do arquivo, que é o que o editor do WE faz por padrão.
+  _pickPuppetAnimation(obj, mesh) {
+    const anims = mesh.animations || [];
+    if (!mesh.skeleton || anims.length === 0) return null;
+    const layers = Array.isArray(obj.animationlayers) ? obj.animationlayers : [];
+    const layer = layers.find((l) => l && l.visible !== false);
+    if (layers.length > 0 && !layer) return null; // todas as camadas desligadas na cena
+    const anim = (layer && anims.find((a) => a.id === Number(layer.animation))) || anims[0];
+    const rate = layer && Number(layer.rate) > 0 ? Number(layer.rate) : 1;
+    return { anim, rate };
+  }
+
+  _drawPuppetMesh(gl, canvas, img, mesh, picked, box) {
+    const bones = mesh.skeleton ? mesh.skeleton.bones : [];
+    const MAX_GPU_BONES = Math.floor((gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS) - 4) / 2);
+    let skippedReason = !mesh.skeleton ? 'sem esqueleto' : !picked ? 'sem animação no arquivo' : null;
+    if (!skippedReason && bones.length > MAX_GPU_BONES) skippedReason = `${bones.length} ossos > limite de ${MAX_GPU_BONES} da GPU`;
+    const animated = !skippedReason;
+    const boneSlots = animated ? Math.max(1, bones.length) : 1;
+
+    const vs = compileShader(gl, gl.VERTEX_SHADER, buildPuppetVertSource(boneSlots));
     const fsShader = compileShader(gl, gl.FRAGMENT_SHADER, PUPPET_FRAG);
     const program = gl.createProgram();
     gl.attachShader(program, vs);
@@ -9334,90 +10850,112 @@ class WeScene {
     }
     gl.useProgram(program);
 
-    // texPixelW/H: a textura decodificada é o próprio espaço em que os
-    // vértices já estão (ver decodePuppetMdl) — usa as dimensões reais da
-    // imagem carregada, não a caixa de destino (obj.size), pra derivar UV.
-    const texPixelW = img.naturalWidth  || boxW;
-    const texPixelH = img.naturalHeight || boxH;
+    // A textura decodificada é o próprio espaço dos vértices (pixels, origem
+    // no CENTRO, y pra cima — confirmado em 2026-07-17 contra a textura
+    // real). O objeto da cena estica esse espaço pra caixa obj.size.
+    const texPixelW = img.naturalWidth  || box.w;
+    const texPixelH = img.naturalHeight || box.h;
+    // box.sx/sy = scale do objeto no scene.json (ver _buildImageObject).
+    const scaleX = (box.w / texPixelW) * box.sx, scaleY = (box.h / texPixelH) * box.sy;
 
-    // Confirmado visualmente (decodificamos a textura real e comparamos
-    // contra o bbox dos vértices): a origem NÃO é o canto superior esquerdo
-    // da textura, é o CENTRO — x/y variam pra ambos os lados de 0 (ex: a
-    // malha do corpo inteiro vai de x∈[-719,724] y∈[-1038,1035] numa
-    // textura de 1415×2047, quase perfeitamente simétrica). y positivo é
-    // "pra cima" (cabeça), y negativo é "pra baixo" (pés) — por isso a
-    // malha aparecia cortada/pendurada do topo: a primeira versão assumia
-    // x/y∈[0,tex] e jogava metade dos vértices pra fora da tela.
-    //
-    // A POSIÇÃO em si já está correta na pose de bind — confirmado ao vivo
-    // 2026-07-20 comparando o bbox de cada osso dominante (ossos pequenos
-    // tipo dedo formam clusters pequenos e localizados, ossos grandes tipo
-    // corpo/cabelo formam clusters grandes, exatamente como um personagem
-    // já montado deveria parecer) e testando aplicar a matriz de mundo do
-    // esqueleto por cima: a caixa delimitadora final ficava ~2x maior que
-    // o esperado — sinal claro de estar transformando duas vezes algo que
-    // já estava no espaço certo. Isso bate com a matemática padrão de
-    // skinning (`atual × inversa_da_bind`, que se reduz à identidade
-    // exatamente na pose de bind) — não precisa aplicar NENHUMA
-    // transformação de osso pra desenhar a pose de bind corretamente.
-    //
-    // O bug real que fazia o personagem aparecer espalhado era outro: o
-    // campo u/v REAL de cada vértice (decodePuppetMdl já extrai, mas até
-    // agora nunca era usado aqui) era descartado em favor de um UV
-    // fabricado a partir da própria posição x/y — um workaround válido só
-    // pra puppets com textura PRÓPRIA pequena por parte (confirmado real:
-    // 眉毛/眼睛/睫毛_puppet.mdl têm UV real concentrado numa fatia pequena
-    // tipo u∈[0.61,0.72], porque endereça um atlas compartilhado maior que
-    // esses arquivos não têm acesso — nesse caso o UV fabricado por
-    // posição continua sendo a escolha certa, mantida abaixo). Mas pra
-    // puppets com um atlas ÚNICO e grande como material (confirmado real:
-    // "miku bod testinhg" e "lituoliao_5_rw", ambos com UV real cobrindo
-    // quase [0,1] inteiro), o UV real É o mapeamento certo pro atlas que
-    // JÁ TEMOS como material — descartá-lo fazia cada triângulo amostrar o
-    // pedaço errado da textura, essa sim a causa real do "pedaços
-    // espalhados" (não geometria errada, mapeamento de textura errado).
-    // Critério pra escolher: se o UV real cobre a faixa quase inteira
-    // (span > 0.5 nos dois eixos), é o atlas que já temos — usa direto.
+    // UV: o campo u/v real de cada vértice é o mapeamento certo quando a
+    // textura do material É o atlas inteiro (UV cobrindo quase [0,1] —
+    // ex: "miku bod testinhg", "lituoliao_5_rw"); puppets com textura
+    // pequena própria por parte (眉毛/眼睛/睫毛: UV real numa fatia tipo
+    // u∈[0.61,0.72], endereçando um atlas maior que não temos) continuam
+    // com o UV derivado da posição. Critério: span > 0.5 nos dois eixos.
     let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
     for (const v of mesh.vertices) {
       if (v.u < uMin) uMin = v.u; if (v.u > uMax) uMax = v.u;
       if (v.v < vMin) vMin = v.v; if (v.v > vMax) vMax = v.v;
     }
-    const useRealUV = (uMax - uMin) > 0.5 && (vMax - vMin) > 0.5;
+    const usedRealUV = (uMax - uMin) > 0.5 && (vMax - vMin) > 0.5;
 
     const n = mesh.vertices.length;
     const positions = new Float32Array(n * 2);
     const uvs = new Float32Array(n * 2);
+    const boneIdx = new Float32Array(n * 4);
+    const boneW = new Float32Array(n * 4);
     for (let i = 0; i < n; i++) {
       const v = mesh.vertices[i];
-      positions[i * 2]     = v.x / (texPixelW / 2);
-      positions[i * 2 + 1] = v.y / (texPixelH / 2);
-      if (useRealUV) {
+      positions[i * 2] = v.x;
+      positions[i * 2 + 1] = v.y;
+      if (usedRealUV) {
+        // v do arquivo conta de CIMA pra baixo (v=0 = primeira linha da
+        // imagem — confirmado no render offline da Miku, 2026-10-13), mas
+        // uploadTexture sobe com UNPACK_FLIP_Y_WEBGL, que põe a primeira
+        // linha em t=1. Sem o 1-v cada triângulo amostrava a região
+        // espelhada da textura (visto ao vivo: pedaços trocados/escuros).
         uvs[i * 2] = v.u;
-        uvs[i * 2 + 1] = v.v;
+        uvs[i * 2 + 1] = 1 - v.v;
       } else {
-        // +0.5 recentraliza pro padrão UV [0,1]; sem inverter o eixo Y aqui
-        // porque o upload da textura (uploadTexture, UNPACK_FLIP_Y_WEBGL) já
-        // faz esse flip por conta própria — os dois juntos que dão a
-        // orientação certa.
+        // +0.5 recentraliza pro padrão UV [0,1]; sem inverter Y aqui porque
+        // uploadTexture (UNPACK_FLIP_Y_WEBGL) já faz esse flip.
         uvs[i * 2]     = 0.5 + v.x / texPixelW;
         uvs[i * 2 + 1] = 0.5 + v.y / texPixelH;
       }
+      if (animated) {
+        for (let j = 0; j < 4; j++) { boneIdx[i * 4 + j] = v.boneIndices[j]; boneW[i * 4 + j] = v.boneWeights[j]; }
+      } else {
+        boneW[i * 4] = 1; // osso 0 com matriz identidade = pose de bind
+      }
     }
 
-    const posBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
-    const posLoc = gl.getAttribLocation(program, 'a_Position');
-    gl.enableVertexAttribArray(posLoc);
-    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+    // Na pose de bind as partes ficam onde estão no arquivo. Com animação,
+    // é o skinning que MONTA o personagem — em puppets tipo "folha de
+    // recortes" (a Miku) a pose de bind é literalmente as peças espalhadas,
+    // e a caixa final pode ser bem maior que obj.size (as marias-chiquinhas
+    // dela passam de 3200px). Por isso o canvas é dimensionado pela caixa
+    // de TODOS os quadros, calculada uma vez aqui na CPU.
+    const invBind = animated ? puppetInverseBind(bones) : null;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    const growBox = (mats) => {
+      for (const v of mesh.vertices) {
+        let x = v.x, y = v.y;
+        if (mats) {
+          x = 0; y = 0;
+          for (let j = 0; j < 4; j++) {
+            const wgt = v.boneWeights[j]; if (!wgt) continue;
+            const M = mats[v.boneIndices[j]];
+            x += wgt * (M[0] * v.x + M[2] * v.y + M[4]);
+            y += wgt * (M[1] * v.x + M[3] * v.y + M[5]);
+          }
+        }
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+    };
+    if (animated) {
+      for (let f = 0; f <= picked.anim.numFrames; f++) growBox(puppetSkinMatrices(bones, invBind, picked.anim, f));
+    } else {
+      growBox(null);
+    }
+    const PAD = 4;
+    x0 -= PAD; y0 -= PAD; x1 += PAD; y1 += PAD;
 
-    const uvBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, uvBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, uvs, gl.STATIC_DRAW);
-    const uvLoc = gl.getAttribLocation(program, 'a_TexCoord');
-    gl.enableVertexAttribArray(uvLoc);
-    gl.vertexAttribPointer(uvLoc, 2, gl.FLOAT, false, 0, 0);
+    const cssW = (x1 - x0) * scaleX, cssH = (y1 - y0) * scaleY;
+    // Resolução do canvas = tamanho na tela, limitado pra não alocar um
+    // framebuffer gigante (a caixa animada pode passar de 3000px).
+    const MAX_DIM = 4096;
+    const res = Math.min(1, MAX_DIM / Math.max(cssW, cssH));
+    canvas.width = Math.max(1, Math.round(cssW * res));
+    canvas.height = Math.max(1, Math.round(cssH * res));
+    const left = box.ox + x0 * scaleX;
+    const top = this.designHeight - (box.oy + y1 * scaleY); // y do WE cresce pra cima
+    canvas.style.cssText = `position:absolute; left:${left}px; top:${top}px; width:${cssW}px; height:${cssH}px;`;
+
+    const bindAttr = (name, data, size) => {
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+      const loc = gl.getAttribLocation(program, name);
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+    };
+    bindAttr('a_Position', positions, 2);
+    bindAttr('a_TexCoord', uvs, 2);
+    bindAttr('a_BoneIndices', boneIdx, 4);
+    bindAttr('a_BoneWeights', boneW, 4);
 
     const idxBuf = gl.createBuffer();
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
@@ -9427,14 +10965,53 @@ class WeScene {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.uniform1i(gl.getUniformLocation(program, 'g_Texture0'), 0);
+    gl.uniform4f(gl.getUniformLocation(program, 'u_BBox'), (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2, (y1 - y0) / 2);
+
+    const locX = gl.getUniformLocation(program, 'u_BoneX[0]');
+    const locY = gl.getUniformLocation(program, 'u_BoneY[0]');
+    const rowsX = new Float32Array(boneSlots * 3), rowsY = new Float32Array(boneSlots * 3);
+    const uploadBones = (mats) => {
+      for (let b = 0; b < mats.length; b++) {
+        const M = mats[b];
+        rowsX[b * 3] = M[0]; rowsX[b * 3 + 1] = M[2]; rowsX[b * 3 + 2] = M[4];
+        rowsY[b * 3] = M[1]; rowsY[b * 3 + 1] = M[3]; rowsY[b * 3 + 2] = M[5];
+      }
+      gl.uniform3fv(locX, rowsX);
+      gl.uniform3fv(locY, rowsY);
+    };
 
     gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.drawElements(gl.TRIANGLES, mesh.indices.length, gl.UNSIGNED_SHORT, 0);
-    return { usedRealUV };
+    gl.clearColor(0, 0, 0, 0);
+    const draw = () => {
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.drawElements(gl.TRIANGLES, mesh.indices.length, gl.UNSIGNED_SHORT, 0);
+    };
+
+    if (!animated) {
+      uploadBones([[1, 0, 0, 1, 0, 0]]);
+      draw();
+      return { usedRealUV, animated, skippedReason };
+    }
+
+    // Loop: tempo × fps × rate → posição em quadros, em loop sobre
+    // numFrames (o quadro extra do arquivo é o fim do loop, igual ao 0).
+    // Mesmo esquema de rafHolder dos outros efeitos animados desta cena,
+    // então é parado junto quando a cena é destruída.
+    const { anim, rate } = picked;
+    const rafHolder = { id: null };
+    this._foliageRafHolders.push(rafHolder);
+    const startTime = performance.now();
+    const loop = () => {
+      const t = (performance.now() - startTime) / 1000;
+      const framePos = (t * anim.fps * rate) % anim.numFrames;
+      uploadBones(puppetSkinMatrices(bones, invBind, anim, framePos));
+      draw();
+      rafHolder.id = requestAnimationFrame(loop);
+    };
+    loop();
+    return { usedRealUV, animated, skippedReason };
   }
 
   // Objeto "shape":"quad" sem image/text/particle — hoje o único conteúdo
@@ -9458,16 +11035,22 @@ class WeScene {
       return;
     }
 
-    const [w, h] = (obj.size || `${this.designWidth} ${this.designHeight}`).split(' ').map(Number);
-    const [ox, oy] = this._resolveOrigin(obj);
+    // Sem "size", o quad do WE é um QUADRADO de lado = altura da projeção
+    // (wallpaper64.exe FUN_14025fac0: size = (scene+0x88, scene+0x88), e
+    // scene+0x88 = orthogonalprojection.height no loader FUN_140186c90 —
+    // via REA, 2026-10-16). Antes caía no tamanho da tela inteira e sem
+    // escala/rotação: os feixes do Lucy viravam uma faixa branca no canto.
+    const [w, h] = (obj.size || `${this.designHeight} ${this.designHeight}`).split(' ').map(Number);
+    const xf = this._resolveTransform(obj);
+    const [ox, oy] = [xf.x, xf.y];
 
     const canvas = document.createElement('canvas');
     canvas.width = w;
     canvas.height = h;
-    canvas.style.cssText = `position:absolute; left:${ox - w / 2}px; top:${this._screenTop(oy, h)}px; width:${w}px; height:${h}px; pointer-events:none;`;
+    canvas.style.cssText = `position:absolute; left:${ox - w / 2}px; top:${this._screenTop(oy, h)}px; width:${w}px; height:${h}px; pointer-events:none;${this._transformCss(xf)}`;
     this.stage.appendChild(canvas);
 
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) {
       this._reportIssue(`objeto "${obj.name}" (lightshafts): WebGL indisponível nesta janela`);
       return;
@@ -9582,7 +11165,7 @@ class WeScene {
     canvas.width = w;
     canvas.height = h;
     canvas.style.cssText = img.style.cssText;
-    const gl = canvas.getContext('webgl');
+    const gl = canvas.getContext('webgl', WEBGL_CTX_OPTS);
     if (!gl) throw new Error('WebGL indisponível nesta janela');
 
     const effect = new FoliageSwayEffect(gl);
@@ -9653,8 +11236,25 @@ class WeScene {
 
   _loadFont(fontRelPath) {
     if (this.fontFamilies.has(fontRelPath)) return this.fontFamilies.get(fontRelPath);
+    // "systemfont_<nome>": fonte instalada no Windows, usada pelo nome.
+    const sys = /^systemfont_(.+)$/i.exec(fontRelPath);
+    if (sys) {
+      const sysFamily = sys[1];
+      this.fontFamilies.set(fontRelPath, sysFamily);
+      return sysFamily;
+    }
     const family = 'we-font-' + this.fontFamilies.size;
-    const fullPath = path.join(this.sceneDir, fontRelPath);
+    // Fontes de estoque do WE (ex: "fonts/Alcubierre.otf" da Spy×Family) não
+    // vêm empacotadas na cena — moram na instalação do WE, igual às texturas
+    // e materiais de estoque (ver _readSceneOrStockJson). Sem isso o texto
+    // caía na fonte padrão do navegador (serifada), achado 2026-10-13.
+    let fullPath = path.join(this.sceneDir, fontRelPath);
+    if (!fs.existsSync(fullPath)) {
+      const weAssets = getWEAssetsRoot();
+      const stockPath = weAssets ? path.join(weAssets, fontRelPath) : null;
+      if (stockPath && fs.existsSync(stockPath)) fullPath = stockPath;
+      else this._reportIssue(`fonte "${fontRelPath}" não encontrada (nem na cena, nem na instalação do WE) — usando a padrão`);
+    }
     const style = document.createElement('style');
     style.textContent = `@font-face { font-family: '${family}'; src: url('file:///${fullPath.replace(/\\/g, '/')}'); }`;
     document.head.appendChild(style);
@@ -9666,22 +11266,44 @@ class WeScene {
     const [w, h] = (obj.size || '400 200').split(' ').map(Number);
     const override = this.overrides[obj.name];
 
+    // Tamanho real do texto no WE (medido 2026-10-13 contra o WE original,
+    // renderizando a MESMA fonte de cada cena e comparando a altura da tinta
+    // com o print: fatores 4.18 / 4.25 / 3.97 em 3 textos de 2 cenas, média
+    // 4.13): pointsize é ponto tipográfico a 300 DPI → px = pt × 300/72,
+    // depois × scale do objeto. Antes era só pt × scale — relógios e
+    // títulos saíam ~4× menores. "size" também vem nessa unidade sem escala
+    // (ex: relógio de 618 de largura = "12:22" a 53pt×4.17 + padding), então
+    // a caixa também multiplica pelo scale.
+    const textXf = this._resolveTransform(obj);
+    const scaleX = textXf.sx || 1, scaleY = textXf.sy || scaleX;
+    const boxW = w * scaleX, boxH = h * scaleY;
     let ox, oy, fontSize;
     if (override) {
       [ox, oy] = override.origin.split(' ').map(Number);
       fontSize = override.fontSize;
     } else {
-      const [sx] = csvVec(obj.scale, [1, 1, 1]);
       [ox, oy] = this._resolveOrigin(obj);
-      fontSize = (obj.pointsize || 32) * (sx || 1);
+      // pointsize pode vir ligado a propriedade ({user, value}) — antes
+      // objeto × número dava NaN e o texto saía minúsculo (relógio do Lucy).
+      fontSize = csvNum(obj.pointsize, 32) * WE_TEXT_PX_PER_POINT * scaleX;
     }
 
+    // Cor/alfa do próprio objeto (ex: relógio da Monster é cinza-escuro
+    // 0.11, o do pavilhão é verde-acinzentado) — antes era sempre branco.
+    const [cr, cg, cb] = csvVec(obj.color, [1, 1, 1]);
+    const alpha = Math.max(0, Math.min(1, csvNum(obj.alpha, 1)));
+    const to255 = (c) => Math.round(Math.max(0, Math.min(1, c)) * 255);
+    const padRaw = obj.padding != null ? csvVec(obj.padding, [0, 0]) : [0, 0];
+    const padX = (Number(padRaw[0]) || 0) * scaleX;
+    const H_ALIGN = { left: 'flex-start', center: 'center', right: 'flex-end' };
+    const V_ALIGN = { top: 'flex-start', center: 'center', bottom: 'flex-end' };
     const family = obj.font ? this._loadFont(obj.font) : null;
-    const baseStyle = `position:absolute; left:${ox - w / 2}px; top:${this._screenTop(oy, h)}px; width:${w}px; height:${h}px;
-      display:flex; align-items:${obj.verticalalign === 'center' ? 'center' : 'flex-start'};
-      justify-content:${obj.horizontalalign === 'center' ? 'center' : 'flex-start'};
+    const baseStyle = `position:absolute; left:${ox - boxW / 2}px; top:${this._screenTop(oy, boxH)}px; width:${boxW}px; height:${boxH}px;
+      box-sizing:border-box; padding:0 ${padX}px;
+      display:flex; align-items:${V_ALIGN[obj.verticalalign] || 'flex-start'};
+      justify-content:${H_ALIGN[obj.horizontalalign] || 'flex-start'};
       font-family:${family ? `'${family}'` : 'sans-serif'}; font-size:${fontSize}px;
-      color:#fff; white-space:pre; text-align:${obj.horizontalalign || 'left'};`;
+      color:rgba(${to255(cr)},${to255(cg)},${to255(cb)},${alpha}); white-space:pre; text-align:${obj.horizontalalign || 'left'};`;
 
     // WE's text objects reference a real two-pass Gaussian blur post-effect
     // (see scene.json's "effects" block) that gives the text a soft glow so
@@ -9701,20 +11323,91 @@ class WeScene {
     }
 
     const el = document.createElement('div');
-    el.style.cssText = baseStyle + `text-shadow: 0 1px 3px rgba(0,0,0,0.7);`;
+    // Sombra só quando a cena pede (o WE não põe sombra por conta própria).
+    el.style.cssText = baseStyle + (obj.dropshadow ? `text-shadow: 0 1px 3px rgba(0,0,0,0.7);` : '');
     this.stage.appendChild(el);
 
-    let updateFn = null;
-    try {
-      if (obj.text.script) updateFn = compileWeTextScript(obj.text.script, obj.text.scriptproperties || {});
-    } catch (err) {
-      console.warn('[we-scene] failed to compile text script for', obj.name, err.message);
-    }
+    // "text" pode ser string pura (ex: título "SPY×FAMILY" da cena
+    // 3068181608 — sumia porque líamos obj.text.value) ou {value, script,
+    // scriptproperties}.
+    const textDef = typeof obj.text === 'string' ? { value: obj.text } : (obj.text || {});
+    let initialValue = textDef.value != null ? String(textDef.value) : '';
 
-    const initialValue = obj.text.value || '';
-    this.textEntries.push({ el, glowEl, objName: obj.name, w, h, fontSize, updateFn, value: initialValue });
+    // Scripts de texto rodam no MESMO motor dos outros objetos
+    // (compileWEScript: engine, thisLayer, Vec3, input…). Antes usavam um
+    // compilador mínimo só com createScriptProperties — scripts reais que
+    // leem engine.frametime/thisLayer (ex: contador de FPS da Spy×Family)
+    // quebravam em silêncio e o texto ficava parado no valor do editor.
+    let updateFn = null;
+    if (textDef.script) {
+      try {
+        const layer = new LayerHandle({ alpha, color: new Vec3(cr, cg, cb) });
+        const exports = compileWEScript(textDef.script, textDef.scriptproperties || {})(layer);
+        if (exports.init) {
+          const r = exports.init(initialValue);
+          if (r != null) initialValue = String(r);
+        }
+        if (exports.update) {
+          let lastColor = null;
+          updateFn = (prev) => {
+            const r = exports.update(prev);
+            // thisLayer.color mudado pelo script (ex: FPS fica vermelho < 20)
+            const c = layer.color;
+            if (c && typeof c.x === 'number') {
+              const key = `${c.x},${c.y},${c.z}`;
+              if (key !== lastColor) {
+                lastColor = key;
+                const n = (v) => to255(v > 1 ? v / 255 : v); // alguns scripts usam 0–255
+                el.style.color = `rgba(${n(c.x)},${n(c.y)},${n(c.z)},${alpha})`;
+              }
+            }
+            return r == null ? prev : String(r); // undefined = mantém o texto anterior
+          };
+        }
+      } catch (err) {
+        this._reportIssue(`texto "${obj.name}": script não compilou (${err.message}) — mostrando o valor fixo`);
+      }
+    }
+    const entry = { el, glowEl, objName: obj.name, w: boxW, h: boxH, fontSize, updateFn, value: initialValue,
+      family: family || 'sans-serif', inkCenter: obj.verticalalign === 'center' };
+    this.textEntries.push(entry);
     el.textContent = initialValue;
     if (glowEl) glowEl.textContent = initialValue;
+    if (entry.inkCenter) {
+      // A fonte é carregada de forma assíncrona; mede de novo quando chegar.
+      this._alignTextInk(entry);
+      if (document.fonts && document.fonts.load) {
+        document.fonts.load(`${fontSize}px '${entry.family}'`).then(() => this._alignTextInk(entry)).catch(() => {});
+      }
+    }
+  }
+
+  // verticalalign "center" no WE centraliza a TINTA das letras na origem do
+  // objeto (medido 2026-10-13 contra o WE original: relógio Spy, origem em
+  // y=237.8 e centro da tinta em 238.5; título, 240.3 × 239.5). O flex do
+  // CSS centraliza a CAIXA DA LINHA (que reserva espaço pra descendentes) —
+  // o texto ficava visivelmente acima. Mede a tinta real (measureText) e
+  // desloca o elemento pra compensar; refeito quando o texto muda (dígitos
+  // e letras têm alturas diferentes).
+  _alignTextInk(entry) {
+    if (!this._inkCtx) this._inkCtx = document.createElement('canvas').getContext('2d');
+    const ctx = this._inkCtx;
+    ctx.font = `${entry.fontSize}px '${entry.family}'`;
+    const text = entry.el.textContent || '';
+    if (!text.trim()) return;
+    const m = ctx.measureText(text);
+    if (!(m.fontBoundingBoxAscent > 0)) return;
+    const asc = m.fontBoundingBoxAscent, desc = m.fontBoundingBoxDescent;
+    // Com line-height = ascent+descent, a baseline fica a `asc` do topo da
+    // linha e a linha fica centrada na caixa: centro da tinta em relação ao
+    // centro da caixa = asc - (asc+desc)/2 + (descTinta - ascTinta)/2.
+    const offset = asc - (asc + desc) / 2 + (m.actualBoundingBoxDescent - m.actualBoundingBoxAscent) / 2;
+    const css = `${asc + desc}px`;
+    for (const el of [entry.el, entry.glowEl]) {
+      if (!el) continue;
+      el.style.lineHeight = css;
+      el.style.transform = `translateY(${-offset}px)`;
+    }
   }
 
   // Real per-object blur intensity, read from scene.json's own effect config
@@ -9828,9 +11521,12 @@ class WeScene {
     for (const entry of this.textEntries) {
       if (!entry.updateFn) continue;
       try {
-        entry.value = entry.updateFn(entry.value);
+        const next = entry.updateFn(entry.value);
+        if (next === entry.value && entry.el.textContent === next) continue; // sem mudança: não mexe no DOM
+        entry.value = next;
         entry.el.textContent = entry.value;
         if (entry.glowEl) entry.glowEl.textContent = entry.value;
+        if (entry.inkCenter) this._alignTextInk(entry);
       } catch (err) {
         console.warn('[we-scene] text update failed:', err.message);
       }
@@ -9841,7 +11537,112 @@ class WeScene {
     if (this.stage) this._applyScale();
   }
 
+  // Redecodifica um .tex DXT cujo .png veio do decodificador antigo.
+  _refreshTexPng(texPath) {
+    if (this._texRefreshed.has(texPath)) return;
+    this._texRefreshed.add(texPath);
+    try {
+      const buf = fs.readFileSync(texPath);
+      const png = decodeTexToPng(buf);
+      if (png) fs.writeFileSync(texPath + '.png', png);
+    } catch { /* .tex ausente ou ilegível — segue o fluxo normal */ }
+  }
+
+  // Passe em segundo plano: um .tex por vez, sem travar a animação.
+  _refreshStaleTexCache() {
+    this._texRefreshTimer = null;
+    const pending = [];
+    const walk = (dir) => {
+      let entries; try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.toLowerCase().endsWith('.tex') && !this._texRefreshed.has(p)) pending.push(p);
+      }
+    };
+    walk(path.join(this.sceneDir, 'materials'));
+    const step = () => {
+      this._texRefreshTimer = null;
+      if (!this._texCacheStale) return;
+      const next = pending.shift();
+      if (!next) {
+        try { markSceneCacheCurrent(this.sceneDir); } catch { /* tenta de novo na próxima carga */ }
+        this._texCacheStale = false;
+        return;
+      }
+      this._refreshTexPng(next);
+      this._texRefreshTimer = setTimeout(step, 50);
+    };
+    step();
+  }
+
+  // Objetos de som da cena ({sound:[arquivos], playbackmode, volume,
+  // startsilent, mintime/maxtime}): o WE toca junto com o wallpaper (ex.:
+  // chuva do 2998757800, música do Lucy). Não eram tocados.
+  //   loop   → toca a lista em sequência, repetindo
+  //   single → toca uma vez
+  //   random → um arquivo aleatório, depois espera mintime..maxtime segundos
+  // startsilent fica parado (só script/evento manda tocar). Volume do objeto
+  // × volume geral do app (setMasterVolume).
+  _setupSounds(scene) {
+    this._sounds = [];
+    if (this._masterVolume == null) this._masterVolume = 1;
+    for (const obj of scene.objects || []) {
+      if (!Array.isArray(obj.sound) || !obj.sound.length) continue;
+      if (!this._effectiveVisible(obj) || obj.startsilent) continue;
+      const files = obj.sound
+        .map((rel) => path.join(this.sceneDir, rel))
+        .filter((p) => fs.existsSync(p));
+      if (!files.length) { this._reportIssue(`som "${obj.name}": arquivo não encontrado no pacote`); continue; }
+      let base = obj.volume;
+      if (base && typeof base === 'object' && base.animation) {
+        const k = (base.animation.c0 || [])[0];
+        base = k ? Number(k.value) : csvNum(base, 1);
+      } else base = csvNum(base, 1);
+      const entry = { el: new Audio(), base: Math.max(0, Math.min(1, Number.isFinite(base) ? base : 1)), files, idx: 0, mode: obj.playbackmode || 'loop', timer: null, stopped: false, obj };
+      entry.el.preload = 'auto';
+      const playIdx = (i) => {
+        entry.idx = i;
+        entry.el.src = 'file:///' + encodeURI(files[i].split(path.sep).join('/')).replace(/#/g, '%23');
+        entry.el.volume = this._soundMuted ? 0 : entry.base * this._masterVolume;
+        if (!this._soundsPaused) entry.el.play().catch((e) => this._reportIssue(`som "${obj.name}" não tocou: ${e.message}`));
+      };
+      entry.el.addEventListener('playing', () => { if (!entry.reported) { entry.reported = true; this._reportIssue(`som "${obj.name}" tocando (${entry.mode}, volume ${entry.el.volume.toFixed(2)})`); } });
+      entry.el.addEventListener('ended', () => {
+        if (entry.stopped) return;
+        if (entry.mode === 'loop') playIdx((entry.idx + 1) % files.length);
+        else if (entry.mode === 'random') {
+          const min = Number(obj.mintime) || 0, max = Math.max(min, Number(obj.maxtime) || min);
+          entry.timer = setTimeout(() => playIdx(Math.floor(Math.random() * files.length)), (min + Math.random() * (max - min)) * 1000);
+        }
+      });
+      entry.el.loop = entry.mode === 'loop' && files.length === 1;
+      playIdx(entry.mode === 'random' ? Math.floor(Math.random() * files.length) : 0);
+      this._sounds.push(entry);
+    }
+  }
+
+  setMasterVolume(volume, muted) {
+    this._masterVolume = Math.max(0, Math.min(1, Number(volume)));
+    this._soundMuted = !!muted;
+    for (const s of this._sounds || []) s.el.volume = this._soundMuted ? 0 : s.base * this._masterVolume;
+  }
+
+  pauseSounds() {
+    this._soundsPaused = true;
+    for (const s of this._sounds || []) s.el.pause();
+  }
+
+  resumeSounds() {
+    this._soundsPaused = false;
+    for (const s of this._sounds || []) if (!s.stopped && s.el.src) s.el.play().catch(() => {});
+  }
+
   destroy() {
+    for (const s of this._sounds || []) { s.stopped = true; clearTimeout(s.timer); s.el.pause(); s.el.removeAttribute('src'); s.el.load(); }
+    this._sounds = [];
+    if (this._texRefreshTimer) { clearTimeout(this._texRefreshTimer); this._texRefreshTimer = null; }
+    this._texCacheStale = false;
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     if (this._particleRafId) { cancelAnimationFrame(this._particleRafId); this._particleRafId = null; }
     for (const holder of this._foliageRafHolders) { if (holder.id) cancelAnimationFrame(holder.id); }

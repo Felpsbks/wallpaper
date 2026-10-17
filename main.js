@@ -127,6 +127,14 @@ app.commandLine.appendSwitch('ignore-gpu-blocklist');
 // se é isso que está barrando ele de sequer iniciar. AINDA NÃO CONFIRMADO.
 app.commandLine.appendSwitch('disable-gpu-sandbox');
 
+// Cada efeito de cena WE (we-scene-render.js) usa o próprio contexto WebGL,
+// e o Chromium só mantém ~16 ativos por página — passando disso ele DESCARTA
+// os mais antigos e essas camadas somem da tela. Achado 2026-10-13 com uma
+// cena de teste de 32 efeitos (alguns sumiam; com 6, todos apareciam);
+// cenas reais passam fácil disso (ex: 3762437755 tem 109 imagens e 143
+// efeitos "shake"). O WE usa um contexto só; até termos isso, sobe o limite.
+app.commandLine.appendSwitch('max-active-webgl-contexts', '256');
+
 // Without this, Windows identifies the process by its exe's own identity
 // (still literally called "electron.exe" in dev/autostart — see
 // project_electron_binary memory) for taskbar grouping/jump lists/toast
@@ -404,6 +412,9 @@ function getOrCreateWallpaperWebView(win) {
       contextIsolation: true,
       webSecurity: false,
       backgroundThrottling: false,
+      // Define a API do Wallpaper Engine (wallpaperRegisterAudioListener)
+      // antes dos scripts da página — ver o comentário no próprio arquivo.
+      preload: path.join(__dirname, 'src', 'wallpaper-web-preload.js'),
     },
   });
   wallpaperWebViews.set(win.id, view);
@@ -1297,11 +1308,21 @@ function embedWallpaperBehindDesktop(win, displayId) {
   try {
     const { embedBehindDesktop } = require('./src/workerw');
     const hwnd = win.getNativeWindowHandle();
-    // getBounds() still reflects this window's intended screen position/size
-    // even after native reparenting (Electron's own model doesn't know we
-    // called SetParent behind its back) — pass it through so workerw.js can
-    // re-assert the correct position relative to WorkerW's coordinate space.
-    const ok = embedBehindDesktop(hwnd, win.getBounds());
+    // Retângulo REAL do monitor, em pixels físicos. Não usa win.getBounds():
+    // o Windows encolhe uma janela de nível superior pra caber na área útil
+    // (sem a barra de tarefas) na criação — achado 2026-10-13 comparando com
+    // o WE original: janela 1920x1032 numa tela 1920x1080, toda cena ficava
+    // 24px mais alta (o enquadramento cortava em cima) e os 48px de baixo
+    // ficavam sem nada. Depois do SetParent a janela é filha e o Windows não
+    // limita mais; workerw.js reposiciona/redimensiona com isto.
+    if (displayId == null) {
+      // Reencaixes do watchdog chamam sem displayId — acha pelo mapa.
+      for (const [id, w] of wallpaperWindows) { if (w === win) { displayId = id; break; } }
+    }
+    const display = screen.getAllDisplays().find((d) => d.id === displayId);
+    const dipRect = display ? display.bounds : win.getBounds();
+    const physRect = typeof screen.dipToScreenRect === 'function' ? screen.dipToScreenRect(null, dipRect) : dipRect;
+    const ok = embedBehindDesktop(hwnd, physRect);
     // Achado ao vivo (2026-07-25): essa função só logava via console.warn/
     // error, que não vai pro app-log.txt (só pro terminal, que ninguém vê
     // fora de dev) — uma falha silenciosa aqui (tela preta, sem papel de
@@ -2103,9 +2124,10 @@ ipcMain.on('web-wallpaper-show', (event, { src, options, properties }) => {
   const injectBridge = () => {
     if (YOUTUBE_WATCH_RE.test(src)) injectYoutubeWatchCleanup(view);
 
-    view.webContents.executeJavaScript(`
-      window.wallpaperRegisterAudioListener = function(cb) { window._weAudioCallback = cb; };
-    `).catch(() => {});
+    // wallpaperRegisterAudioListener NÃO é mais definida aqui: no 'dom-ready'
+    // os scripts da página já rodaram, e páginas que checam a API no
+    // carregamento quebravam (tela preta). Agora vem do preload
+    // (src/wallpaper-web-preload.js), antes de qualquer script.
 
     // Achado ao vivo (2026-07-21): o diagnóstico de áudio mostrou um <video>
     // existente mas com src="" e readyState=0 — nunca chegou a carregar nada.
@@ -2501,10 +2523,12 @@ function resolveWeSceneDir(wpDir, workshopId) {
   if (!fs.existsSync(pkgPath)) return { dir: null, reason: 'no_scene_data' };
 
   const cacheDir = path.join(app.getPath('userData'), 'we-scene-cache', workshopId);
-  if (fs.existsSync(path.join(cacheDir, 'scene.json'))) return { dir: cacheDir, reason: null };
+  const { unpackPkg, isSceneCacheCurrent } = require('./src/we-scene');
+  // Cache feito por um decodificador de textura mais antigo é refeito uma vez
+  // (ver TEX_DECODER_VERSION em src/we-scene.js).
+  if (fs.existsSync(path.join(cacheDir, 'scene.json')) && isSceneCacheCurrent(cacheDir)) return { dir: cacheDir, reason: null };
 
   try {
-    const { unpackPkg } = require('./src/we-scene');
     unpackPkg(pkgPath, cacheDir);
     if (fs.existsSync(path.join(cacheDir, 'scene.json'))) return { dir: cacheDir, reason: null };
     return { dir: null, reason: 'unpack_incomplete' };
@@ -2528,16 +2552,10 @@ function parseSingleWorkshopItem(wpDir, id) {
   const isPreset = !type && project.preset && typeof project.preset === 'object';
   if (!isPreset && type !== 'video' && type !== 'web' && type !== 'scene') return null;
 
-  // Builds pro usuário final (ver _isEndUserBuild) mostram vídeo E web do
-  // Steam Workshop — "web" é uma página HTML/JS normal, não depende do
-  // renderer reverso de "scene" (esse continua escondido: reimplementação
-  // parcial do formato proprietário da Wallpaper Engine, ainda cheia de
-  // recursos "não confirmados ao vivo", ver memória do projeto). No meu
-  // próprio dev (bin/electron.exe) continua tudo liberado, sem filtro.
-  // Preset é liberado nos dois casos: vira uma imagem estática normal (não
-  // depende de nenhum renderer proprietário nosso, é só um arquivo de
-  // imagem de verdade), mesmo nível de suporte que vídeo/web.
-  if (_isEndUserBuild && !isPreset && type !== 'video' && type !== 'web') return null;
+  // 2026-10-16: cenas ("scene") liberadas também no build de usuário final.
+  // Antes ficavam escondidas porque o renderer reverso ainda saía errado;
+  // depois da rodada de fidelidade (32 cenas comparadas lado a lado com o
+  // Wallpaper Engine real, zero falhas de shader) passam a valer pra todos.
 
   let preview = null;
   for (const n of [project.preview, 'preview.gif', 'preview.jpg', 'preview.png'].filter(Boolean)) {
@@ -2545,28 +2563,66 @@ function parseSingleWorkshopItem(wpDir, id) {
     if (fs.existsSync(pp)) { preview = pp; break; }
   }
 
-  // Sem renderer de overlay pra "preset" ainda (relógio/visualizador/etc
-  // configuráveis) — mesma estratégia de fallback graciosa que "scene" já
-  // usa: mostra a preview como imagem estática em vez de recusar o item
-  // inteiro. Prefere o background_image real do preset (a imagem de fundo
-  // de verdade) à preview (que é só uma miniatura), quando existir.
   if (isPreset) {
-    // Achado ao vivo 2026-07-24: um "Preset" não é um wallpaper web
-    // independente — ele referencia (via "dependency") outro item da
-    // Workshop que é o motor Web de verdade. TENTAMOS renderizar esse motor
-    // de verdade (index.html + applyUserProperties com os valores do
-    // preset) — corrigiu um bug real de URL duplicada (file:///file:///),
-    // mas mesmo depois disso a tela continuou preta na aplicação real. Esse
-    // motor específico desenha tudo via Canvas/createjs (Arthesian Library +
-    // módulos de visualizer/clock/grid próprios), não HTML/CSS simples como
-    // a maioria dos wallpapers "web" — e sem conseguir ver o console de
-    // erros de verdade desta sessão (sem GUI, ver
-    // project_gui_testing_limitation), não dava pra depurar mais fundo às
-    // cegas. Decisão explícita do usuário: manter só o fallback confiável de
-    // imagem estática (igual "scene" não suportada) em vez de continuar
-    // tentando o motor completo. Prefere o background_image real do preset
-    // à preview (que é só uma miniatura), quando existir.
+    // Um "Preset" não é um wallpaper independente: referencia (via
+    // "dependency") outro item da Workshop que é o motor Web de verdade
+    // (index.html + schema em general.properties) e só guarda os VALORES
+    // customizados (imagem de fundo, relógio, etc.) em "preset". O motor fica
+    // numa pasta IRMÃ (mesmo content/431960/, outro workshopId).
+    //
+    // Histórico: em 2026-07-24 isso rodava o motor de verdade mas ficava
+    // preto, e foi rebaixado pra imagem estática. Causa real achada em
+    // 2026-10-13 com console de verdade (Playwright): a API
+    // wallpaperRegisterAudioListener só era definida no 'dom-ready', depois
+    // dos scripts do motor — ele caía num gerador de áudio quebrado e o
+    // js/main.js inteiro morria. Corrigido com o preload
+    // (src/wallpaper-web-preload.js); com isso o preset 3343173896 aparece
+    // completo. Sem o motor baixado, continua o fallback de imagem estática.
     const depId = project.dependency ? String(project.dependency).match(/\d+/)?.[0] : null;
+    const depDir = depId ? path.join(path.dirname(wpDir), depId) : null;
+    const depProjectPath = depDir ? path.join(depDir, 'project.json') : null;
+    if (depProjectPath && fs.existsSync(depProjectPath)) {
+      let depProject = null;
+      try { depProject = JSON.parse(fs.readFileSync(depProjectPath, 'utf-8')); } catch { depProject = null; }
+      const depType = depProject ? (depProject.type || '').toLowerCase() : '';
+      const depFile = depProject && depProject.file ? path.join(depDir, depProject.file) : null;
+      if (depType === 'web' && depFile && fs.existsSync(depFile)) {
+        const depProperties = depProject.general && depProject.general.properties ? depProject.general.properties : null;
+        // Propriedades tipo "file" (ex: background_image) são relativas à
+        // pasta do PRESET (onde mora a imagem escolhida pelo autor), não à do
+        // motor. E vão como caminho absoluto PURO, sem "file:///": o próprio
+        // motor monta a URL ("file:///" + valor) — mandar com prefixo dava
+        // "file:///file:///..." (bug real de 2026-07-24).
+        const options = {};
+        if (depProperties) {
+          for (const [key, val] of Object.entries(project.preset || {})) {
+            if (val === null || val === undefined) continue;
+            const schema = depProperties[key];
+            if (!schema) continue; // chave do preset que o motor não declara
+            if (schema.type === 'file' && typeof val === 'string' && val) {
+              const assetPath = path.join(wpDir, val);
+              options[key] = fs.existsSync(assetPath) ? assetPath.replace(/\\/g, '/') : val;
+            } else {
+              options[key] = val;
+            }
+          }
+        }
+        return {
+          workshopId: id,
+          name: project.title || `Workshop ${id}`,
+          type: 'url',
+          src: 'file:///' + depFile.replace(/\\/g, '/'),
+          preview,
+          tags: Array.isArray(project.tags) ? project.tags : [],
+          properties: depProperties,
+          options,
+          presetOf: depId,
+        };
+      }
+    }
+
+    // Fallback: motor não baixado/não reconhecido — imagem estática, com o
+    // background_image real do preset preferido à preview (miniatura).
     const bgRel = project.preset.background_image;
     let src = preview;
     if (typeof bgRel === 'string') {
@@ -2582,6 +2638,7 @@ function parseSingleWorkshopItem(wpDir, id) {
       preview: preview || src,
       tags: Array.isArray(project.tags) ? project.tags : [],
       presetOf: depId,
+      presetFallbackReason: depId ? 'dependency_not_downloaded' : 'no_dependency',
     };
   }
 
@@ -2804,7 +2861,7 @@ ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedU
 // não tem "novidade" pra quem tá abrindo o app pela primeira vez.
 const WHATS_NEW = {
   version: APP_VERSION,
-  text: 'Corrigido: uma queda de energia no meio de uma gravação podia corromper o arquivo de configuração e apagar a licença ativada, forçando reativação que falhava com "chave em uso em outro PC". Gravação agora é atômica (nunca mais trava com o arquivo pela metade) e um arquivo corrompido vira backup em vez de ser destruído.',
+  text: 'Novidade grande: as Cenas da Wallpaper Engine agora estão liberadas! O motor de cenas foi refeito para ficar muito mais fiel ao original: personagens animados (puppets), texturas comprimidas e de vídeo, camadas de composição, efeitos com máscara usando os shaders reais, partículas (chuva, neve, fogo), animações e sons da cena. Agora você pode baixar e usar cenas da Workshop, não só vídeos.',
 };
 ipcMain.handle('get-whats-new', () => {
   if (store.get('lastSeenWhatsNewVersion') === WHATS_NEW.version) return null;
@@ -3113,9 +3170,6 @@ ipcMain.handle('get-workshop-details', async (_, ids) => {
     const items = (details.response?.publishedfiledetails || []).map(d => {
       const tags = (d.tags || []).map(t => t.tag);
       const waType = inferWaType(tags);
-      // Build pro usuário final: 'scene' some completamente daqui também, não
-      // só do scan local (ver parseSingleWorkshopItem) — mesmo critério.
-      if (_isEndUserBuild && waType === 'scene') return null;
       return {
         workshopId: d.publishedfileid,
         title: d.title || 'Sem título',
@@ -3173,9 +3227,6 @@ async function fetchWorkshopPage({ sort, search, page, tag }) {
   const items = (details.response?.publishedfiledetails || []).map(d => {
     const tags = (d.tags || []).map(t => t.tag);
     const waType = inferWaType(tags);
-    // Build pro usuário final: não mostra 'scene' nem na busca (mesmo
-    // critério do scan local em parseSingleWorkshopItem) — só video/web.
-    if (_isEndUserBuild && waType === 'scene') return null;
     return {
       workshopId: d.publishedfileid,
       title: d.title || 'Sem título',
@@ -3402,8 +3453,8 @@ function describeUnrecognizedDownload(contentDir) {
   }
   if (!project) return 'o formato não foi reconhecido (sem project.json legível).';
   const type = (project.type || '').toLowerCase();
-  if (_isEndUserBuild && type && type !== 'video' && type !== 'web') {
-    return `é do tipo "${type}" — esta versão só aceita vídeo e web (cenas não são suportadas no app final).`;
+  if (type && type !== 'video' && type !== 'web' && type !== 'scene') {
+    return `é do tipo "${type}" — tipo ainda não suportado pelo app.`;
   }
   return `o formato não foi reconhecido (tipo "${type || 'desconhecido'}").`;
 }

@@ -398,6 +398,8 @@ function showWeScene(wallpaper) {
 
   const label = wallpaper.name || wallpaper.workshopId;
   currentWeScene = new WeScene(weSceneEl, wallpaper.weSceneDir, wallpaper.weSceneOverrides, propValues, label);
+  // Sons da cena seguem o volume geral do app (mesmo controle dos vídeos).
+  currentWeScene.setMasterVolume(savedVolume, savedVolume <= 0);
   try {
     currentWeScene.start();
   } catch (err) {
@@ -460,14 +462,14 @@ function setWallpaper(wallpaper) {
 }
 
 hostBridge.on('set-wallpaper',    (w) => setWallpaper(w));
-hostBridge.on('stop',             ()  => { hideAll(); });
+hostBridge.on('stop',             ()  => { hideAll(); if (currentWeScene) currentWeScene.pauseSounds(); });
 hostBridge.on('unstop',           ()  => { if (_activeWallpaper) setWallpaper(_activeWallpaper); });
-hostBridge.on('pause',            ()  => { videoEl.pause(); });
-hostBridge.on('resume',           ()  => { videoEl.play().catch(() => {}); });
-hostBridge.on('mute',             ()  => { videoEl.muted = true; });
-hostBridge.on('unmute',           (v) => { savedVolume = v / 100; videoEl.volume = savedVolume; videoEl.muted = savedVolume <= 0; });
+hostBridge.on('pause',            ()  => { videoEl.pause(); if (currentWeScene) currentWeScene.pauseSounds(); });
+hostBridge.on('resume',           ()  => { videoEl.play().catch(() => {}); if (currentWeScene) currentWeScene.resumeSounds(); });
+hostBridge.on('mute',             ()  => { videoEl.muted = true; if (currentWeScene) currentWeScene.setMasterVolume(savedVolume, true); });
+hostBridge.on('unmute',           (v) => { savedVolume = v / 100; videoEl.volume = savedVolume; videoEl.muted = savedVolume <= 0; if (currentWeScene) currentWeScene.setMasterVolume(savedVolume, savedVolume <= 0); });
 hostBridge.on('update-settings',  (s) => {
-  if (s.volume !== undefined) { savedVolume = s.volume / 100; videoEl.volume = savedVolume; videoEl.muted = savedVolume <= 0; }
+  if (s.volume !== undefined) { savedVolume = s.volume / 100; videoEl.volume = savedVolume; videoEl.muted = savedVolume <= 0; if (currentWeScene) currentWeScene.setMasterVolume(savedVolume, savedVolume <= 0); }
   if (s.audioReactive !== undefined) {
     if (s.audioReactive && !audioContext) initAudioVisualizer();
     else if (!s.audioReactive && audioContext) {

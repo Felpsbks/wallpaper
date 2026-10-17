@@ -2,7 +2,7 @@ const koffi = require('koffi');
 
 let user32 = null;
 let shell32 = null;
-let FindWindowA, FindWindowExA, SendMessageTimeoutA, SetParent, SetWindowPos, EnumWindows, EnumWindowsCb, SystemParametersInfoW, GetWindowLongA, SetWindowLongA, GetParent, IsIconic, IsWindowVisible, ShowWindow, PostMessageA;
+let FindWindowA, FindWindowExA, SendMessageTimeoutA, SetParent, SetWindowPos, EnumWindows, EnumWindowsCb, SystemParametersInfoW, GetWindowLongA, SetWindowLongA, GetParent, GetWindowRect, IsIconic, IsWindowVisible, ShowWindow, PostMessageA;
 let SHAppBarMessage;
 
 // AppBar constants
@@ -85,6 +85,7 @@ function loadUser32() {
     GetWindowLongA = user32.func('int GetWindowLongA(void* hWnd, int nIndex)');
     SetWindowLongA = user32.func('int SetWindowLongA(void* hWnd, int nIndex, int dwNewLong)');
     GetParent = user32.func('void* GetParent(void* hWnd)');
+    GetWindowRect = user32.func('bool GetWindowRect(void* hWnd, _Out_ RECT* lpRect)');
     IsIconic = user32.func('bool IsIconic(void* hWnd)');
     IsWindowVisible = user32.func('bool IsWindowVisible(void* hWnd)');
     ShowWindow = user32.func('bool ShowWindow(void* hWnd, int nCmdShow)');
@@ -203,6 +204,23 @@ function embedBehindDesktop(hwndBuffer, bounds) {
       ? _lastEmbeddedWallpaperHwnd
       : null;
 
+    // Posição/tamanho do monitor em coordenadas do PAI (o Progman/WorkerW
+    // cobre a tela virtual inteira, que começa em coordenada negativa quando
+    // há monitor à esquerda/acima do principal). `bounds` vem em pixels
+    // físicos do main.js. Sem isso a janela ficava do tamanho que o Windows
+    // deu na criação — encolhida pra área útil (sem a barra de tarefas),
+    // achado 2026-10-13: 1920x1032 numa tela 1920x1080.
+    const place = (parent, insertAfter) => {
+      if (bounds && bounds.width > 0 && bounds.height > 0) {
+        const pr = {};
+        if (GetWindowRect(parent, pr)) {
+          SetWindowPos(hwnd, insertAfter, bounds.x - pr.left, bounds.y - pr.top, bounds.width, bounds.height, SWP_NOACTIVATE);
+          return;
+        }
+      }
+      SetWindowPos(hwnd, insertAfter, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    };
+
     if (isRaisedDesktop) {
       // Lively applies WS_EX_LAYERED here too, but Lively's renderer isn't
       // Chromium — Electron's `transparent: true` window already gets its
@@ -212,15 +230,14 @@ function embedBehindDesktop(hwndBuffer, bounds) {
       // heartbeat ping — a still-updating clock just never shows on screen
       // — so this was specifically a paint/composite bug, not a hang).
       SetParent(hwnd, progman);
-      SetWindowPos(hwnd, chainTarget || shellDllDefView, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+      place(progman, chainTarget || shellDllDefView);
     } else {
       if (!workerW) {
         console.error('[workerw] Target WorkerW not found');
         return false;
       }
       SetParent(hwnd, workerW);
-      const insertAfter = chainTarget || shellDllDefView || HWND_BOTTOM;
-      SetWindowPos(hwnd, insertAfter, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+      place(workerW, chainTarget || shellDllDefView || HWND_BOTTOM);
     }
 
     _lastEmbeddedWallpaperHwnd = hwnd;
