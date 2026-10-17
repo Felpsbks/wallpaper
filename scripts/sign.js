@@ -54,11 +54,34 @@ Write-Host "[sign] certificado criado e importado em Raizes Confiaveis (CurrentU
 // app.asar) nesta mesma sessão — algo (bem provável antivírus) segurando
 // uma leitura logo após uma escrita grande. Retry com pausa curta em vez
 // de desistir na primeira falha.
+// Causa real das falhas "%1 não é um aplicativo Win32 válido" (0x800700C1),
+// achada 2026-10-16: o electron.exe chega com a entrada de diretório
+// "Security" (tabela de certificados) apontando para ALÉM do fim do arquivo
+// — resto da assinatura original do Electron, que foi cortada. O Windows
+// recusa assinar um PE assim. Não era antivírus nem corrida (por isso o
+// retry nunca adiantava). Zerar a entrada quebrada antes de assinar resolve.
+function clearStaleCertTable(exePath) {
+  const b = fs.readFileSync(exePath);
+  if (b.length < 0x40 || b.toString('latin1', 0, 2) !== 'MZ') return false;
+  const pe = b.readUInt32LE(0x3c);
+  if (b.toString('latin1', pe, pe + 4) !== 'PE\0\0') return false;
+  const opt = pe + 24;
+  const ddir = opt + (b.readUInt16LE(opt) === 0x20b ? 112 : 96);
+  const certOff = b.readUInt32LE(ddir + 32), certSize = b.readUInt32LE(ddir + 36);
+  if (!certOff || certOff + certSize <= b.length) return false;
+  b.writeUInt32LE(0, ddir + 32);
+  b.writeUInt32LE(0, ddir + 36);
+  fs.writeFileSync(exePath, b);
+  console.log(`[sign] tabela de certificado antiga (fora do arquivo) removida: ${path.basename(exePath)}`);
+  return true;
+}
+
 function signExe(exePath) {
   if (!fs.existsSync(exePath)) {
     console.warn(`[sign] arquivo não encontrado, pulando: ${exePath}`);
     return false;
   }
+  try { clearStaleCertTable(exePath); } catch (err) { console.warn(`[sign] não deu pra checar o cabeçalho PE: ${err.message}`); }
   try {
     ensureCert();
   } catch (err) {

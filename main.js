@@ -1490,6 +1490,11 @@ async function runFirstRunInstall() {
 
   await new Promise((resolve) => win.webContents.once('did-finish-load', resolve));
 
+  // Sem isso o fs do Electron trata resources/app.asar como PASTA: a cópia
+  // entrava no pacote e falhava com ENOENT (achado 2026-10-16 abrindo o exe
+  // de dentro da pasta temporária — o que acontece ao rodar direto do zip).
+  const prevNoAsar = process.noAsar;
+  process.noAsar = true;
   try {
     setProgress(0.05, 'Preparando...', 'Isso leva só alguns segundos');
 
@@ -1533,6 +1538,7 @@ async function runFirstRunInstall() {
     log('ERRO: ' + err.message);
     appLog.err('Falha na instalação: ' + err.message);
   } finally {
+    process.noAsar = prevNoAsar;
     setTimeout(() => app.quit(), 800);
   }
 }
