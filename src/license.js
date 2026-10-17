@@ -8,10 +8,29 @@ const LICENSE_SERVER_URL = process.env.LICENSE_SERVER_URL || 'https://wallpapere
 const RECHECK_INTERVAL_MS = 3 * 24 * 60 * 60 * 1000; // re-hit the server at most every 3 days
 const MAX_OFFLINE_GRACE_MS = 30 * 24 * 60 * 60 * 1000; // allow up to 30 days without a successful server contact
 
+// ID estável do PC: hash do MachineGuid do Windows (não muda enquanto o
+// Windows não for reinstalado). Antes era um UUID aleatório guardado só no
+// config.json — se o arquivo sumia/resetava, o app gerava outro ID e a
+// própria chave do usuário passava a ser recusada como "em uso em outro
+// computador" (caso real, 2026-10-16). IDs já salvos continuam valendo, pra
+// não quebrar vínculos existentes; o derivado só entra quando falta um.
+function stableMachineId() {
+  if (process.platform !== 'win32') return null;
+  try {
+    const out = require('child_process').execFileSync('reg', ['query', 'HKLM\\SOFTWARE\\Microsoft\\Cryptography', '/v', 'MachineGuid'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+    const m = /MachineGuid\s+REG_SZ\s+([0-9a-fA-F-]{36})/.exec(out);
+    if (!m) return null;
+    const h = crypto.createHash('sha256').update('engine-wallpaper:' + m[1].toLowerCase()).digest('hex');
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+  } catch {
+    return null;
+  }
+}
+
 function getMachineId(store) {
   let id = store.get('machineId');
   if (!id) {
-    id = crypto.randomUUID();
+    id = stableMachineId() || crypto.randomUUID();
     store.set('machineId', id);
   }
   return id;

@@ -1029,7 +1029,7 @@ ipcRenderer.on('displays-changed', (_e, displays) => {
   }
 });
 
-// Atalho global Ctrl+Alt+W (ou o item no menu da bandeja — ver
+// Atalho global Alt+F12 (ou o item no menu da bandeja — ver
 // toggleWallpaperInteractive em main.js) liga/desliga o wallpaper aceitar
 // cliques (pra dar pra clicar em algo tipo um botão de configuração dentro
 // de um wallpaper "web") — esse toast é só feedback visual de qual dos
@@ -1044,7 +1044,7 @@ ipcRenderer.on('wallpaper-interactive-changed', (_e, interactive) => {
   }
   toast.style.background = interactive ? '#6a32d6' : '#333';
   toast.textContent = interactive
-    ? '🖱️ Wallpaper interativo LIGADO — dá pra clicar nele (Ctrl+Alt+W ou menu da bandeja pra desligar)'
+    ? '🖱️ Wallpaper interativo LIGADO — dá pra clicar nele (Alt+F12 ou menu da bandeja pra desligar)'
     : '🖱️ Wallpaper interativo desligado';
   toast.style.opacity = '1';
   clearTimeout(toast._hideTimer);

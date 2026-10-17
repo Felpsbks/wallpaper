@@ -389,7 +389,7 @@ function toggleWallpaperInteractive() {
   }
 
   appLog(_wallpaperInteractive
-    ? 'Modo interativo do wallpaper ATIVADO (Ctrl+Alt+W ou menu da bandeja pra desligar) — o wallpaper cobre a tela por cima de outras janelas até desligar.'
+    ? 'Modo interativo do wallpaper ATIVADO (Alt+F12 ou menu da bandeja pra desligar) — o wallpaper cobre a tela por cima de outras janelas até desligar.'
     : 'Modo interativo do wallpaper desligado — voltou ao normal (atrás do desktop, click-through).');
   if (controlWin && !controlWin.isDestroyed()) controlWin.webContents.send('wallpaper-interactive-changed', _wallpaperInteractive);
 }
@@ -1356,7 +1356,7 @@ function embedWallpaperBehindDesktop(win, displayId) {
 function startWorkerWWatchdog() {
   const { isEmbeddedCorrectly } = require('./src/workerw');
   setInterval(() => {
-    // Modo interativo do wallpaper (Ctrl+Alt+W / menu da bandeja) desencaixa a janela de
+    // Modo interativo do wallpaper (Alt+F12 / menu da bandeja) desencaixa a janela de
     // propósito pra ela poder receber clique — sem essa pausa, o watchdog
     // reencaixava sozinho ~1s depois e desfazia isso a cada tick.
     if (_watchdogPaused) return;
@@ -2861,7 +2861,7 @@ ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedU
 // não tem "novidade" pra quem tá abrindo o app pela primeira vez.
 const WHATS_NEW = {
   version: APP_VERSION,
-  text: 'Novidade grande: as Cenas da Wallpaper Engine agora estão liberadas! O motor de cenas foi refeito para ficar muito mais fiel ao original: personagens animados (puppets), texturas comprimidas e de vídeo, camadas de composição, efeitos com máscara usando os shaders reais, partículas (chuva, neve, fogo), animações e sons da cena. Agora você pode baixar e usar cenas da Workshop, não só vídeos.',
+  text: 'Ajustes: o atalho do modo interativo do wallpaper mudou para Alt+F12 (o antigo Ctrl+Alt+W roubava o "?" do teclado brasileiro, que é AltGr+W). E a licença agora fica presa ao seu PC de verdade: se o arquivo de configuração for apagado, a chave não é mais recusada como "em uso em outro computador". Continua valendo a novidade da versão anterior: Cenas da Wallpaper Engine liberadas.',
 };
 ipcMain.handle('get-whats-new', () => {
   if (store.get('lastSeenWhatsNewVersion') === WHATS_NEW.version) return null;
@@ -4023,12 +4023,13 @@ app.whenReady().then(async () => {
     // Ctrl+Shift+I é o atalho de DevTools em praticamente todo app baseado
     // em Chromium/Electron — bem provável de já estar pego por outro app
     // rodando (register() falha em silêncio, devolve false, não lança erro).
-    // Ctrl+Alt+W é mais fácil de lembrar (W de "Wallpaper") e bem menos
-    // disputado. O item no menu da bandeja é o caminho garantido de
-    // qualquer forma, não depende de nenhum atalho funcionar.
+    // Alt+F12. Era Alt+F12, mas no teclado ABNT2 AltGr = Ctrl+Alt e
+    // AltGr+W digita "?" — o atalho global engolia o ponto de interrogação
+    // (reclamação real de usuário, 2026-10-16). O item no menu da bandeja é
+    // o caminho garantido de qualquer forma.
     try {
-      const ok = globalShortcut.register('CommandOrControl+Alt+W', toggleWallpaperInteractive);
-      if (!ok) appLog.warn('Atalho Ctrl+Alt+W do modo interativo do wallpaper não registrou (provavelmente já em uso por outro programa) — use o menu da bandeja em vez disso.');
+      const ok = globalShortcut.register('Alt+F12', toggleWallpaperInteractive);
+      if (!ok) appLog.warn('Atalho Alt+F12 do modo interativo do wallpaper não registrou (provavelmente já em uso por outro programa) — use o menu da bandeja em vez disso.');
     } catch (err) {
       appLog.warn('Não consegui registrar o atalho de modo interativo do wallpaper: ' + err.message);
     }
