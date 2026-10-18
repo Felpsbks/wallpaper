@@ -2867,7 +2867,7 @@ ipcMain.handle('dismiss-update-notice', (_e, version) => { store.set('dismissedU
 // não tem "novidade" pra quem tá abrindo o app pela primeira vez.
 const WHATS_NEW = {
   version: APP_VERSION,
-  text: 'Ajustes: o atalho do modo interativo do wallpaper mudou para Alt+F12 (o antigo Ctrl+Alt+W roubava o "?" do teclado brasileiro, que é AltGr+W). E a licença agora fica presa ao seu PC de verdade: se o arquivo de configuração for apagado, a chave não é mais recusada como "em uso em outro computador". Continua valendo a novidade da versão anterior: Cenas da Wallpaper Engine liberadas.',
+  text: 'A busca da Workshop agora mostra as Cenas também: antes ela só procurava vídeos e páginas web, então pesquisas como "perona" mostravam uma fração do que existe. E tem uma nova categoria "Cenas" no Descobrir. Lembrando: o atalho do modo interativo agora é Alt+F12.',
 };
 ipcMain.handle('get-whats-new', () => {
   if (store.get('lastSeenWhatsNewVersion') === WHATS_NEW.version) return null;
@@ -3280,24 +3280,26 @@ ipcMain.handle('browse-workshop', async (_, { sort, search, page, tag }) => {
     // vídeos numa página de 30 (o resto era 'scene', descartado); buscar
     // só com tag=Video pro MESMO texto traz uma página CHEIA de 30 vídeos —
     // ou seja, o mix genérico escondia a maior parte do conteúdo real.
+    // 2026-10-17: "Scene" entra também — com as cenas liberadas, deixar ela
+    // de fora escondia a maior parte do conteúdo (busca "perona": Steam tem
+    // 14 vídeos, 4 web e 30+ cenas por página; o app só mostrava 18).
     if (!tag) {
-      const [videoRes, webRes] = await Promise.all([
-        fetchWorkshopPage({ sort, search, page, tag: 'Video' }),
-        fetchWorkshopPage({ sort, search, page, tag: 'Web' }),
-      ]);
+      const results = await Promise.all(['Video', 'Scene', 'Web'].map((t) => fetchWorkshopPage({ sort, search, page, tag: t })));
       const merged = [];
       const seen = new Set();
-      const a = videoRes.items, b = webRes.items;
-      const max = Math.max(a.length, b.length);
+      const lists = results.map((r) => r.items);
+      const max = Math.max(...lists.map((l) => l.length));
       for (let i = 0; i < max; i++) {
-        if (a[i] && !seen.has(a[i].workshopId)) { merged.push(a[i]); seen.add(a[i].workshopId); }
-        if (b[i] && !seen.has(b[i].workshopId)) { merged.push(b[i]); seen.add(b[i].workshopId); }
+        for (const l of lists) {
+          if (l[i] && !seen.has(l[i].workshopId)) { merged.push(l[i]); seen.add(l[i].workshopId); }
+        }
       }
+      const [videoRes, sceneRes, webRes] = results;
       // "Tem mais?" precisa olhar pro tamanho da página CRUA da Steam (antes
       // do nosso filtro de compatibilidade), não pro total já filtrado —
       // senão uma página com muita 'scene' filtrada faz a paginação parar
       // cedo demais mesmo havendo mais vídeo/web nas páginas seguintes.
-      const hasMore = videoRes.rawCount >= STEAM_FULL_PAGE_THRESHOLD || webRes.rawCount >= STEAM_FULL_PAGE_THRESHOLD;
+      const hasMore = [videoRes, sceneRes, webRes].some((r) => r.rawCount >= STEAM_FULL_PAGE_THRESHOLD);
       return { items: merged, total: merged.length, hasMore };
     }
     const res = await fetchWorkshopPage({ sort, search, page, tag });
